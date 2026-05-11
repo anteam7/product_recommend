@@ -1,0 +1,221 @@
+import Link from 'next/link'
+import { createAdminClient } from '@/lib/auth/admin-supabase'
+
+export const dynamic = 'force-dynamic'
+
+interface RunRow {
+  source: string
+  status: string
+  fetched_count: number
+  inserted_count: number
+  duration_ms: number | null
+  error_message: string | null
+  started_at: string
+  triggered_by: string | null
+}
+
+interface HeartbeatRow {
+  id: string
+  heartbeat_at: string
+  hostname: string | null
+  last_collector: string | null
+  last_run_status: string | null
+  notes: string | null
+}
+
+const COLLECTOR_GROUPS: { label: string; sources: string[] }[] = [
+  {
+    label: 'PR-2 supplier+검색',
+    sources: ['naver_shopping_hot', 'aliex_best', 'musinsa_best', 'domeggook_main'],
+  },
+  {
+    label: 'PR-2.5 수요 시그널 (뉴스·커뮤니티·홈쇼핑)',
+    sources: [
+      'naver_news',
+      'daum_news',
+      'naver_tvtime',
+      'dcinside_realtime',
+      'ppomppu_main',
+      'natepan_ranking',
+      '82cook_talk',
+    ],
+  },
+  {
+    label: 'PR-3 분석',
+    sources: ['recompute_scores'],
+  },
+  {
+    label: 'PR-4.5 LLM 분류',
+    sources: ['classify_trends_llm'],
+  },
+  {
+    label: '인프라',
+    sources: ['heartbeat'],
+  },
+]
+
+async function fetchData() {
+  const sb = createAdminClient()
+  const [hb, runs] = await Promise.all([
+    sb.from('jimscanner_trends_heartbeat').select('*').eq('id', 'main').single(),
+    sb
+      .from('jimscanner_trends_runs')
+      .select('source, status, fetched_count, inserted_count, duration_ms, error_message, started_at, triggered_by')
+      .order('started_at', { ascending: false })
+      .limit(200),
+  ])
+
+  // source 별 가장 최근 run
+  const latestBySource = new Map<string, RunRow>()
+  for (const r of (runs.data ?? []) as RunRow[]) {
+    if (!latestBySource.has(r.source)) latestBySource.set(r.source, r)
+  }
+
+  return {
+    heartbeat: hb.data as HeartbeatRow | null,
+    latestBySource,
+    recentRuns: ((runs.data ?? []) as RunRow[]).slice(0, 50),
+  }
+}
+
+function ageMinutes(iso: string): number {
+  return Math.round((Date.now() - new Date(iso).getTime()) / 60000)
+}
+
+function formatAge(min: number): string {
+  if (min < 60) return `${min}m 전`
+  const h = Math.floor(min / 60)
+  if (h < 24) return `${h}h 전`
+  return `${Math.floor(h / 24)}d 전`
+}
+
+export default async function SourcesPage() {
+  const { heartbeat, latestBySource, recentRuns } = await fetchData()
+
+  const heartbeatAge = heartbeat ? ageMinutes(heartbeat.heartbeat_at) : null
+  const hbStatus = heartbeatAge == null ? 'unknown' : heartbeatAge < 70 ? 'ok' : heartbeatAge < 24 * 60 ? 'warn' : 'down'
+
+  return (
+    <div className="space-y-6 p-6">
+      <header className="flex items-baseline justify-between">
+        <div>
+          <h1 className="text-2xl font-bold">소스 헬스</h1>
+          <p className="text-sm text-gray-500 mt-1">
+            cron 자동수집 · 매시간 heartbeat + KST 03:30~06:00 collector 12종
+          </p>
+        </div>
+        <Link href="/admin/trend-radar" className="text-sm text-gray-700 hover:text-black underline">
+          ← 대시보드
+        </Link>
+      </header>
+
+      {/* heartbeat 카드 */}
+      <section
+        className={`rounded border p-4 ${
+          hbStatus === 'ok'
+            ? 'border-green-200 bg-green-50'
+            : hbStatus === 'warn'
+              ? 'border-yellow-200 bg-yellow-50'
+              : 'border-red-200 bg-red-50'
+        }`}
+      >
+        <div className="flex justify-between items-start">
+          <div>
+            <div className="text-sm font-semibold">
+              {hbStatus === 'ok' ? '✓ collector 살아있음' : hbStatus === 'warn' ? '⚠️ heartbeat 늦음' : '✗ collector 다운'}
+            </div>
+            <div className="text-xs text-gray-600 mt-1">
+              host: {heartbeat?.hostname ?? '—'} · last: {heartbeat?.heartbeat_at ?? '—'}
+            </div>
+            {heartbeatAge != null && (
+              <div className="text-xs text-gray-500 mt-1">{formatAge(heartbeatAge)}</div>
+            )}
+          </div>
+          <div className="text-xs text-gray-500">
+            heartbeat cron: <code className="bg-white px-1 rounded">0 * * * *</code>
+          </div>
+        </div>
+      </section>
+
+      {/* collector 별 최근 run */}
+      {COLLECTOR_GROUPS.map((group) => (
+        <section key={group.label}>
+          <h2 className="text-sm font-semibold text-gray-700 mb-2">{group.label}</h2>
+          <div className="rounded border border-gray-200 divide-y divide-gray-200">
+            {group.sources.map((src) => {
+              const r = latestBySource.get(src)
+              const age = r ? ageMinutes(r.started_at) : null
+              const flag = !r
+                ? '○'
+                : r.status === 'ok'
+                  ? '✓'
+                  : r.status === 'partial'
+                    ? '◐'
+                    : '✗'
+              const flagColor =
+                !r ? 'text-gray-300' : r.status === 'ok' ? 'text-green-600' : r.status === 'partial' ? 'text-yellow-600' : 'text-red-600'
+              return (
+                <div key={src} className="grid grid-cols-12 px-3 py-2 items-center text-sm">
+                  <div className={`col-span-1 text-lg ${flagColor}`}>{flag}</div>
+                  <div className="col-span-3 font-mono">{src}</div>
+                  <div className="col-span-2 text-right text-gray-600">
+                    {r ? `${r.fetched_count} → ${r.inserted_count}` : '—'}
+                  </div>
+                  <div className="col-span-2 text-right text-gray-500">
+                    {r?.duration_ms ? `${r.duration_ms}ms` : '—'}
+                  </div>
+                  <div className="col-span-2 text-right text-gray-500">
+                    {age != null ? formatAge(age) : '—'}
+                  </div>
+                  <div className="col-span-2 text-right text-xs text-gray-400 truncate">
+                    {r?.error_message ?? r?.triggered_by ?? '—'}
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+        </section>
+      ))}
+
+      {/* 최근 50 run 로그 */}
+      <section>
+        <h2 className="text-sm font-semibold text-gray-700 mb-2">최근 50 run</h2>
+        <div className="rounded border border-gray-200 overflow-x-auto">
+          <table className="w-full text-xs">
+            <thead className="bg-gray-50 text-gray-500">
+              <tr>
+                <th className="px-3 py-2 text-left">started_at</th>
+                <th className="px-3 py-2 text-left">source</th>
+                <th className="px-3 py-2 text-left">status</th>
+                <th className="px-3 py-2 text-right">fetched</th>
+                <th className="px-3 py-2 text-right">inserted</th>
+                <th className="px-3 py-2 text-right">duration</th>
+                <th className="px-3 py-2 text-left">trigger</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-gray-100">
+              {recentRuns.map((r, i) => (
+                <tr key={i}>
+                  <td className="px-3 py-1 font-mono text-gray-600">{r.started_at?.slice(5, 19)}</td>
+                  <td className="px-3 py-1 font-mono">{r.source}</td>
+                  <td className={`px-3 py-1 ${r.status === 'ok' ? 'text-green-600' : r.status === 'partial' ? 'text-yellow-600' : 'text-red-600'}`}>{r.status}</td>
+                  <td className="px-3 py-1 text-right">{r.fetched_count}</td>
+                  <td className="px-3 py-1 text-right">{r.inserted_count}</td>
+                  <td className="px-3 py-1 text-right text-gray-500">{r.duration_ms}ms</td>
+                  <td className="px-3 py-1 text-gray-500">{r.triggered_by ?? '—'}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section className="rounded border border-dashed border-gray-300 p-4 text-xs text-gray-500">
+        <strong className="text-gray-700">cron 시간표 (KST):</strong> heartbeat 매시간 정각 · 03:30 naver_shopping_hot ·
+        03:40 aliex · 03:50 musinsa · 04:00 domeggook · 04:10 naver_tvtime · 04:20 naver_news · 04:25 daum_news ·
+        04:35 dcinside · 04:45 ppomppu · 04:55 natepan · 05:05 82cook · <strong>06:00 recompute_scores</strong>.
+        WSL 호스트가 꺼지면 자동수집 중단됩니다.
+      </section>
+    </div>
+  )
+}

@@ -1,0 +1,212 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+@plugin "@tailwindcss/typography";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+  --color-sidebar-ring: var(--sidebar-ring);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar: var(--sidebar);
+  --color-chart-5: var(--chart-5);
+  --color-chart-4: var(--chart-4);
+  --color-chart-3: var(--chart-3);
+  --color-chart-2: var(--chart-2);
+  --color-chart-1: var(--chart-1);
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--accent);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--muted);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --radius-2xl: calc(var(--radius) + 8px);
+  --radius-3xl: calc(var(--radius) + 12px);
+  --radius-4xl: calc(var(--radius) + 16px);
+}
+
+:root {
+  /* Prod 톤 (slate/sky/emerald). 2026-05-02 dev warm beige 톤에서 롤백 — Phase 1 파일들 토큰명 유지하고 값만 prod 컬러로 재매핑. */
+  --jim-bg-primary: #ffffff;
+  --jim-bg-secondary: #f8fafc;          /* slate-50 */
+  --jim-bg-elevated: #ffffff;
+  --jim-bg-inverse: #0f172a;            /* slate-900 */
+  --jim-bg-inverse-warm: #0f172a;       /* alias to slate-900 (warm 제거) */
+  --jim-text-primary: #0f172a;          /* slate-900 */
+  --jim-text-secondary: #475569;        /* slate-600 */
+  --jim-text-tertiary: #94a3b8;         /* slate-400 */
+  --jim-text-on-inverse: #ffffff;
+  --jim-text-on-inverse-muted: rgba(255, 255, 255, 0.7);
+  --jim-text-on-inverse-faint: rgba(255, 255, 255, 0.5);
+  --jim-border-tertiary: #e2e8f0;       /* slate-200 */
+  --jim-border-secondary: #cbd5e1;      /* slate-300 */
+  --jim-border-inverse: rgba(255, 255, 255, 0.12);
+  --jim-accent-warm: #fef3c7;           /* amber-100 */
+  --jim-accent-cool: #dbeafe;           /* sky-100 (실제 sky 톤) */
+  --jim-accent-clay: #fed7aa;           /* orange-100 */
+  --jim-accent-positive: #d1fae5;       /* emerald-100 */
+  --jim-text-positive: #047857;         /* emerald-700 */
+  --jim-bg-placeholder: #f8fafc;
+  --jim-font-serif: ui-sans-serif, system-ui, sans-serif;
+  --radius: 0.625rem;
+  --background: oklch(1 0 0);
+  --foreground: oklch(0.145 0 0);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.145 0 0);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.145 0 0);
+  --primary: oklch(0.205 0 0);
+  --primary-foreground: oklch(0.985 0 0);
+  --secondary: oklch(0.97 0 0);
+  --secondary-foreground: oklch(0.205 0 0);
+  --muted: oklch(0.97 0 0);
+  --muted-foreground: oklch(0.556 0 0);
+  --accent: oklch(0.97 0 0);
+  --accent-foreground: oklch(0.205 0 0);
+  --destructive: oklch(0.577 0.245 27.325);
+  --border: oklch(0.922 0 0);
+  --input: oklch(0.922 0 0);
+  --ring: oklch(0.708 0 0);
+  --chart-1: oklch(0.646 0.222 41.116);
+  --chart-2: oklch(0.6 0.118 184.704);
+  --chart-3: oklch(0.398 0.07 227.392);
+  --chart-4: oklch(0.828 0.189 84.429);
+  --chart-5: oklch(0.769 0.188 70.08);
+  --sidebar: oklch(0.985 0 0);
+  --sidebar-foreground: oklch(0.145 0 0);
+  --sidebar-primary: oklch(0.205 0 0);
+  --sidebar-primary-foreground: oklch(0.985 0 0);
+  --sidebar-accent: oklch(0.97 0 0);
+  --sidebar-accent-foreground: oklch(0.205 0 0);
+  --sidebar-border: oklch(0.922 0 0);
+  --sidebar-ring: oklch(0.708 0 0);
+}
+
+.dark {
+  --background: oklch(0.145 0 0);
+  --foreground: oklch(0.985 0 0);
+  --card: oklch(0.205 0 0);
+  --card-foreground: oklch(0.985 0 0);
+  --popover: oklch(0.205 0 0);
+  --popover-foreground: oklch(0.985 0 0);
+  --primary: oklch(0.922 0 0);
+  --primary-foreground: oklch(0.205 0 0);
+  --secondary: oklch(0.269 0 0);
+  --secondary-foreground: oklch(0.985 0 0);
+  --muted: oklch(0.269 0 0);
+  --muted-foreground: oklch(0.708 0 0);
+  --accent: oklch(0.269 0 0);
+  --accent-foreground: oklch(0.985 0 0);
+  --destructive: oklch(0.704 0.191 22.216);
+  --border: oklch(1 0 0 / 10%);
+  --input: oklch(1 0 0 / 15%);
+  --ring: oklch(0.556 0 0);
+  --chart-1: oklch(0.488 0.243 264.376);
+  --chart-2: oklch(0.696 0.17 162.48);
+  --chart-3: oklch(0.769 0.188 70.08);
+  --chart-4: oklch(0.627 0.265 303.9);
+  --chart-5: oklch(0.645 0.246 16.439);
+  --sidebar: oklch(0.205 0 0);
+  --sidebar-foreground: oklch(0.985 0 0);
+  --sidebar-primary: oklch(0.488 0.243 264.376);
+  --sidebar-primary-foreground: oklch(0.985 0 0);
+  --sidebar-accent: oklch(0.269 0 0);
+  --sidebar-accent-foreground: oklch(0.985 0 0);
+  --sidebar-border: oklch(1 0 0 / 10%);
+  --sidebar-ring: oklch(0.556 0 0);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+}
+
+/* Home hero — 운송수단 4종 횡단 애니메이션 */
+@keyframes jim-fly-x {
+  0%   { transform: translateX(-60px); }
+  50%  { transform: translateX(880px); }
+  50.01% { transform: translateX(880px) scaleX(-1); }
+  100% { transform: translateX(-60px) scaleX(-1); }
+}
+@keyframes jim-fly-x-reverse {
+  0%   { transform: translateX(900px) scaleX(-1); }
+  50%  { transform: translateX(-60px) scaleX(-1); }
+  50.01% { transform: translateX(-60px); }
+  100% { transform: translateX(900px); }
+}
+@keyframes jim-bob {
+  0%, 100% { transform: translateY(0); }
+  50%      { transform: translateY(-5px); }
+}
+@keyframes jim-rock {
+  0%, 100% { transform: rotate(-1.2deg); }
+  50%      { transform: rotate(1.2deg); }
+}
+
+.jim-airplane {
+  animation: jim-fly-x 18s ease-in-out infinite;
+  transform-box: fill-box;
+  transform-origin: center;
+}
+.jim-airplane-bob {
+  animation: jim-bob 3.2s ease-in-out infinite;
+  transform-box: fill-box;
+  transform-origin: center;
+}
+.jim-truck {
+  animation: jim-fly-x 13s linear infinite;
+  transform-box: fill-box;
+  transform-origin: center;
+}
+.jim-moto {
+  animation: jim-fly-x-reverse 9s linear infinite;
+  transform-box: fill-box;
+  transform-origin: center;
+}
+.jim-ship {
+  animation: jim-fly-x 24s linear infinite,
+             jim-rock 4.5s ease-in-out infinite;
+  transform-box: fill-box;
+  transform-origin: center;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .jim-airplane,
+  .jim-airplane-bob,
+  .jim-truck,
+  .jim-moto,
+  .jim-ship {
+    animation: none;
+  }
+  .jim-truck { transform: translateX(180px); }
+  .jim-moto { transform: translateX(640px) scaleX(-1); }
+  .jim-ship { transform: translateX(420px); }
+  .jim-airplane { transform: translateX(280px); }
+}

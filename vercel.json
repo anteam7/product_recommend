@@ -1,0 +1,17 @@
+{
+  "crons": [
+    { "path": "/api/cron/update-rates", "schedule": "0 0 * * *" },
+    { "path": "/api/cron/refresh-shipping-rates", "schedule": "0 20 * * *" },
+    { "path": "/api/cron/collect-naver-search-trends", "schedule": "0 21 * * *" },
+    { "path": "/api/cron/collect-naver-shopping-trends", "schedule": "10 21 * * *" },
+    { "path": "/api/cron/collect-google-suggest", "schedule": "0 18 * * *" },
+    { "path": "/api/cron/collect-naver-news", "schedule": "10 18 * * *" },
+    { "path": "/api/cron/collect-naver-blog", "schedule": "20 18 * * *" },
+    { "path": "/api/cron/collect-clien-park", "schedule": "30 18 * * *" },
+    { "path": "/api/cron/collect-quasarzone-sale", "schedule": "40 18 * * *" },
+    { "path": "/api/cron/collect-kca-press", "schedule": "50 18 * * *" },
+    { "path": "/api/cron/collect-gsc-daily", "schedule": "0 19 * * *" },
+    { "path": "/api/cron/collect-naver-tvtime", "schedule": "10 19 * * *" },
+    { "path": "/api/cron/classify-trends-llm", "schedule": "30 21 * * *" }
+  ]
+}

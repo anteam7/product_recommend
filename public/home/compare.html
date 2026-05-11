@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8" />
+<title>Hero 후보 비교</title>
+<style>
+  :root {
+    --bg: #ffffff;
+    --bg2: #f4f2ed;
+    --ink: #1c1c1a;
+    --ink2: #5f5e5a;
+    --ink3: #888780;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, "Apple SD Gothic Neo", "Pretendard", system-ui, sans-serif;
+    background: var(--bg);
+    color: var(--ink);
+    padding: 48px 32px;
+  }
+  h1 {
+    font-size: 24px;
+    font-weight: 500;
+    margin-bottom: 8px;
+  }
+  .sub {
+    color: var(--ink3);
+    font-size: 13px;
+    margin-bottom: 40px;
+  }
+  .row {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 56px;
+    max-width: 1200px;
+    margin: 0 auto;
+  }
+  .candidate {
+    border-top: 1px solid rgba(28,28,26,.08);
+    padding-top: 32px;
+  }
+  .label {
+    font-size: 11px;
+    font-weight: 500;
+    letter-spacing: 0.18em;
+    color: var(--ink3);
+    text-transform: uppercase;
+    margin-bottom: 16px;
+  }
+  /* hero 카드 모양 (page.tsx 의 aspect-[16/10] rounded-[28px] bg-bg2) */
+  .hero-card {
+    aspect-ratio: 16 / 10;
+    border-radius: 28px;
+    overflow: hidden;
+    background: var(--bg2);
+    width: 100%;
+    max-width: 580px;
+  }
+  .hero-card img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+  }
+  /* 메인 page.tsx 의 hero 섹션과 비슷하게 좌측 텍스트 + 우측 카드 */
+  .mock {
+    display: grid;
+    grid-template-columns: 1.05fr 0.95fr;
+    align-items: center;
+    gap: 48px;
+  }
+  @media (max-width: 900px) {
+    .mock { grid-template-columns: 1fr; }
+  }
+  .mock-text .kicker {
+    font-size: 11px;
+    font-weight: 500;
+    letter-spacing: 0.2em;
+    color: var(--ink3);
+    margin-bottom: 20px;
+    text-transform: uppercase;
+  }
+  .mock-text h2 {
+    font-size: 44px;
+    line-height: 1.06;
+    letter-spacing: -0.01em;
+    font-weight: 500;
+    margin-bottom: 24px;
+  }
+  .mock-text p {
+    color: var(--ink2);
+    font-size: 15px;
+    line-height: 1.6;
+    max-width: 460px;
+  }
+  .raw {
+    margin-top: 16px;
+    font-size: 12px;
+    color: var(--ink3);
+  }
+  .raw a { color: var(--ink2); text-decoration: underline; text-underline-offset: 3px; }
+</style>
+</head>
+<body>
+  <h1>Hero 후보 비교</h1>
+  <p class="sub">실제 메인 hero 섹션과 같은 카드 형태(aspect 16:10, rounded-[28px], bg-secondary)로 렌더링.</p>
+
+  <div class="row">
+    <div class="candidate">
+      <div class="label">후보 1 — varied box cluster</div>
+      <div class="mock">
+        <div class="mock-text">
+          <p class="kicker">DIRECT IMPORT, RECALCULATED</p>
+          <h2>카테고리만 고르면<br/>최저가 배대지가 보입니다.</h2>
+          <p>미국·일본·중국 30+ 배대지를 같은 조건으로 비교합니다.<br/>무게는 자동 추정, 관·부가세는 함께 계산합니다.</p>
+        </div>
+        <div class="hero-card">
+          <img src="/home/hero-candidate-1.png" alt="후보 1" />
+        </div>
+      </div>
+      <p class="raw">원본: <a href="/home/hero-candidate-1.png" target="_blank">/home/hero-candidate-1.png</a></p>
+    </div>
+
+    <div class="candidate">
+      <div class="label">후보 2 — open parcel + workspace</div>
+      <div class="mock">
+        <div class="mock-text">
+          <p class="kicker">DIRECT IMPORT, RECALCULATED</p>
+          <h2>카테고리만 고르면<br/>최저가 배대지가 보입니다.</h2>
+          <p>미국·일본·중국 30+ 배대지를 같은 조건으로 비교합니다.<br/>무게는 자동 추정, 관·부가세는 함께 계산합니다.</p>
+        </div>
+        <div class="hero-card">
+          <img src="/home/hero-candidate-2.png" alt="후보 2" />
+        </div>
+      </div>
+      <p class="raw">원본: <a href="/home/hero-candidate-2.png" target="_blank">/home/hero-candidate-2.png</a></p>
+    </div>
+
+    <div class="candidate">
+      <div class="label">현재 적용중 (Gemini 일러스트, 비교용)</div>
+      <div class="mock">
+        <div class="mock-text">
+          <p class="kicker">DIRECT IMPORT, RECALCULATED</p>
+          <h2>카테고리만 고르면<br/>최저가 배대지가 보입니다.</h2>
+          <p>미국·일본·중국 30+ 배대지를 같은 조건으로 비교합니다.<br/>무게는 자동 추정, 관·부가세는 함께 계산합니다.</p>
+        </div>
+        <div class="hero-card">
+          <img src="https://obxvucyhzlakensopalf.supabase.co/storage/v1/object/public/site-assets/home/hero-2026.png" alt="현재" />
+        </div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>
