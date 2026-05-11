@@ -1,4 +1,5 @@
 {
+  "framework": "nextjs",
   "crons": [
     { "path": "/api/cron/update-rates", "schedule": "0 0 * * *" },
     { "path": "/api/cron/refresh-shipping-rates", "schedule": "0 20 * * *" },
