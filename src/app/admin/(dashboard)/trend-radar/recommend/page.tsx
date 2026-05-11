@@ -48,12 +48,13 @@ async function fetchRecommend(opts: {
   cate: string
 }) {
   const sb = createAdminClient()
-  const { data, error } = await sb.rpc('jimscanner_ggsan_recommend', {
+  // RPC는 DB(supabase/ggsan_recommend_rpc.sql)에 존재하나 generated 타입 미반영 — `npm run gen:types` 시 캐스팅 제거
+  const { data, error } = await sb.rpc('jimscanner_ggsan_recommend' as never, {
     days_window: opts.days,
     min_sim: opts.minSim,
     min_score: 0.5,
     result_limit: 200,
-  })
+  } as never)
   if (error) {
     return { rows: [] as RecommendRow[], error: error.message }
   }
