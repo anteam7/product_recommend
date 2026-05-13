@@ -21,15 +21,6 @@ interface MarketRawAggRow {
   rows_7d: number
 }
 
-interface HeartbeatRow {
-  id: string
-  heartbeat_at: string
-  hostname: string | null
-  last_collector: string | null
-  last_run_status: string | null
-  notes: string | null
-}
-
 // trends_runs 에 기록되는 source — Naver DataLab + tvtime + 분류기
 const TRENDS_RUNS_GROUPS: { label: string; sources: string[] }[] = [
   {
@@ -61,8 +52,7 @@ async function fetchData() {
   const since24h = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()
   const since7d = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString()
 
-  const [hb, runs, raw24, raw7] = await Promise.all([
-    sb.from('jimscanner_trends_heartbeat').select('*').eq('id', 'main').maybeSingle(),
+  const [runs, raw24, raw7] = await Promise.all([
     sb
       .from('jimscanner_trends_runs')
       .select('source, status, fetched_count, inserted_count, duration_ms, error_message, started_at, triggered_by')
@@ -104,7 +94,6 @@ async function fetchData() {
   }
 
   return {
-    heartbeat: hb.data as HeartbeatRow | null,
     latestBySource,
     marketAgg,
     recentRuns: ((runs.data ?? []) as RunRow[]).slice(0, 50),
@@ -125,17 +114,7 @@ function formatAge(min: number): string {
 }
 
 export default async function SourcesPage() {
-  const { heartbeat, latestBySource, marketAgg, recentRuns } = await fetchData()
-
-  const heartbeatAge = heartbeat ? ageMinutes(heartbeat.heartbeat_at) : null
-  const hbStatus =
-    heartbeatAge == null
-      ? 'unknown'
-      : heartbeatAge < 70
-        ? 'ok'
-        : heartbeatAge < 24 * 60
-          ? 'warn'
-          : 'down'
+  const { latestBySource, marketAgg, recentRuns } = await fetchData()
 
   return (
     <div className="space-y-6 p-6">
@@ -150,42 +129,6 @@ export default async function SourcesPage() {
           ← 대시보드
         </Link>
       </header>
-
-      {/* heartbeat 카드 */}
-      <section
-        className={`rounded border p-4 ${
-          hbStatus === 'ok'
-            ? 'border-green-200 bg-green-50'
-            : hbStatus === 'warn'
-              ? 'border-yellow-200 bg-yellow-50'
-              : hbStatus === 'unknown'
-                ? 'border-gray-200 bg-gray-50'
-                : 'border-red-200 bg-red-50'
-        }`}
-      >
-        <div className="flex justify-between items-start">
-          <div>
-            <div className="text-sm font-semibold">
-              {hbStatus === 'ok'
-                ? '✓ collector 살아있음'
-                : hbStatus === 'warn'
-                  ? '⚠️ heartbeat 늦음'
-                  : hbStatus === 'unknown'
-                    ? '— heartbeat 없음'
-                    : '✗ collector 다운'}
-            </div>
-            <div className="text-xs text-gray-600 mt-1">
-              host: {heartbeat?.hostname ?? '—'} · last: {heartbeat?.heartbeat_at ?? '—'}
-            </div>
-            {heartbeatAge != null && (
-              <div className="text-xs text-gray-500 mt-1">{formatAge(heartbeatAge)}</div>
-            )}
-          </div>
-          <div className="text-xs text-gray-500">
-            v4 cron: Vercel hosted (로컬 runner 백업)
-          </div>
-        </div>
-      </section>
 
       {/* trends_runs 기반 collector 그룹 */}
       {TRENDS_RUNS_GROUPS.map((group) => (
