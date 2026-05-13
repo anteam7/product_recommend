@@ -88,6 +88,18 @@ const NAV_GROUPS: NavGroup[] = [
       },
     ],
   },
+  {
+    id: 'meta',
+    label: '메타',
+    items: [
+      {
+        href: '/admin/improvement-ideas',
+        label: '개선 제안',
+        icon: '💡',
+        match: (p) => p.startsWith('/admin/improvement-ideas'),
+      },
+    ],
+  },
 ]
 
 const NAV_FLAT: NavItem[] = NAV_GROUPS.flatMap((g) => g.items)
