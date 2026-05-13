@@ -12,6 +12,13 @@ function getAllowedEmails(): string[] {
 }
 
 export async function middleware(request: NextRequest) {
+  const pathname = request.nextUrl.pathname
+  const hostname = request.headers.get('host') ?? ''
+
+  if (pathname === '/' && hostname.includes('product-recommend')) {
+    return NextResponse.redirect(new URL(ADMIN_PREFIX, request.url))
+  }
+
   let response = NextResponse.next({ request })
 
   const supabase = createServerClient(
@@ -37,7 +44,6 @@ export async function middleware(request: NextRequest) {
     data: { user },
   } = await supabase.auth.getUser()
 
-  const pathname = request.nextUrl.pathname
   const allowed = getAllowedEmails()
   const isAllowedUser = user && allowed.includes((user.email ?? '').toLowerCase())
 
@@ -64,5 +70,5 @@ export async function middleware(request: NextRequest) {
 }
 
 export const config = {
-  matcher: ['/admin/:path*'],
+  matcher: ['/', '/admin/:path*'],
 }
