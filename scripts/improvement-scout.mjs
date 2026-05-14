@@ -212,7 +212,10 @@ function callClaudeCli(prompt, cwd) {
 
   return new Promise((resolve, reject) => {
     const modelFlag = model ? `--model ${model}` : ''
-    const cmd = `claude -p --output-format json ${modelFlag} --permission-mode bypassPermissions --allowed-tools Read Grep Glob < "${tmpFile.replace(/\\/g, '/')}"`
+    // chcp 65001: spawn 자식 cmd.exe 가 CP949 로 돌아가서 한국어 경로의 claude.exe 를
+    // 못 찾는 문제 회피. 같은 cmd.exe 안에서 codepage 전환 후 claude 실행.
+    const prefix = process.platform === 'win32' ? 'chcp 65001 >nul && ' : ''
+    const cmd = `${prefix}claude -p --output-format json ${modelFlag} --permission-mode bypassPermissions --allowed-tools Read Grep Glob < "${tmpFile.replace(/\\/g, '/')}"`
     const child = spawn(cmd, {
       stdio: ['ignore', 'pipe', 'pipe'],
       shell: true,
