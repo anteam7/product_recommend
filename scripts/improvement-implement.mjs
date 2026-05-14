@@ -149,8 +149,8 @@ ${idea.rationale ? `**근거**:\n${idea.rationale}\n` : ''}${files}
 3. 필요한 파일을 Edit/Write 로 수정·생성하라
 4. SQL 마이그레이션이 필요하면 supabase/ 에 .sql 파일을 생성하라 (실제 DB 에 적용은 사람이 한다 — 코드는 마이그레이션 후 상태를 가정해도 됨. 단 \`as any\` 캐스팅 필요)
 5. **반드시 \`npm run build\` 가 통과해야 한다**. Bash 로 직접 실행해서 확인하라
-6. 모든 변경이 끝나면 \`git add\` + \`git commit -m "<설명>"\` 으로 커밋하라 (한 커밋이어도, 여러 커밋이어도 OK)
-7. 새 종속성 추가는 가능하면 피해라. 꼭 필요하면 \`npm install\` 후 package.json + package-lock.json 같이 커밋
+6. 변경 후 커밋: 자신이 수정·생성한 파일만 **명시적으로** \`git add <path1> <path2> ...\` 로 추가한 뒤 \`git commit -m "<설명>"\` 하라. **\`git add -A\` / \`git add .\` 절대 금지** — 이 레포는 .gitignore 안 된 untracked 분석 md/sql 가 100+개 있어서 같이 커밋되면 안 된다
+7. 새 종속성 추가는 가능하면 피해라. 꼭 필요하면 \`npm install\` 후 package.json + package-lock.json 만 명시적으로 add
 8. **금지**: \`git push\`, \`git reset --hard\`, \`git checkout main\`, \`git rebase\`, \`git merge\` — 외부 영향 있는 git 명령. 푸시는 호출 측에서 한다
 9. **금지**: 어드민 페이지의 인증 우회 / RLS 우회 / .env.local 노출 변경
 10. 완료 시 빈 텍스트 한 줄로 끝내라 (마지막 메시지로 "구현 완료. 커밋: <sha>" 정도)
@@ -250,16 +250,18 @@ async function main() {
 
   // ────────────────────────────────────────────────────────────
   // 1. 안전 체크: working tree 깨끗한가? + main 브랜치인가?
+  // (untracked 파일은 무시 — 이 프로젝트는 .gitignore 안 된 분석 md, supabase sql 다수.
+  //  tracked 파일 modification 만 진짜 위험)
   // ────────────────────────────────────────────────────────────
-  const status = tryGit('status --porcelain')
+  const status = tryGit('status --porcelain --untracked-files=no')
   if (!status.ok) {
     await logRun({ status: 'error', error_message: `git status failed: ${status.err}`, duration_ms: Date.now() - t0 })
     console.error('  git status failed:', status.err)
     process.exit(1)
   }
   if (status.out) {
-    await logRun({ status: 'ok', error_message: 'skip: working tree dirty', duration_ms: Date.now() - t0 })
-    console.log('  skip: working tree dirty')
+    await logRun({ status: 'ok', error_message: 'skip: tracked files modified', duration_ms: Date.now() - t0 })
+    console.log('  skip: tracked files modified (user is working)')
     console.log(status.out.slice(0, 500))
     return
   }
