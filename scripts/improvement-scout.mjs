@@ -201,12 +201,20 @@ function callClaudeCli(prompt, cwd) {
   )
   writeFileSync(tmpFile, prompt, 'utf8')
 
+  // claude CLI 가 ANTHROPIC_API_KEY 를 보면 구독(Max) 대신 API 키로 인증.
+  // 자식 env 에서 API 키류를 제거해서 claude.ai 구독으로 동작하게 한다.
+  const childEnv = { ...process.env }
+  delete childEnv.ANTHROPIC_API_KEY
+  delete childEnv.ANTHROPIC_AUTH_TOKEN
+  delete childEnv.ANTHROPIC_BASE_URL
+
   return new Promise((resolve, reject) => {
     const cmd = `claude -p --output-format json --model ${model} --permission-mode bypassPermissions --allowed-tools Read Grep Glob < "${tmpFile.replace(/\\/g, '/')}"`
     const child = spawn(cmd, {
       stdio: ['ignore', 'pipe', 'pipe'],
       shell: true,
       cwd,
+      env: childEnv,
     })
     let stdout = ''
     let stderr = ''
