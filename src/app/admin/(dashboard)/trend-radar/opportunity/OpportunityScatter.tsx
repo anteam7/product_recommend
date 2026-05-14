@@ -11,6 +11,9 @@ interface Row {
   size: number
   final: number
   supplier: number
+  deltaFinal: number
+  deltaTrend: number
+  hasPrev: boolean
 }
 
 const CATEGORY_COLORS: Record<string, string> = {
@@ -22,13 +25,14 @@ const CATEGORY_COLORS: Record<string, string> = {
   all: '#6b7280',
 }
 
+const ARROW_THRESHOLD = 5
+
 export default function OpportunityScatter({ rows }: { rows: Row[] }) {
   const [hover, setHover] = useState<Row | null>(null)
   const W = 720
   const H = 480
   const PAD = 50
 
-  // x, y 0-100 → SVG 좌표
   const xScale = (v: number) => PAD + (v / 100) * (W - 2 * PAD)
   const yScale = (v: number) => H - PAD - (v / 100) * (H - 2 * PAD)
   const rScale = (v: number) => Math.sqrt(v / Math.PI) * 1.2
@@ -71,23 +75,64 @@ export default function OpportunityScatter({ rows }: { rows: Row[] }) {
             🎯 핀 후보 (트렌드↑·경쟁↓)
           </text>
 
-          {/* 점들 */}
-          {rows.map((r) => (
-            <a key={r.id} href={`/admin/trend-radar/products/${r.id}`}>
-              <circle
-                cx={xScale(r.x)}
-                cy={yScale(r.y)}
-                r={rScale(r.size)}
-                fill={CATEGORY_COLORS[r.category] ?? '#6b7280'}
-                fillOpacity={0.55}
-                stroke={CATEGORY_COLORS[r.category] ?? '#6b7280'}
-                strokeOpacity={0.9}
-                onMouseEnter={() => setHover(r)}
-                onMouseLeave={() => setHover(null)}
-                style={{ cursor: 'pointer' }}
-              />
-            </a>
-          ))}
+          {/* 점들 + Δ 화살표 오버레이 */}
+          {rows.map((r) => {
+            const cx = xScale(r.x)
+            const cy = yScale(r.y)
+            const radius = rScale(r.size)
+            const showArrow = r.hasPrev && Math.abs(r.deltaFinal) > ARROW_THRESHOLD
+            const goingUp = r.deltaFinal > 0
+            const arrowColor = goingUp ? '#059669' : '#dc2626'
+            const arrowY = cy - radius - 4
+            return (
+              <g key={r.id}>
+                <a href={`/admin/trend-radar/products/${r.id}`}>
+                  <circle
+                    cx={cx}
+                    cy={cy}
+                    r={radius}
+                    fill={CATEGORY_COLORS[r.category] ?? '#6b7280'}
+                    fillOpacity={0.55}
+                    stroke={CATEGORY_COLORS[r.category] ?? '#6b7280'}
+                    strokeOpacity={0.9}
+                    onMouseEnter={() => setHover(r)}
+                    onMouseLeave={() => setHover(null)}
+                    style={{ cursor: 'pointer' }}
+                  />
+                </a>
+                {showArrow && (
+                  <g pointerEvents="none">
+                    {goingUp ? (
+                      <polygon
+                        points={`${cx},${arrowY - 8} ${cx - 5},${arrowY} ${cx + 5},${arrowY}`}
+                        fill={arrowColor}
+                        stroke="#ffffff"
+                        strokeWidth={1}
+                      />
+                    ) : (
+                      <polygon
+                        points={`${cx},${arrowY} ${cx - 5},${arrowY - 8} ${cx + 5},${arrowY - 8}`}
+                        fill={arrowColor}
+                        stroke="#ffffff"
+                        strokeWidth={1}
+                      />
+                    )}
+                    <text
+                      x={cx + 7}
+                      y={arrowY - 1}
+                      fontSize="9"
+                      fontWeight="bold"
+                      fill={arrowColor}
+                      textAnchor="start"
+                    >
+                      {goingUp ? '+' : ''}
+                      {r.deltaFinal.toFixed(0)}
+                    </text>
+                  </g>
+                )}
+              </g>
+            )
+          })}
         </svg>
 
         {/* hover tooltip */}
@@ -96,18 +141,41 @@ export default function OpportunityScatter({ rows }: { rows: Row[] }) {
             <div className="font-semibold">{hover.name}</div>
             <div>category: {hover.category}</div>
             <div>final: {hover.final} · trend: {hover.y} · competition: {hover.x} · supplier: {hover.supplier}</div>
+            {hover.hasPrev ? (
+              <div className="mt-1 border-t border-white/20 pt-1">
+                Δfinal: <span className={hover.deltaFinal > 0 ? 'text-emerald-300' : hover.deltaFinal < 0 ? 'text-rose-300' : ''}>
+                  {hover.deltaFinal > 0 ? '+' : ''}
+                  {hover.deltaFinal.toFixed(1)}
+                </span>
+                {' · '}
+                Δtrend: <span className={hover.deltaTrend > 0 ? 'text-emerald-300' : hover.deltaTrend < 0 ? 'text-rose-300' : ''}>
+                  {hover.deltaTrend > 0 ? '+' : ''}
+                  {hover.deltaTrend.toFixed(1)}
+                </span>
+              </div>
+            ) : (
+              <div className="mt-1 text-gray-400 text-[10px]">Δ 데이터 없음 (점수 누적 1회)</div>
+            )}
           </div>
         )}
       </div>
 
       {/* 범례 */}
-      <div className="mt-4 flex flex-wrap gap-3 text-xs">
+      <div className="mt-4 flex flex-wrap items-center gap-3 text-xs">
         {Object.entries(CATEGORY_COLORS).map(([cat, color]) => (
           <span key={cat} className="flex items-center gap-1">
             <span className="inline-block w-3 h-3 rounded-full" style={{ background: color, opacity: 0.6 }} />
             {cat}
           </span>
         ))}
+        <span className="ml-auto flex items-center gap-3 text-gray-500">
+          <span className="flex items-center gap-1">
+            <span className="text-emerald-600">▲</span> Δfinal &gt; {ARROW_THRESHOLD}
+          </span>
+          <span className="flex items-center gap-1">
+            <span className="text-rose-600">▼</span> Δfinal &lt; -{ARROW_THRESHOLD}
+          </span>
+        </span>
       </div>
 
       {/* 우상단 sub-list */}
@@ -126,6 +194,16 @@ export default function OpportunityScatter({ rows }: { rows: Row[] }) {
               >
                 <span className="font-mono text-gray-500 mr-2">{r.final}</span>
                 {r.name}
+                {r.hasPrev && Math.abs(r.deltaFinal) > 0.01 && (
+                  <span
+                    className={`ml-2 text-xs font-mono ${
+                      r.deltaFinal > 0 ? 'text-emerald-600' : 'text-rose-600'
+                    }`}
+                  >
+                    ({r.deltaFinal > 0 ? '+' : ''}
+                    {r.deltaFinal.toFixed(1)})
+                  </span>
+                )}
               </Link>
             ))}
           {rows.filter((r) => r.y >= 60 && r.x >= 60).length === 0 && (
