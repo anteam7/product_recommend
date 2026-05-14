@@ -128,6 +128,23 @@ console.log(
 //   --no-classify 플래그도 지원.
 const skipClassify = args.includes('--no-classify') || !!filter
 if (!skipClassify) {
+  // 1) market_raw → trends 연결 배치 (LLM 전에 alias 매칭 시그널을 갱신)
+  console.log(`[${new Date().toISOString()}] launching link-market-signals`)
+  const linkPath = resolvePath(__dirname, 'link-market-signals.mjs')
+  const linkExit = await new Promise((resolve) => {
+    const child = spawn(process.execPath, [linkPath], {
+      stdio: 'inherit',
+      env: process.env,
+    })
+    child.on('exit', (code) => resolve(code ?? 0))
+    child.on('error', (err) => {
+      console.error(`  link-market-signals spawn error: ${err.message}`)
+      resolve(1)
+    })
+  })
+  if (linkExit !== 0) failCount++
+
+  // 2) classify-trends-llm 로컬 Claude CLI 단계
   console.log(`[${new Date().toISOString()}] launching classify-trends-llm (claude CLI)`)
   const scriptPath = resolvePath(__dirname, 'classify-trends-llm.mjs')
   const classifyExit = await new Promise((resolve) => {

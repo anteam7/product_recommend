@@ -35,10 +35,26 @@ interface ScoreRow {
   score_components: any
   computed_at: string
 }
+interface MarketSignalRow {
+  id: string
+  signal_type: string
+  keywords: string[]
+  frequency: number
+  first_seen: string
+  last_seen: string
+  raw_ids: string[]
+}
+interface MarketRawRow {
+  id: string
+  source: string
+  title: string | null
+  source_url: string | null
+  captured_at: string
+}
 
 async function fetchProduct(id: string) {
   const sb = createAdminClient()
-  const [prodRes, aliasRes, scoreRes] = await Promise.all([
+  const [prodRes, aliasRes, scoreRes, signalRes] = await Promise.all([
     sb.from('jimscanner_trends_products').select('*').eq('id', id).single(),
     sb
       .from('jimscanner_trends_aliases')
@@ -51,14 +67,40 @@ async function fetchProduct(id: string) {
       .eq('product_id', id)
       .order('computed_at', { ascending: false })
       .limit(30),
+    // market_signals.product_id 는 link_market_signals.sql 마이그레이션에서 추가되는 컬럼.
+    // 마이그레이션 미적용 환경 대비 any 캐스팅.
+    (sb as any)
+      .from('jimscanner_market_signals')
+      .select('id, signal_type, keywords, frequency, first_seen, last_seen, raw_ids')
+      .eq('product_id', id)
+      .order('last_seen', { ascending: false })
+      .limit(20),
   ])
 
   if (prodRes.error || !prodRes.data) return null
+
+  const signals = (signalRes.data ?? []) as MarketSignalRow[]
+  let recentRaws: MarketRawRow[] = []
+  const rawIdSet = new Set<string>()
+  for (const s of signals) {
+    for (const rid of s.raw_ids ?? []) rawIdSet.add(rid)
+  }
+  if (rawIdSet.size > 0) {
+    const ids = Array.from(rawIdSet).slice(0, 30)
+    const rawRes = await sb
+      .from('jimscanner_market_raw')
+      .select('id, source, title, source_url, captured_at')
+      .in('id', ids)
+      .order('captured_at', { ascending: false })
+    recentRaws = (rawRes.data ?? []) as MarketRawRow[]
+  }
 
   return {
     product: prodRes.data as ProductRow,
     aliases: (aliasRes.data ?? []) as AliasRow[],
     scoreHistory: (scoreRes.data ?? []) as ScoreRow[],
+    signals,
+    recentRaws,
   }
 }
 
@@ -70,8 +112,9 @@ export default async function ProductDetailPage({
   const { id } = await params
   const data = await fetchProduct(id)
   if (!data) notFound()
-  const { product, aliases, scoreHistory } = data
+  const { product, aliases, scoreHistory, signals, recentRaws } = data
   const latest = scoreHistory[0]
+  const rawById = new Map(recentRaws.map((r) => [r.id, r]))
 
   return (
     <div className="space-y-6 p-6">
@@ -161,6 +204,61 @@ export default async function ProductDetailPage({
           </pre>
         </section>
       )}
+
+      {/* 최근 뉴스 시그널 — market_raw 에서 키워드 매칭된 뉴스/검색 시그널 */}
+      <section>
+        <h2 className="text-sm font-semibold mb-2">
+          최근 뉴스 시그널 ({signals.length})
+        </h2>
+        {signals.length === 0 ? (
+          <p className="text-xs text-gray-400">
+            연결된 시장 시그널이 없습니다. (link-market-signals 배치 대기 중)
+          </p>
+        ) : (
+          <div className="rounded border border-gray-200 divide-y divide-gray-100">
+            {signals.map((s) => (
+              <div key={s.id} className="px-3 py-2 text-sm">
+                <div className="flex items-center justify-between">
+                  <div className="font-medium">
+                    {s.keywords?.[0] ?? '—'}
+                    <span className="ml-2 text-xs text-gray-500">
+                      {s.signal_type} · freq {s.frequency}
+                    </span>
+                  </div>
+                  <div className="text-[10px] text-gray-400 font-mono">
+                    {s.last_seen?.slice(0, 19).replace('T', ' ')}
+                  </div>
+                </div>
+                {s.raw_ids?.length > 0 && (
+                  <ul className="mt-1 space-y-0.5 text-xs text-gray-600">
+                    {s.raw_ids.slice(0, 3).map((rid) => {
+                      const r = rawById.get(rid)
+                      if (!r) return null
+                      return (
+                        <li key={rid} className="truncate">
+                          <span className="text-gray-400 mr-1">[{r.source}]</span>
+                          {r.source_url ? (
+                            <a
+                              href={r.source_url}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="hover:underline"
+                            >
+                              {r.title ?? r.source_url}
+                            </a>
+                          ) : (
+                            <span>{r.title ?? '(제목 없음)'}</span>
+                          )}
+                        </li>
+                      )
+                    })}
+                  </ul>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
 
       {/* aliases */}
       <section>
