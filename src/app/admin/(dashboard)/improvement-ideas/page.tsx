@@ -42,7 +42,7 @@ async function fetchIdeas(filters: {
   let q = sbLoose()
     .from('jimscanner_improvement_ideas')
     .select(
-      'id, project, title, category, priority, description, rationale, referenced_files, dedup_signature, status, generated_at, cost_usd, input_tokens, output_tokens, num_turns, note',
+      'id, project, title, category, priority, description, rationale, referenced_files, dedup_signature, status, generated_at, cost_usd, input_tokens, output_tokens, num_turns, note, processing_started_at, implementation_branch, implementation_commit, implementation_error',
     )
     .order('generated_at', { ascending: false })
     .limit(300)

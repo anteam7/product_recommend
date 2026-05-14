@@ -20,7 +20,13 @@ export type IdeaRow = {
   output_tokens: number | null
   num_turns: number | null
   note: string | null
+  processing_started_at: string | null
+  implementation_branch: string | null
+  implementation_commit: string | null
+  implementation_error: string | null
 }
+
+const REPO_BASE = 'https://github.com/anteam7/product_recommend'
 
 const STATUS_OPTIONS = [
   { value: 'proposed', label: '제안됨', color: 'bg-blue-100 text-blue-700' },
@@ -136,6 +142,53 @@ export default function IdeaCard({ idea }: { idea: IdeaRow }) {
                   <li key={f}>{f}</li>
                 ))}
               </ul>
+            </div>
+          )}
+
+          {(idea.implementation_branch || idea.implementation_commit || idea.implementation_error) && (
+            <div>
+              <div className="text-xs font-semibold text-gray-500 mb-1">구현 결과</div>
+              <div className="text-xs space-y-1">
+                {idea.implementation_branch && (
+                  <div>
+                    <span className="text-gray-500">브랜치: </span>
+                    <a
+                      href={`${REPO_BASE}/tree/${idea.implementation_branch}`}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="font-mono text-blue-600 hover:underline"
+                    >
+                      {idea.implementation_branch}
+                    </a>
+                  </div>
+                )}
+                {idea.implementation_commit && (
+                  <div>
+                    <span className="text-gray-500">커밋: </span>
+                    <a
+                      href={`${REPO_BASE}/commit/${idea.implementation_commit}`}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="font-mono text-blue-600 hover:underline"
+                    >
+                      {idea.implementation_commit.slice(0, 8)}
+                    </a>
+                  </div>
+                )}
+                {idea.implementation_error && (
+                  <div>
+                    <span className="text-gray-500">실패 사유:</span>
+                    <pre className="font-mono text-rose-600 text-[10px] whitespace-pre-wrap break-all mt-0.5 bg-rose-50 p-2 rounded">
+                      {idea.implementation_error}
+                    </pre>
+                  </div>
+                )}
+                {idea.processing_started_at && !idea.implementation_commit && !idea.implementation_error && (
+                  <div className="text-amber-600">
+                    처리 중 ({formatTime(idea.processing_started_at)} ~)
+                  </div>
+                )}
+              </div>
             </div>
           )}
 

@@ -1,7 +1,6 @@
 @echo off
-REM Improvement Scout wrapper for Windows Task Scheduler.
-REM Runs improvement-scout-all.mjs and appends to monthly log.
-REM ASCII-only comments because chcp changes can break Korean parsing.
+REM Improvement Implementer wrapper for Windows Task Scheduler.
+REM Runs improvement-implement.mjs and appends to monthly log.
 
 chcp 65001 > nul
 
@@ -14,11 +13,11 @@ set "LOG_DIR=logs"
 if not exist "%LOG_DIR%" mkdir "%LOG_DIR%"
 
 for /f %%i in ('powershell -NoProfile -Command "Get-Date -Format yyyy-MM"') do set "MONTH=%%i"
-set "LOG_FILE=%LOG_DIR%\improvement-scout-%MONTH%.log"
+set "LOG_FILE=%LOG_DIR%\improvement-implement-%MONTH%.log"
 
 echo. >> "%LOG_FILE%"
 echo ============================================================ >> "%LOG_FILE%"
 powershell -NoProfile -Command "Get-Date -Format 'yyyy-MM-dd HH:mm:ss zzz'" >> "%LOG_FILE%"
 echo ============================================================ >> "%LOG_FILE%"
 
-"C:\Program Files\nodejs\node.exe" --env-file=.env.local scripts\improvement-scout-all.mjs %* >> "%LOG_FILE%" 2>&1
+"C:\Program Files\nodejs\node.exe" --env-file=.env.local scripts\improvement-implement.mjs %* >> "%LOG_FILE%" 2>&1

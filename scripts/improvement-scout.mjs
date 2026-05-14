@@ -189,7 +189,9 @@ ${pastList}
 }
 
 function callClaudeCli(prompt, cwd) {
-  const model = process.env.SCOUT_MODEL || 'sonnet'
+  // 모델은 CLI 기본값 사용 (Opus 4.7 1M context — 가장 똑똑).
+  // 다른 모델 강제하려면 SCOUT_MODEL env 로 override.
+  const model = process.env.SCOUT_MODEL || ''
 
   // Windows shell:true + Node child stdin pipe 조합이 안정적이지 않아서
   // 프롬프트를 임시 파일에 쓰고 shell redirection 으로 주입.
@@ -209,7 +211,8 @@ function callClaudeCli(prompt, cwd) {
   delete childEnv.ANTHROPIC_BASE_URL
 
   return new Promise((resolve, reject) => {
-    const cmd = `claude -p --output-format json --model ${model} --permission-mode bypassPermissions --allowed-tools Read Grep Glob < "${tmpFile.replace(/\\/g, '/')}"`
+    const modelFlag = model ? `--model ${model}` : ''
+    const cmd = `claude -p --output-format json ${modelFlag} --permission-mode bypassPermissions --allowed-tools Read Grep Glob < "${tmpFile.replace(/\\/g, '/')}"`
     const child = spawn(cmd, {
       stdio: ['ignore', 'pipe', 'pipe'],
       shell: true,
