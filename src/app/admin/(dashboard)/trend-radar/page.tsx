@@ -1,5 +1,6 @@
 import Link from 'next/link'
 import { createAdminClient } from '@/lib/auth/admin-supabase'
+import { getStageMeta, type LifecycleStage } from '@/lib/trends-lifecycle'
 
 export const dynamic = 'force-dynamic'
 
@@ -75,6 +76,21 @@ async function fetchTvPushes() {
   return { ranked, totalKeywords: map.size, totalRows: rows.length }
 }
 
+async function fetchLatestLifecycle(): Promise<Map<string, LifecycleStage>> {
+  const sb = createAdminClient()
+  const { data, error } = await (sb as any)
+    .from('jimscanner_trends_lifecycle')
+    .select('product_id, stage, computed_at')
+    .order('computed_at', { ascending: false })
+    .limit(5000)
+  if (error || !data) return new Map()
+  const out = new Map<string, LifecycleStage>()
+  for (const r of data as Array<{ product_id: string; stage: LifecycleStage }>) {
+    if (!out.has(r.product_id)) out.set(r.product_id, r.stage)
+  }
+  return out
+}
+
 async function fetchData(category: Category) {
   const sb = createAdminClient()
 
@@ -132,10 +148,11 @@ export default async function TrendRadarPage({
   const sp = await searchParams
   const category = (CATEGORIES.includes(sp.cat as Category) ? sp.cat : 'all') as Category
 
-  const [{ products, scores, kpis }, tvPushes, tvGgsan] = await Promise.all([
+  const [{ products, scores, kpis }, tvPushes, tvGgsan, lifecycleMap] = await Promise.all([
     fetchData(category),
     fetchTvPushes(),
     fetchTvGgsanMatchSummary(),
+    fetchLatestLifecycle(),
   ])
 
   const sorted = products
@@ -289,7 +306,23 @@ export default async function TrendRadarPage({
               >
                 <div className="col-span-1 text-gray-400 font-mono">{i + 1}</div>
                 <div className="col-span-5">
-                  <div className="font-medium">{p.canonical_name}</div>
+                  <div className="font-medium flex items-center gap-1.5">
+                    {(() => {
+                      const stage = lifecycleMap.get(p.id)
+                      if (!stage) return null
+                      const meta = getStageMeta(stage)
+                      return (
+                        <span
+                          className={`inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-semibold border ${meta.badgeClass}`}
+                          title={`${meta.label} · ${meta.action}`}
+                        >
+                          <span>{meta.emoji}</span>
+                          <span>{meta.label}</span>
+                        </span>
+                      )
+                    })()}
+                    <span>{p.canonical_name}</span>
+                  </div>
                   <div className="text-xs text-gray-500">{p.category_top}</div>
                 </div>
                 <div className="col-span-1 text-right font-mono font-bold">{s!.final_score}</div>
