@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 /**
- * Improvement Implementer — 시간당 1회 personal proposed 아이디어 1개를
+ * Improvement Implementer — 시간당 1회 proposed 아이디어 1개를
  * Claude Code CLI agentic 모드로 실제 구현하는 cron.
+ * 기본 대상: product_recommend (이 레포). --project 로 변경 가능.
  *
  * 안전 장치:
  *  - main 브랜치 직접 수정 절대 금지 (항상 feature branch 에서 작업)
@@ -24,7 +25,7 @@ import { writeFileSync, unlinkSync, mkdirSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join as joinPath } from 'node:path'
 
-// CLI args (모두 기본값 = personal 호환)
+// CLI args (모두 기본값 = product_recommend 호환)
 const args = process.argv.slice(2)
 function getArg(name, fallback) {
   const direct = args.find((a) => a.startsWith(`--${name}=`))
@@ -34,15 +35,15 @@ function getArg(name, fallback) {
   return fallback
 }
 
-const PROJECT = getArg('project', 'personal')
+const PROJECT = getArg('project', 'product_recommend')
 const REPO_DIR = getArg('repo', 'C:/Web/jimscanner-personal')
 const MAIN_BRANCH = getArg('main-branch', 'main')
 const REMOTE = getArg('remote', 'origin')
 const SOURCE_LABEL = 'improvement_implementer'
 const CLAUDE_TIMEOUT_MS = Number(process.env.IMPLEMENT_TIMEOUT) || 720000 // 12분
 
-if (!['personal', 'jimpass'].includes(PROJECT)) {
-  console.error(`Invalid --project: ${PROJECT}`)
+if (!['product_recommend', 'jimscanner'].includes(PROJECT)) {
+  console.error(`Invalid --project: ${PROJECT} (expected product_recommend | jimscanner)`)
   process.exit(1)
 }
 
@@ -82,7 +83,7 @@ async function fetchNextProposedIdea() {
   const { data } = await sb
     .from('jimscanner_improvement_ideas')
     .select('id, title, category, priority, description, rationale, referenced_files, generated_at')
-    .eq('project', 'personal')
+    .eq('project', PROJECT)
     .eq('status', 'proposed')
     .order('generated_at', { ascending: true })
     .limit(50)
@@ -131,7 +132,7 @@ async function logRun(payload) {
   try {
     await sb.from('jimscanner_trends_runs').insert({
       source: SOURCE_LABEL,
-      triggered_by: 'local_cli:personal',
+      triggered_by: `local_cli:${PROJECT}`,
       finished_at: new Date().toISOString(),
       ...payload,
     })

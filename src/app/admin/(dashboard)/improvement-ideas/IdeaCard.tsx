@@ -37,6 +37,9 @@ const STATUS_OPTIONS = [
 ] as const
 
 const CATEGORY_LABELS: Record<string, string> = {
+  ux: 'UX',
+  ops: '운영',
+  monetization: '수익화',
   data_analysis: '데이터 분석',
   visualization: '시각화',
   product_discovery: '상품 발굴',
@@ -92,7 +95,7 @@ export default function IdeaCard({ idea }: { idea: IdeaRow }) {
           <div className="flex flex-wrap items-center gap-2 mb-1">
             <span
               className={`text-[10px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded ${
-                idea.project === 'personal'
+                idea.project === 'product_recommend'
                   ? 'bg-amber-100 text-amber-700'
                   : 'bg-sky-100 text-sky-700'
               }`}

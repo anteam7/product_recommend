@@ -11,12 +11,17 @@
  * 두 프로젝트가 같은 Supabase 를 공유하므로 `--project` 로 출처를 구분한다.
  * 각 프로젝트는 자기 cwd 에서 이 스크립트를 실행하면 그 디렉토리를 둘러본다.
  *
- * 사용법:
- *   # jimscanner-personal 에서
- *   node --env-file=.env.local scripts/improvement-scout.mjs --project=personal
+ * 프로젝트별 관점:
+ *   - product_recommend: 트렌드 데이터 분석/시각화/상품 발굴 (사업자 운영 도구)
+ *   - jimscanner: 사용자 경험 / 운영 효율 / 수익화 (B2C 비교 플랫폼)
+ *                 트렌드는 후순위(위 3축이 고갈됐을 때만)
  *
- *   # jimpass-agent-platform 에서
- *   node --env-file=.env.local scripts/improvement-scout.mjs --project=jimpass
+ * 사용법:
+ *   # product_recommend 코드 디렉토리에서
+ *   node --env-file=.env.local scripts/improvement-scout.mjs --project=product_recommend
+ *
+ *   # jimscanner 본업(jimpass-agent-platform) 디렉토리에서
+ *   node --env-file=.env.local scripts/improvement-scout.mjs --project=jimscanner --cwd=C:/Web/jimscanner/jimpass-agent-platform
  *
  * 요구 사항:
  *   - claude CLI 가 PATH 에 있고 인증 완료
@@ -38,11 +43,11 @@ function getArg(name, fallback) {
   return fallback
 }
 
-const PROJECT = getArg('project', 'personal')
+const PROJECT = getArg('project', 'product_recommend')
 const CWD = getArg('cwd', process.cwd())
 
-if (!['personal', 'jimpass'].includes(PROJECT)) {
-  console.error(`Invalid --project: ${PROJECT} (expected personal | jimpass)`)
+if (!['product_recommend', 'jimscanner'].includes(PROJECT)) {
+  console.error(`Invalid --project: ${PROJECT} (expected product_recommend | jimscanner)`)
   process.exit(1)
 }
 
@@ -71,6 +76,11 @@ async function fetchPastIdeas() {
 }
 
 async function fetchDataSnapshot() {
+  if (PROJECT === 'jimscanner') return fetchJimscannerSnapshot()
+  return fetchProductRecommendSnapshot()
+}
+
+async function fetchProductRecommendSnapshot() {
   const since7d = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString()
   const since24h = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()
 
@@ -115,10 +125,138 @@ async function fetchDataSnapshot() {
   }
 
   return {
+    kind: 'product_recommend',
     runsBySource,
     raw24BySource,
     classified: classified ?? 0,
     unclassified: unclassified ?? 0,
+  }
+}
+
+async function fetchJimscannerSnapshot() {
+  const since7d = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString()
+  const since28d = new Date(Date.now() - 28 * 24 * 60 * 60 * 1000).toISOString()
+
+  const [
+    rateRunsRes,
+    revPendingRes,
+    revApprovedRes,
+    fxLatestRes,
+    shippingLatestRes,
+    gscTopRes,
+    blogStatusRes,
+    saleActiveRes,
+    saleUpcomingRes,
+    adminActions7dRes,
+    forwarderCountRes,
+  ] = await Promise.all([
+    sb
+      .from('jimscanner_rate_fetch_runs')
+      .select('status, started_at, duration_ms')
+      .gte('started_at', since7d)
+      .order('started_at', { ascending: false })
+      .limit(200),
+    sb
+      .from('jimscanner_forwarder_reviews')
+      .select('id', { count: 'exact', head: true })
+      .eq('status', 'pending'),
+    sb
+      .from('jimscanner_forwarder_reviews')
+      .select('id', { count: 'exact', head: true })
+      .eq('status', 'approved')
+      .gte('status_changed_at', since28d),
+    sb
+      .from('jimscanner_exchange_rates')
+      .select('updated_at')
+      .order('updated_at', { ascending: false })
+      .limit(1),
+    sb
+      .from('shipping_rates')
+      .select('updated_at')
+      .order('updated_at', { ascending: false })
+      .limit(1),
+    sb
+      .from('jimscanner_gsc_pages')
+      .select('clicks, impressions, date')
+      .gte('date', since28d.slice(0, 10))
+      .order('clicks', { ascending: false })
+      .limit(50),
+    sb
+      .from('jimscanner_blog_posts')
+      .select('status, pipeline_status, published_at, created_at, auto_generated'),
+    sb
+      .from('jimscanner_sale_events')
+      .select('id', { count: 'exact', head: true })
+      .lte('start_at', new Date().toISOString())
+      .gte('end_at', new Date().toISOString()),
+    sb
+      .from('jimscanner_sale_events')
+      .select('id', { count: 'exact', head: true })
+      .gt('start_at', new Date().toISOString()),
+    sb
+      .from('jimscanner_admin_actions')
+      .select('id', { count: 'exact', head: true })
+      .gte('created_at', since7d),
+    sb
+      .from('forwarders')
+      .select('id', { count: 'exact', head: true }),
+  ])
+
+  const rateRunsByStatus = { ok: 0, partial: 0, error: 0, other: 0 }
+  let rateRunsLastAt = ''
+  for (const r of rateRunsRes.data ?? []) {
+    const k = ['ok', 'partial', 'error'].includes(r.status) ? r.status : 'other'
+    rateRunsByStatus[k]++
+    if (!rateRunsLastAt || r.started_at > rateRunsLastAt) rateRunsLastAt = r.started_at
+  }
+
+  // GSC 28d 합산
+  let gscClicks = 0
+  let gscImpressions = 0
+  for (const g of gscTopRes.data ?? []) {
+    gscClicks += g.clicks ?? 0
+    gscImpressions += g.impressions ?? 0
+  }
+
+  // 블로그 status 분포
+  const blogByStatus = {}
+  let blogAuto = 0
+  let blogPublished28d = 0
+  for (const b of blogStatusRes.data ?? []) {
+    const k = b.status ?? 'unknown'
+    blogByStatus[k] = (blogByStatus[k] ?? 0) + 1
+    if (b.auto_generated) blogAuto++
+    if (b.published_at && b.published_at >= since28d) blogPublished28d++
+  }
+
+  return {
+    kind: 'jimscanner',
+    rateRuns: {
+      ...rateRunsByStatus,
+      lastAt: rateRunsLastAt,
+    },
+    reviews: {
+      pending: revPendingRes.count ?? 0,
+      approved28d: revApprovedRes.count ?? 0,
+    },
+    exchangeRateLastAt: fxLatestRes.data?.[0]?.updated_at ?? null,
+    shippingRateLastAt: shippingLatestRes.data?.[0]?.updated_at ?? null,
+    gsc28d: {
+      clicks: gscClicks,
+      impressions: gscImpressions,
+      sampledRows: gscTopRes.data?.length ?? 0,
+    },
+    blog: {
+      byStatus: blogByStatus,
+      autoGenerated: blogAuto,
+      published28d: blogPublished28d,
+    },
+    sales: {
+      active: saleActiveRes.count ?? 0,
+      upcoming: saleUpcomingRes.count ?? 0,
+    },
+    adminActions7d: adminActions7dRes.count ?? 0,
+    forwarderCount: forwarderCountRes.count ?? 0,
   }
 }
 
@@ -133,6 +271,11 @@ function buildPrompt(pastIdeas, snapshot) {
           )
           .join('\n')
 
+  if (snapshot.kind === 'jimscanner') return buildJimscannerPrompt(pastIdeas, snapshot, pastList)
+  return buildProductRecommendPrompt(pastIdeas, snapshot, pastList)
+}
+
+function buildProductRecommendPrompt(pastIdeas, snapshot, pastList) {
   const runsSummary =
     Object.entries(snapshot.runsBySource)
       .map(
@@ -146,10 +289,10 @@ function buildPrompt(pastIdeas, snapshot) {
       .map(([src, c]) => `  - ${src}: ${c}건`)
       .join('\n') || '  (없음)'
 
-  return `당신은 "${PROJECT}" 프로젝트의 시니어 개선 제안자다. 한 번에 정확히 **하나의 새로운** 기능 개선안을 제안하라.
+  return `당신은 "product_recommend" 프로젝트의 시니어 개선 제안자다. 한 번에 정확히 **하나의 새로운** 기능 개선안을 제안하라.
 
 ## 프로젝트 컨텍스트
-- 도메인: 한국 위탁 판매 플랫폼 / 트렌드 레이더 / 배대지 비교
+- 도메인: 한국 위탁 판매 자동화 — 트렌드 시그널 수집 → 분류 → 위탁 가능 상품 발굴
 - 작업 디렉토리: 현재 cwd (Read/Grep/Glob 으로 둘러봐도 됨)
 - 핵심 영역: src/app/admin/ 하위, supabase/*.sql
 
@@ -183,6 +326,77 @@ ${pastList}
   "priority": "high | medium | low 중 하나",
   "description": "구체적 구현 방향 (200-500자, 어떤 파일/테이블/UI 변경이 필요한지)",
   "rationale": "왜 지금 필요한가, 어떤 데이터/현상이 근거인가 (100-300자)",
+  "referenced_files": ["관련 파일 경로 0~5개"],
+  "dedup_signature": "이 아이디어의 핵심을 5-10자로 요약 (한국어, 중복 비교용)"
+}`
+}
+
+function buildJimscannerPrompt(pastIdeas, snapshot, pastList) {
+  const fmtTs = (s) => (s ? String(s).slice(0, 16) : '없음')
+  const blogByStatusStr =
+    Object.entries(snapshot.blog.byStatus)
+      .map(([k, v]) => `${k}=${v}`)
+      .join(', ') || '없음'
+
+  return `당신은 "jimscanner" (배대지 비교 B2C 플랫폼, jimscanner.co.kr) 의 시니어 개선 제안자다.
+한 번에 정확히 **하나의 새로운** 기능 개선안을 제안하라.
+
+## 프로젝트 컨텍스트
+- 도메인: 한국 해외직구 사용자가 배송대행지(배대지) 요금·서비스를 비교하는 B2C 사이트
+- 작업 디렉토리: 현재 cwd (Read/Grep/Glob 으로 둘러봐도 됨)
+- 핵심 영역: src/app/(b2c)/ (compare, recommend, forwarders, calculator, exchange-rates, deals, blog, guide),
+  src/app/admin/(dashboard)/ (운영자 도구), supabase/*.sql
+
+## 개선 방향 — 우선순위 명확화
+이 세 축에서 우선 도출하라:
+
+1. **사용자 경험(UX)** — 엔드유저 비교/검색/계산 흐름의 마찰·이탈·전환 개선
+   - 비교 페이지 UI/UX, 모바일 반응성, 페이지 속도(LCP/CLS), 검색·필터·정렬,
+     실시간 환율/요금 표시, 신뢰 시그널(리뷰·평점·실측 데이터), 접근성, SEO 진입 페이지 품질
+2. **운영 효율(Ops)** — 어드민·데이터 운영의 자동화·신뢰성·신선도
+   - 요금 데이터 수집 자동화·실패 알림, 리뷰 승인 워크플로, 환율 freshness,
+     블로그 발행 파이프라인 모니터링, 배송사 정보 sync, 데이터 품질 검증, GSC 활용
+3. **수익화(Monetization)** — 트래픽을 매출로 전환하는 모델 도입
+   - 제휴(affiliate) 클릭 트래킹, 배송사 광고 슬롯, 프리미엄 비교 기능, 리드 캡처,
+     B2B 신청 깔때기, 딜·프로모션 노출, 결제·예약 흐름, 전환 측정 인프라
+
+**후순위 (위 3축이 정말 고갈됐을 때만)**: 트렌드 데이터 분석·시각화·상품 발굴 — 이쪽은 사업자(셀러) 도구라
+이 프로젝트의 본 미션(엔드유저 비교)에서 한 발 떨어져 있다. 새 아이디어가 트렌드 도메인에 떨어진다면
+\`category: "other"\` 로 라벨하고 \`priority: "low"\` 로 제출하라.
+
+## 지난 7~28일 Supabase 데이터 스냅샷
+- 배송사 요금 수집(jimscanner_rate_fetch_runs, 7d):
+  ok=${snapshot.rateRuns.ok} partial=${snapshot.rateRuns.partial} error=${snapshot.rateRuns.error} other=${snapshot.rateRuns.other}, last=${fmtTs(snapshot.rateRuns.lastAt)}
+- shipping_rates 최신 updated_at: ${fmtTs(snapshot.shippingRateLastAt)}
+- 환율(jimscanner_exchange_rates) 최신 updated_at: ${fmtTs(snapshot.exchangeRateLastAt)}
+- 등록 배송사 수(forwarders): ${snapshot.forwarderCount}
+- 사용자 리뷰(jimscanner_forwarder_reviews):
+  pending=${snapshot.reviews.pending}, 28d approved=${snapshot.reviews.approved28d}
+- GSC 28d (jimscanner_gsc_pages 상위 50행 합산): clicks=${snapshot.gsc28d.clicks}, impressions=${snapshot.gsc28d.impressions}
+- 블로그(jimscanner_blog_posts): ${blogByStatusStr} | auto=${snapshot.blog.autoGenerated} | 28d published=${snapshot.blog.published28d}
+- 딜/세일(jimscanner_sale_events): active=${snapshot.sales.active}, upcoming=${snapshot.sales.upcoming}
+- 어드민 액션(jimscanner_admin_actions) 7d: ${snapshot.adminActions7d}건
+
+## 이전 ${pastIdeas.length}개 아이디어 (반드시 중복 회피 — 표현이 달라도 본질이 같으면 중복)
+${pastList}
+
+## 작업 방식
+1. 위 컨텍스트와 cwd 의 실제 코드를 Read/Grep/Glob 으로 둘러보아라
+2. **특히 src/app/(b2c)/ 의 엔드유저 페이지** (compare, recommend, forwarders, calculator),
+   src/app/admin/(dashboard)/ 의 운영자 도구, supabase/ 의 RLS·뷰를 살펴라
+3. UX/운영/수익화 축에서 새로운, 구체적이고 액션 가능한 개선안 1개를 찾아라
+4. 위 이전 목록과 본질적으로 다른 아이디어여야 한다
+5. "이미 있는 페이지의 작은 마감재" 보다 "엔드유저가 체감하는 가치 또는 운영 비용 절감" 이 더 큰 안을 선호
+
+## 출력 형식
+탐색을 마치면 **최종 응답은 다음 JSON 한 객체만** 출력하라. 다른 텍스트·코드펜스·markdown 금지.
+
+{
+  "title": "한 줄 제목 (50자 이내)",
+  "category": "ux | ops | monetization | data_analysis | visualization | product_discovery | infra | other 중 하나 (UX/Ops/Monetization 우선)",
+  "priority": "high | medium | low 중 하나",
+  "description": "구체적 구현 방향 (200-500자, 어떤 파일/테이블/UI 변경이 필요한지)",
+  "rationale": "왜 지금 필요한가, 어떤 데이터/현상이 근거인가 (100-300자, 위 스냅샷 숫자 인용 권장)",
   "referenced_files": ["관련 파일 경로 0~5개"],
   "dedup_signature": "이 아이디어의 핵심을 5-10자로 요약 (한국어, 중복 비교용)"
 }`
@@ -288,7 +502,16 @@ function extractFinalJson(text) {
 
 function normalize(o) {
   if (!o || typeof o !== 'object') return null
-  const cats = ['data_analysis', 'visualization', 'product_discovery', 'infra', 'other']
+  const cats = [
+    'data_analysis',
+    'visualization',
+    'product_discovery',
+    'infra',
+    'ux',
+    'ops',
+    'monetization',
+    'other',
+  ]
   const prio = ['high', 'medium', 'low']
   const title = String(o.title ?? '').trim().slice(0, 200)
   if (!title) return null
@@ -342,9 +565,11 @@ async function main() {
 
   try {
     const [pastIdeas, snapshot] = await Promise.all([fetchPastIdeas(), fetchDataSnapshot()])
-    console.log(
-      `  past ideas: ${pastIdeas.length}, runs sources: ${Object.keys(snapshot.runsBySource).length}, classified=${snapshot.classified}/${snapshot.unclassified}`,
-    )
+    const snapSummary =
+      snapshot.kind === 'jimscanner'
+        ? `rateRuns 7d ok=${snapshot.rateRuns.ok}/err=${snapshot.rateRuns.error}, reviews pending=${snapshot.reviews.pending}, fx=${(snapshot.exchangeRateLastAt || '').slice(0, 10)}, gsc28d clicks=${snapshot.gsc28d.clicks}`
+        : `runs sources: ${Object.keys(snapshot.runsBySource).length}, classified=${snapshot.classified}/${snapshot.unclassified}`
+    console.log(`  past ideas: ${pastIdeas.length}, snapshot: ${snapSummary}`)
 
     const prompt = buildPrompt(pastIdeas, snapshot)
     console.log(`  prompt: ${prompt.length} chars; spawning claude with Read/Grep/Glob...`)

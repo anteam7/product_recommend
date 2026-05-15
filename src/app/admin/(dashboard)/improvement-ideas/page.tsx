@@ -6,8 +6,8 @@ export const dynamic = 'force-dynamic'
 
 const PROJECT_FILTERS = [
   { value: 'all', label: '전체' },
-  { value: 'personal', label: 'personal' },
-  { value: 'jimpass', label: 'jimpass' },
+  { value: 'product_recommend', label: 'product_recommend' },
+  { value: 'jimscanner', label: 'jimscanner' },
 ] as const
 
 const STATUS_FILTERS = [
@@ -21,6 +21,9 @@ const STATUS_FILTERS = [
 
 const CATEGORY_FILTERS = [
   { value: 'all', label: '전체' },
+  { value: 'ux', label: 'UX' },
+  { value: 'ops', label: '운영' },
+  { value: 'monetization', label: '수익화' },
   { value: 'data_analysis', label: '데이터 분석' },
   { value: 'visualization', label: '시각화' },
   { value: 'product_discovery', label: '상품 발굴' },
@@ -66,8 +69,8 @@ async function fetchCounts() {
     .limit(10000)
   const counts: Record<string, { total: number; open: number }> = {
     all: { total: 0, open: 0 },
-    personal: { total: 0, open: 0 },
-    jimpass: { total: 0, open: 0 },
+    product_recommend: { total: 0, open: 0 },
+    jimscanner: { total: 0, open: 0 },
   }
   for (const r of data ?? []) {
     const isOpen = r.status === 'proposed' || r.status === 'in_progress'
@@ -124,7 +127,7 @@ export default async function ImprovementIdeasPage({
         <div className="text-xs text-gray-500 text-right">
           <div>총 {counts.all.total}건 (열린 {counts.all.open}건)</div>
           <div className="mt-0.5">
-            personal {counts.personal.total} · jimpass {counts.jimpass.total}
+            product_recommend {counts.product_recommend.total} · jimscanner {counts.jimscanner.total}
           </div>
         </div>
       </header>
@@ -152,8 +155,9 @@ export default async function ImprovementIdeasPage({
 
       <section className="rounded border border-dashed border-gray-300 p-4 text-xs text-gray-500">
         <strong className="text-gray-700">운영:</strong> Windows Task Scheduler `jimscanner-improvement-scout`
-        가 매시간 정각에 `scripts/improvement-scout-all.mjs` 를 실행. personal cwd 와 jimpass cwd
-        둘 다 Claude CLI agentic 모드(Read/Grep/Glob, Edit 차단)로 스카우트.
+        가 매시간 정각에 `scripts/improvement-scout-all.mjs` 를 실행. product_recommend cwd 와
+        jimscanner cwd 둘 다 Claude CLI agentic 모드(Read/Grep/Glob, Edit 차단)로 스카우트.
+        jimscanner 는 UX/운영/수익화 3축, product_recommend 는 트렌드 3축으로 분기된 프롬프트 사용.
         탐색 결과는 본 테이블 + `jimscanner_trends_runs (source=improvement_scout)` 에 적재.
       </section>
     </div>
