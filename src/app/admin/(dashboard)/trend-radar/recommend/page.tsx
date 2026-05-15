@@ -18,11 +18,13 @@ interface RecommendRow {
   search_score: number
   raw_score: number
   imminent_bonus: number
+  lift_score: number
   final_score: number
 
   tv_match_count: number
   tv_top_keyword: string
   tv_total_pushes: number
+  tv_best_lift: number
   search_match_count: number
   search_top_keyword: string
   search_sources: string[]
@@ -281,6 +283,20 @@ export default async function RecommendPage({
                         📺 TV {r.tv_match_count}건 · &quot;{r.tv_top_keyword}&quot; ({r.tv_total_pushes}회 편성)
                       </span>
                     )}
+                    {Number(r.tv_best_lift ?? 1) > 1.1 && (
+                      <span
+                        className={`px-2 py-0.5 rounded ${
+                          Number(r.tv_best_lift) >= 2
+                            ? 'bg-red-100 text-red-700 font-semibold'
+                            : Number(r.tv_best_lift) >= 1.5
+                            ? 'bg-amber-100 text-amber-800'
+                            : 'bg-green-100 text-green-700'
+                        }`}
+                        title="첫 편성 ±7일 검색량 lift"
+                      >
+                        📈 lift ×{Number(r.tv_best_lift).toFixed(1)}
+                      </span>
+                    )}
                     {r.search_match_count > 0 && (
                       <span className="bg-blue-100 text-blue-800 px-2 py-0.5 rounded">
                         🔍 검색 {r.search_match_count}건 · &quot;{r.search_top_keyword}&quot;
@@ -306,6 +322,9 @@ export default async function RecommendPage({
                     <div>TV {Number(r.tv_score).toFixed(2)} × 1.5</div>
                     <div>검색 {Number(r.search_score).toFixed(2)} × 1.0</div>
                     {r.is_imminent && <div className="text-red-600">× 1.3 (임박)</div>}
+                    {Number(r.lift_score ?? 1) > 1.05 && (
+                      <div className="text-amber-700">× {Number(r.lift_score).toFixed(2)} (lift)</div>
+                    )}
                   </div>
                 </div>
               </div>
@@ -316,15 +335,17 @@ export default async function RecommendPage({
 
       {/* 공식 설명 */}
       <section className="text-xs text-gray-500 border-t border-gray-200 pt-4 space-y-1">
-        <div className="font-semibold text-gray-700">📐 ProductScore V0 공식</div>
+        <div className="font-semibold text-gray-700">📐 ProductScore V0.1 공식 (+ lift)</div>
         <code className="block bg-gray-50 px-3 py-2 rounded font-mono text-[11px] leading-relaxed">
-          final_score = (tv_score × 1.5 + search_score × 1.0) × imminent_bonus
+          final_score = (tv_score × 1.5 + search_score × 1.0) × imminent_bonus × lift_score
           <br />
           tv_score = Σ (tv_count × similarity(tv_keyword, ggsan_title))
           <br />
           search_score = Σ (occurrences × similarity(search_keyword, ggsan_title))
           <br />
           imminent_bonus = is_imminent ? 1.3 : 1.0
+          <br />
+          lift_score = 1 + ln(max(tv_best_lift, 1))  ← <Link href="/admin/trend-radar/tv-lift" className="underline text-amber-700">tv-lift</Link>
         </code>
         <div className="pt-2">
           <strong>V1 보강 예정:</strong> ÷ (1 + log(스마트스토어 등록상품수)) saturation_penalty · 커뮤니티 시그널 LLM 정규화 후 추가 · ggsan_price_history 가격 인하 추세 보너스

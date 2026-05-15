@@ -55,6 +55,22 @@ async function fetchMatches(opts: { days: number; minSim: number; imminentOnly: 
   return rows
 }
 
+async function fetchLiftMap(): Promise<Map<string, number>> {
+  const sb = createAdminClient()
+  // RPC 미반영 — supabase/trends_v4_tv_lift.sql 적용 후 캐스팅 제거
+  const { data, error } = await sb.rpc('jimscanner_tv_lift' as never, {
+    window_days: 7,
+    min_tv_count: 1,
+    result_limit: 1000,
+  } as never)
+  if (error || !data) return new Map()
+  const map = new Map<string, number>()
+  for (const r of data as { keyword: string; lift: number | null }[]) {
+    if (r.lift != null) map.set(r.keyword, Number(r.lift))
+  }
+  return map
+}
+
 interface Group {
   keyword: string
   tv_count: number
@@ -121,7 +137,10 @@ export default async function TvGgsanMatchPage({
     imminent: imminentOnly ? '1' : '',
   }
 
-  const rows = await fetchMatches({ days: validDays, minSim: validSim, imminentOnly })
+  const [rows, liftMap] = await Promise.all([
+    fetchMatches({ days: validDays, minSim: validSim, imminentOnly }),
+    fetchLiftMap(),
+  ])
   const groups = groupByKeyword(rows)
 
   const totalMatches = rows.length
@@ -209,6 +228,20 @@ export default async function TvGgsanMatchPage({
                   {g.hasImminent && (
                     <span className="text-xs bg-red-600 text-white px-2 py-0.5 rounded">
                       🔥 임박특가 매칭
+                    </span>
+                  )}
+                  {liftMap.get(g.keyword) != null && (liftMap.get(g.keyword) as number) > 1.1 && (
+                    <span
+                      className={`text-xs px-2 py-0.5 rounded ${
+                        (liftMap.get(g.keyword) as number) >= 2
+                          ? 'bg-red-100 text-red-700 font-semibold'
+                          : (liftMap.get(g.keyword) as number) >= 1.5
+                          ? 'bg-amber-100 text-amber-800'
+                          : 'bg-green-100 text-green-700'
+                      }`}
+                      title="첫 편성 ±7일 검색량 lift"
+                    >
+                      📈 lift ×{(liftMap.get(g.keyword) as number).toFixed(1)}
                     </span>
                   )}
                 </div>
