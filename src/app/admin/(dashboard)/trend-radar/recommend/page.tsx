@@ -41,6 +41,24 @@ const SIM_OPTIONS = [
   { v: 0.3, label: '0.30 (엄격)' },
 ] as const
 
+interface CompetitionRow {
+  goods_no: string
+  listing_count: number
+  price_p25: number | null
+  price_p50: number | null
+  price_p75: number | null
+  top_mall_name: string | null
+  top_mall_share: number | null
+  oversea_share: number | null
+  saturation: number | null
+  captured_at: string
+}
+
+type EnrichedRow = RecommendRow & {
+  competition: CompetitionRow | null
+  blue_ocean: number
+}
+
 async function fetchRecommend(opts: {
   days: number
   minSim: number
@@ -56,12 +74,34 @@ async function fetchRecommend(opts: {
     result_limit: 200,
   } as never)
   if (error) {
-    return { rows: [] as RecommendRow[], error: error.message }
+    return { rows: [] as EnrichedRow[], error: error.message }
   }
   let rows = (data ?? []) as RecommendRow[]
   if (opts.imminentOnly) rows = rows.filter((r) => r.is_imminent)
   if (opts.cate) rows = rows.filter((r) => r.cate_cd === opts.cate)
-  return { rows, error: null as string | null }
+
+  // 경쟁밀도 latest view 매칭 (없으면 null)
+  const goodsNos = rows.map((r) => r.goods_no)
+  const compMap = new Map<string, CompetitionRow>()
+  if (goodsNos.length > 0) {
+    const { data: comp } = await sb
+      .from('jimscanner_competition_latest' as never)
+      .select(
+        'goods_no, listing_count, price_p25, price_p50, price_p75, top_mall_name, top_mall_share, oversea_share, saturation, captured_at',
+      )
+      .in('goods_no', goodsNos)
+    for (const c of ((comp ?? []) as unknown as CompetitionRow[])) {
+      compMap.set(c.goods_no, c)
+    }
+  }
+
+  const enriched: EnrichedRow[] = rows.map((r) => {
+    const c = compMap.get(r.goods_no) ?? null
+    const sat = c?.saturation ?? 0
+    const blueOcean = Number(r.final_score) / (sat + 1)
+    return { ...r, competition: c, blue_ocean: blueOcean }
+  })
+  return { rows: enriched, error: null as string | null }
 }
 
 const CATEGORIES: { code: string; label: string }[] = [
@@ -102,10 +142,12 @@ function sourceLabel(s: string): string {
   }
 }
 
+type SortKey = 'final' | 'blue_ocean'
+
 export default async function RecommendPage({
   searchParams,
 }: {
-  searchParams: Promise<{ days?: string; sim?: string; imminent?: string; cate?: string }>
+  searchParams: Promise<{ days?: string; sim?: string; imminent?: string; cate?: string; sort?: string; blueOnly?: string }>
 }) {
   const sp = await searchParams
   const days = parseInt(sp.days ?? '30', 10)
@@ -114,15 +156,26 @@ export default async function RecommendPage({
   const validSim = SIM_OPTIONS.some((s) => Math.abs(s.v - sim) < 0.001) ? sim : 0.2
   const imminentOnly = sp.imminent === '1'
   const cate = sp.cate ?? ''
+  const sort: SortKey = sp.sort === 'blue_ocean' ? 'blue_ocean' : 'final'
+  const blueOnly = sp.blueOnly === '1'
 
   const current: Record<string, string> = {
     days: String(validDays),
     sim: String(validSim),
     imminent: imminentOnly ? '1' : '',
     cate,
+    sort,
+    blueOnly: blueOnly ? '1' : '',
   }
 
-  const { rows, error } = await fetchRecommend({ days: validDays, minSim: validSim, imminentOnly, cate })
+  const result = await fetchRecommend({ days: validDays, minSim: validSim, imminentOnly, cate })
+  const error = result.error
+  let rows = result.rows
+  // '경쟁 낮음' 필터 (saturation < 1.0 또는 데이터 없음)
+  if (blueOnly) rows = rows.filter((r) => (r.competition?.saturation ?? 0) < 1.0)
+  if (sort === 'blue_ocean') {
+    rows = [...rows].sort((a, b) => b.blue_ocean - a.blue_ocean)
+  }
 
   // KPI
   const total = rows.length
@@ -130,6 +183,8 @@ export default async function RecommendPage({
   const tvHitCount = rows.filter((r) => r.tv_score > 0).length
   const searchHitCount = rows.filter((r) => r.search_score > 0).length
   const avgFinal = rows.length > 0 ? rows.reduce((s, r) => s + Number(r.final_score), 0) / rows.length : 0
+  const compCovered = rows.filter((r) => r.competition).length
+  const blueOceanCount = rows.filter((r) => r.competition && (r.competition.saturation ?? 0) < 1.0).length
 
   return (
     <div className="space-y-6 p-6">
@@ -145,10 +200,10 @@ export default async function RecommendPage({
         </Link>
       </header>
 
-      {/* 알림: V0 한계 */}
-      <div className="rounded border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-900">
-        <strong>V0 한계</strong> · 스마트스토어·쿠팡 경쟁 데이터 부재로 saturation_penalty 미적용.
-        커뮤니티 시그널은 LLM 정규화 후 V1에 포함 예정. 현재 점수는 <strong>수요 강도만</strong> 반영.
+      {/* 알림: V0 한계 + V1 경쟁밀도 */}
+      <div className="rounded border border-cyan-200 bg-cyan-50 px-4 py-3 text-xs text-cyan-900">
+        <strong>V1 신규</strong> · Naver Shopping 경쟁밀도 스냅샷 추가. saturation = log(listing+1) × top_mall_share,
+        blue_ocean = final_score / (saturation + 1). 매일 19:30 cron 으로 ggsan_recent 200건 수집.
       </div>
 
       {/* 필터 */}
@@ -184,6 +239,27 @@ export default async function RecommendPage({
           >
             {imminentOnly ? '✓ ' : ''}임박특가만
           </Link>
+          <div className="flex items-center gap-2 border-l border-gray-200 pl-3">
+            <span className="text-xs text-gray-500">정렬</span>
+            <Link
+              href={buildHref(current, { sort: 'final' })}
+              className={`px-2 py-1 text-xs rounded ${sort === 'final' ? 'bg-amber-100 text-amber-700 font-semibold' : 'text-gray-500 hover:text-black'}`}
+            >
+              final_score
+            </Link>
+            <Link
+              href={buildHref(current, { sort: 'blue_ocean' })}
+              className={`px-2 py-1 text-xs rounded ${sort === 'blue_ocean' ? 'bg-cyan-100 text-cyan-800 font-semibold' : 'text-gray-500 hover:text-black'}`}
+            >
+              🌊 blue_ocean
+            </Link>
+          </div>
+          <Link
+            href={buildHref(current, { blueOnly: blueOnly ? null : '1' })}
+            className={`px-3 py-1 text-xs rounded ${blueOnly ? 'bg-cyan-100 text-cyan-800 font-semibold' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}
+          >
+            {blueOnly ? '✓ ' : ''}경쟁 낮음만
+          </Link>
         </div>
         <div className="flex flex-wrap gap-1 border-t border-gray-100 pt-2">
           <Link
@@ -205,12 +281,17 @@ export default async function RecommendPage({
       </div>
 
       {/* KPI */}
-      <section className="grid grid-cols-2 md:grid-cols-5 gap-3">
+      <section className="grid grid-cols-2 md:grid-cols-6 gap-3">
         <Kpi label="후보 상품" value={total} />
         <Kpi label="🔥 임박특가" value={imminentCount} highlight={imminentCount > 0} />
         <Kpi label="TV 매칭" value={tvHitCount} />
         <Kpi label="검색 매칭" value={searchHitCount} />
         <Kpi label="평균 final_score" value={avgFinal.toFixed(2)} />
+        <Kpi
+          label={`🌊 blue ocean (${compCovered}/${total})`}
+          value={blueOceanCount}
+          highlight={blueOceanCount > 0}
+        />
       </section>
 
       {/* 에러 */}
@@ -291,7 +372,58 @@ export default async function RecommendPage({
                         from {r.search_sources.map(sourceLabel).join(', ')}
                       </span>
                     )}
+                    {r.competition ? (
+                      (() => {
+                        const c = r.competition!
+                        const sat = c.saturation ?? 0
+                        const lowComp = sat < 1.0
+                        return (
+                          <span
+                            className={`px-2 py-0.5 rounded ${
+                              lowComp ? 'bg-cyan-100 text-cyan-800' : 'bg-gray-200 text-gray-700'
+                            }`}
+                            title={`top mall: ${c.top_mall_name ?? '—'} · 해외직구 ${(((c.oversea_share ?? 0) * 100)).toFixed(0)}%`}
+                          >
+                            🛒 {c.listing_count.toLocaleString()}건
+                            {c.top_mall_share != null && (
+                              <> · top {(c.top_mall_share * 100).toFixed(0)}%</>
+                            )}
+                            {' · sat '}
+                            {sat.toFixed(2)}
+                          </span>
+                        )
+                      })()
+                    ) : (
+                      <span className="px-2 py-0.5 rounded bg-gray-100 text-gray-400">
+                        🛒 경쟁 N/A
+                      </span>
+                    )}
                   </div>
+                  {r.competition?.price_p50 != null && (
+                    <div className="text-[11px] text-gray-500 font-mono pt-0.5">
+                      네이버 가격 P25/P50/P75:{' '}
+                      {(r.competition.price_p25 ?? 0).toLocaleString()} /{' '}
+                      <span className="text-gray-700 font-semibold">
+                        {(r.competition.price_p50 ?? 0).toLocaleString()}
+                      </span>{' '}
+                      / {(r.competition.price_p75 ?? 0).toLocaleString()}
+                      {r.price_krw != null && r.competition.price_p50 != null && (
+                        <>
+                          {' '}
+                          · 도매 vs P50 마진{' '}
+                          <span
+                            className={
+                              r.competition.price_p50 - r.price_krw > 0
+                                ? 'text-emerald-700 font-semibold'
+                                : 'text-red-700 font-semibold'
+                            }
+                          >
+                            {(r.competition.price_p50 - r.price_krw).toLocaleString()}원
+                          </span>
+                        </>
+                      )}
+                    </div>
+                  )}
                 </div>
 
                 {/* 점수 + 가격 */}
@@ -306,6 +438,12 @@ export default async function RecommendPage({
                     <div>TV {Number(r.tv_score).toFixed(2)} × 1.5</div>
                     <div>검색 {Number(r.search_score).toFixed(2)} × 1.0</div>
                     {r.is_imminent && <div className="text-red-600">× 1.3 (임박)</div>}
+                  </div>
+                  <div className="border-t border-gray-100 pt-1">
+                    <div className="text-[10px] text-cyan-700 uppercase">blue ocean</div>
+                    <div className="text-base font-bold font-mono text-cyan-800">
+                      {r.blue_ocean.toFixed(2)}
+                    </div>
                   </div>
                 </div>
               </div>
@@ -327,7 +465,8 @@ export default async function RecommendPage({
           imminent_bonus = is_imminent ? 1.3 : 1.0
         </code>
         <div className="pt-2">
-          <strong>V1 보강 예정:</strong> ÷ (1 + log(스마트스토어 등록상품수)) saturation_penalty · 커뮤니티 시그널 LLM 정규화 후 추가 · ggsan_price_history 가격 인하 추세 보너스
+          <strong>V1 신규 (경쟁밀도):</strong> blue_ocean = final_score ÷ (saturation + 1) · saturation = ln(listing_count + 1) × top_mall_share ·
+          데이터 출처 jimscanner_competition_latest view (Naver /v1/search/shop daily snapshot).
         </div>
       </section>
     </div>
