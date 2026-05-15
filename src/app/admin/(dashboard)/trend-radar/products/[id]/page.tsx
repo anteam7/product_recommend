@@ -36,9 +36,25 @@ interface ScoreRow {
   computed_at: string
 }
 
+interface CompanionRow {
+  candidate_id: string
+  candidate_name: string
+  candidate_brand: string | null
+  candidate_category_top: string | null
+  candidate_category_mid: string | null
+  candidate_intent_label: string | null
+  candidate_score: number | null
+  candidate_has_ggsan: boolean
+  co_count: number
+  pmi: number
+  jaccard: number
+  sample_title: string | null
+  sample_url: string | null
+}
+
 async function fetchProduct(id: string) {
   const sb = createAdminClient()
-  const [prodRes, aliasRes, scoreRes] = await Promise.all([
+  const [prodRes, aliasRes, scoreRes, compRes] = await Promise.all([
     sb.from('jimscanner_trends_products').select('*').eq('id', id).single(),
     sb
       .from('jimscanner_trends_aliases')
@@ -51,6 +67,14 @@ async function fetchProduct(id: string) {
       .eq('product_id', id)
       .order('computed_at', { ascending: false })
       .limit(30),
+    (sb as any)
+      .from('jimscanner_trends_companions')
+      .select(
+        'candidate_id, candidate_name, candidate_brand, candidate_category_top, candidate_category_mid, candidate_intent_label, candidate_score, candidate_has_ggsan, co_count, pmi, jaccard, sample_title, sample_url',
+      )
+      .eq('seed_id', id)
+      .order('pmi', { ascending: false })
+      .limit(12),
   ])
 
   if (prodRes.error || !prodRes.data) return null
@@ -59,6 +83,7 @@ async function fetchProduct(id: string) {
     product: prodRes.data as ProductRow,
     aliases: (aliasRes.data ?? []) as AliasRow[],
     scoreHistory: (scoreRes.data ?? []) as ScoreRow[],
+    companions: ((compRes as any)?.data ?? []) as CompanionRow[],
   }
 }
 
@@ -70,7 +95,7 @@ export default async function ProductDetailPage({
   const { id } = await params
   const data = await fetchProduct(id)
   if (!data) notFound()
-  const { product, aliases, scoreHistory } = data
+  const { product, aliases, scoreHistory, companions } = data
   const latest = scoreHistory[0]
 
   return (
@@ -177,6 +202,68 @@ export default async function ProductDetailPage({
             </div>
           ))}
         </div>
+      </section>
+
+      {/* Companion Products — 동시 언급 기반 인접 상품 */}
+      <section>
+        <h2 className="text-sm font-semibold mb-2">
+          Companion Products{' '}
+          <span className="text-xs font-normal text-gray-500">
+            (90일 본문 co-occurrence · PMI 내림차순)
+          </span>
+        </h2>
+        {companions.length === 0 ? (
+          <p className="text-xs text-gray-400">
+            함께 언급된 상품이 아직 없습니다. cooccurrence matview 가 갱신되었는지 확인하세요.
+          </p>
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+            {companions.map((c) => (
+              <Link
+                key={c.candidate_id}
+                href={`/admin/trend-radar/products/${c.candidate_id}`}
+                className="block rounded border border-gray-200 p-3 hover:border-black hover:shadow-sm transition"
+              >
+                <div className="flex items-baseline justify-between gap-2">
+                  <div className="text-sm font-medium truncate">{c.candidate_name}</div>
+                  <span
+                    className={`text-[10px] px-1.5 py-0.5 rounded font-mono ${
+                      c.candidate_has_ggsan
+                        ? 'bg-emerald-100 text-emerald-700'
+                        : 'bg-amber-100 text-amber-700'
+                    }`}
+                  >
+                    {c.candidate_has_ggsan ? 'ggsan ✓' : 'ggsan 미매칭'}
+                  </span>
+                </div>
+                <div className="mt-1 text-[11px] text-gray-500 truncate">
+                  {c.candidate_brand ? `${c.candidate_brand} · ` : ''}
+                  {c.candidate_category_top}
+                  {c.candidate_category_mid ? ` / ${c.candidate_category_mid}` : ''}
+                </div>
+                <div className="mt-2 grid grid-cols-3 gap-1 text-[11px] font-mono">
+                  <div className="text-gray-600">
+                    PMI <span className="text-black font-bold">{Number(c.pmi).toFixed(2)}</span>
+                  </div>
+                  <div className="text-gray-600">
+                    co <span className="text-black font-bold">{c.co_count}</span>
+                  </div>
+                  <div className="text-gray-600">
+                    score{' '}
+                    <span className="text-black font-bold">
+                      {c.candidate_score != null ? Math.round(c.candidate_score) : '—'}
+                    </span>
+                  </div>
+                </div>
+                {c.sample_title && (
+                  <div className="mt-2 text-[11px] text-gray-500 line-clamp-2 italic">
+                    “{c.sample_title}”
+                  </div>
+                )}
+              </Link>
+            ))}
+          </div>
+        )}
       </section>
 
       <section className="text-xs text-gray-500">
