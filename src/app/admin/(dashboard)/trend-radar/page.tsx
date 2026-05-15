@@ -75,6 +75,15 @@ async function fetchTvPushes() {
   return { ranked, totalKeywords: map.size, totalRows: rows.length }
 }
 
+async function fetchOpenActionCards() {
+  const sb = createAdminClient() as any
+  const res = await sb
+    .from('jimscanner_trends_action_queue')
+    .select('id', { count: 'exact', head: true })
+    .eq('status', 'new')
+  return res.count ?? 0
+}
+
 async function fetchData(category: Category) {
   const sb = createAdminClient()
 
@@ -132,10 +141,11 @@ export default async function TrendRadarPage({
   const sp = await searchParams
   const category = (CATEGORIES.includes(sp.cat as Category) ? sp.cat : 'all') as Category
 
-  const [{ products, scores, kpis }, tvPushes, tvGgsan] = await Promise.all([
+  const [{ products, scores, kpis }, tvPushes, tvGgsan, openCards] = await Promise.all([
     fetchData(category),
     fetchTvPushes(),
     fetchTvGgsanMatchSummary(),
+    fetchOpenActionCards(),
   ])
 
   const sorted = products
@@ -160,13 +170,20 @@ export default async function TrendRadarPage({
         </Link>
       </header>
 
-      {/* KPI 5종 */}
-      <section className="grid grid-cols-2 md:grid-cols-5 gap-4">
+      {/* KPI 6종 */}
+      <section className="grid grid-cols-2 md:grid-cols-6 gap-4">
         <KpiCard label="canonical 상품" value={kpis.products} hint="누적 매핑" />
         <KpiCard label="LLM 분류" value={kpis.llmClassified} hint={`${kpis.products > 0 ? Math.round((kpis.llmClassified / kpis.products) * 100) : 0}% 진척`} />
         <KpiCard label="고득점 (≥50)" value={kpis.top} hint="final_score 기준" />
         <KpiCard label="supplier 매칭" value={kpis.supplier} hint="도매꾹·알리 검출" />
         <KpiCard label="TV push" value={kpis.tv} hint="홈쇼핑 편성 검출" />
+        <Link href="/admin/trend-radar/action-queue" className="block">
+          <div className={`rounded border p-4 transition-colors ${openCards > 0 ? 'border-emerald-300 bg-emerald-50 hover:bg-emerald-100' : 'border-gray-200 hover:bg-gray-50'}`}>
+            <div className="text-xs text-gray-500">📋 미처리 카드</div>
+            <div className="text-3xl font-bold mt-1">{openCards.toLocaleString()}</div>
+            <div className="text-xs text-gray-400 mt-1">액션 큐로 →</div>
+          </div>
+        </Link>
       </section>
 
       {/* 카테고리 탭 */}
