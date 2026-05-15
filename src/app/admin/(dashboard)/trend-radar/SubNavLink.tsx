@@ -7,7 +7,7 @@ export default function SubNavLink({ href, label }: { href: string; label: strin
   const active =
     href === '/admin/trend-radar'
       ? pathname === '/admin/trend-radar' || pathname === '/admin/trend-radar/'
-      : pathname.startsWith(href)
+      : pathname === href || pathname.startsWith(href + '/')
   return (
     <Link
       href={href}
