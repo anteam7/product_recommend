@@ -24,11 +24,27 @@ import { writeFileSync, unlinkSync, mkdirSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join as joinPath } from 'node:path'
 
-const REPO_DIR = 'C:/Web/jimscanner-personal'
-const MAIN_BRANCH = 'main'
-const REMOTE = 'origin'
+// CLI args (모두 기본값 = personal 호환)
+const args = process.argv.slice(2)
+function getArg(name, fallback) {
+  const direct = args.find((a) => a.startsWith(`--${name}=`))
+  if (direct) return direct.slice(name.length + 3)
+  const idx = args.indexOf(`--${name}`)
+  if (idx !== -1 && args[idx + 1]) return args[idx + 1]
+  return fallback
+}
+
+const PROJECT = getArg('project', 'personal')
+const REPO_DIR = getArg('repo', 'C:/Web/jimscanner-personal')
+const MAIN_BRANCH = getArg('main-branch', 'main')
+const REMOTE = getArg('remote', 'origin')
 const SOURCE_LABEL = 'improvement_implementer'
 const CLAUDE_TIMEOUT_MS = Number(process.env.IMPLEMENT_TIMEOUT) || 720000 // 12분
+
+if (!['personal', 'jimpass'].includes(PROJECT)) {
+  console.error(`Invalid --project: ${PROJECT}`)
+  process.exit(1)
+}
 
 const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL
 const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY
