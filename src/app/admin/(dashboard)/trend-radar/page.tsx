@@ -1,5 +1,6 @@
 import Link from 'next/link'
 import { createAdminClient } from '@/lib/auth/admin-supabase'
+import EntryDifficultyQuadrant, { type DifficultyRow } from './EntryDifficultyQuadrant'
 
 export const dynamic = 'force-dynamic'
 
@@ -75,6 +76,53 @@ async function fetchTvPushes() {
   return { ranked, totalKeywords: map.size, totalRows: rows.length }
 }
 
+interface DifficultyDbRow {
+  product_id: string
+  ad_cpc_est: number
+  ad_difficulty: number
+  seo_barrier: number
+  organic_runway: number
+  computed_at: string
+}
+
+async function fetchEntryDifficulty(
+  sorted: Array<{ p: ProductRow; s: ScoreRow | undefined }>,
+): Promise<DifficultyRow[]> {
+  if (sorted.length === 0) return []
+  const sb = createAdminClient()
+  const ids = sorted.map((x) => x.p.id)
+  // 최신 row per product_id
+  const { data } = await (sb as any)
+    .from('jimscanner_trends_entry_difficulty')
+    .select('product_id, ad_cpc_est, ad_difficulty, seo_barrier, organic_runway, computed_at')
+    .in('product_id', ids)
+    .order('computed_at', { ascending: false })
+    .limit(4000)
+  const seen = new Set<string>()
+  const latest = new Map<string, DifficultyDbRow>()
+  for (const r of (data ?? []) as DifficultyDbRow[]) {
+    if (seen.has(r.product_id)) continue
+    seen.add(r.product_id)
+    latest.set(r.product_id, r)
+  }
+  const rows: DifficultyRow[] = []
+  for (const { p, s } of sorted) {
+    const d = latest.get(p.id)
+    if (!d) continue
+    rows.push({
+      id: p.id,
+      name: p.canonical_name,
+      category: p.category_top,
+      ad: Number(d.ad_difficulty) || 0,
+      seo: Number(d.seo_barrier) || 0,
+      runway: Number(d.organic_runway) || 0,
+      cpc: Number(d.ad_cpc_est) || 0,
+      final: s?.final_score ?? 0,
+    })
+  }
+  return rows
+}
+
 async function fetchData(category: Category) {
   const sb = createAdminClient()
 
@@ -142,6 +190,8 @@ export default async function TrendRadarPage({
     .map((p) => ({ p, s: scores.get(p.id) }))
     .filter((x) => x.s)
     .sort((a, b) => (b.s!.final_score - a.s!.final_score))
+
+  const difficultyRows = await fetchEntryDifficulty(sorted)
 
   return (
     <div className="space-y-6 p-6">
@@ -264,6 +314,13 @@ export default async function TrendRadarPage({
           </div>
         )}
       </section>
+
+      {/* 진입난이도 매트릭스 */}
+      {difficultyRows.length > 0 && (
+        <section>
+          <EntryDifficultyQuadrant rows={difficultyRows} />
+        </section>
+      )}
 
       {/* Top 카드 */}
       <section>

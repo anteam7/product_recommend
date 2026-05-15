@@ -36,9 +36,18 @@ interface ScoreRow {
   computed_at: string
 }
 
+interface DifficultyRow {
+  ad_cpc_est: number
+  ad_difficulty: number
+  seo_barrier: number
+  organic_runway: number
+  components: any
+  computed_at: string
+}
+
 async function fetchProduct(id: string) {
   const sb = createAdminClient()
-  const [prodRes, aliasRes, scoreRes] = await Promise.all([
+  const [prodRes, aliasRes, scoreRes, diffRes] = await Promise.all([
     sb.from('jimscanner_trends_products').select('*').eq('id', id).single(),
     sb
       .from('jimscanner_trends_aliases')
@@ -51,6 +60,13 @@ async function fetchProduct(id: string) {
       .eq('product_id', id)
       .order('computed_at', { ascending: false })
       .limit(30),
+    (sb as any)
+      .from('jimscanner_trends_entry_difficulty')
+      .select('ad_cpc_est, ad_difficulty, seo_barrier, organic_runway, components, computed_at')
+      .eq('product_id', id)
+      .order('computed_at', { ascending: false })
+      .limit(1)
+      .maybeSingle(),
   ])
 
   if (prodRes.error || !prodRes.data) return null
@@ -59,6 +75,7 @@ async function fetchProduct(id: string) {
     product: prodRes.data as ProductRow,
     aliases: (aliasRes.data ?? []) as AliasRow[],
     scoreHistory: (scoreRes.data ?? []) as ScoreRow[],
+    difficulty: (diffRes?.data ?? null) as DifficultyRow | null,
   }
 }
 
@@ -70,7 +87,7 @@ export default async function ProductDetailPage({
   const { id } = await params
   const data = await fetchProduct(id)
   if (!data) notFound()
-  const { product, aliases, scoreHistory } = data
+  const { product, aliases, scoreHistory, difficulty } = data
   const latest = scoreHistory[0]
 
   return (
@@ -116,6 +133,52 @@ export default async function ProductDetailPage({
           <ScoreCard label="commerce" value={latest.commerce_score} />
           <ScoreCard label="supplier" value={latest.supplier_score} />
           <ScoreCard label="competition" value={latest.competition_score} />
+        </section>
+      )}
+
+      {/* 진입난이도 카드 */}
+      {difficulty && (
+        <section>
+          <h2 className="text-sm font-semibold mb-2">📐 진입난이도</h2>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+            <DifficultyCard
+              label="추정 CPC"
+              value={`${Math.round(Number(difficulty.ad_cpc_est)).toLocaleString()}원`}
+              hint="입찰가 + 광고슬롯 점유율 합성"
+              tone={Number(difficulty.ad_cpc_est) > 1200 ? 'bad' : Number(difficulty.ad_cpc_est) > 600 ? 'mid' : 'good'}
+            />
+            <DifficultyCard
+              label="ad_difficulty"
+              value={Number(difficulty.ad_difficulty).toString()}
+              hint="0~100 · 낮을수록 광고 진입 쉬움"
+              tone={Number(difficulty.ad_difficulty) > 60 ? 'bad' : Number(difficulty.ad_difficulty) > 30 ? 'mid' : 'good'}
+            />
+            <DifficultyCard
+              label="seo_barrier"
+              value={Number(difficulty.seo_barrier).toString()}
+              hint="0~100 · 낮을수록 SERP 진입 쉬움"
+              tone={Number(difficulty.seo_barrier) > 60 ? 'bad' : Number(difficulty.seo_barrier) > 30 ? 'mid' : 'good'}
+            />
+            <DifficultyCard
+              label="organic_runway"
+              value={Number(difficulty.organic_runway).toString()}
+              hint="0~100 · 높을수록 무광고 잠재 ↑"
+              tone={Number(difficulty.organic_runway) > 50 ? 'good' : Number(difficulty.organic_runway) > 20 ? 'mid' : 'bad'}
+            />
+          </div>
+          {difficulty.components && (
+            <details className="mt-3">
+              <summary className="text-xs text-gray-500 cursor-pointer hover:text-black">
+                components breakdown
+              </summary>
+              <pre className="rounded border border-gray-200 p-3 text-xs overflow-x-auto bg-gray-50 mt-2">
+                {JSON.stringify(difficulty.components, null, 2)}
+              </pre>
+            </details>
+          )}
+          <p className="text-[10px] text-gray-400 mt-2 font-mono">
+            computed_at: {String(difficulty.computed_at).slice(0, 19).replace('T', ' ')}
+          </p>
         </section>
       )}
 
@@ -182,6 +245,32 @@ export default async function ProductDetailPage({
       <section className="text-xs text-gray-500">
         first_seen: {product.first_seen_at} · last_seen: {product.last_seen_at}
       </section>
+    </div>
+  )
+}
+
+function DifficultyCard({
+  label,
+  value,
+  hint,
+  tone,
+}: {
+  label: string
+  value: string
+  hint: string
+  tone: 'good' | 'mid' | 'bad'
+}) {
+  const toneClass =
+    tone === 'good'
+      ? 'border-emerald-300 bg-emerald-50'
+      : tone === 'mid'
+      ? 'border-amber-300 bg-amber-50'
+      : 'border-rose-300 bg-rose-50'
+  return (
+    <div className={`rounded border p-3 ${toneClass}`}>
+      <div className="text-xs text-gray-600 uppercase">{label}</div>
+      <div className="mt-1 text-2xl font-bold text-gray-900">{value}</div>
+      <div className="text-[10px] text-gray-500 mt-1">{hint}</div>
     </div>
   )
 }

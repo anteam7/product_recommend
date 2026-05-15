@@ -144,4 +144,24 @@ if (!skipClassify) {
   if (classifyExit !== 0) failCount++
 }
 
+// score-entry-difficulty: 진입난이도 매트릭스 산출 (일 1회)
+//   filter 또는 --no-classify 시에도 별도 플래그 --no-entry-difficulty 로 제어.
+const skipEntryDifficulty = args.includes('--no-entry-difficulty') || !!filter
+if (!skipEntryDifficulty) {
+  console.log(`[${new Date().toISOString()}] launching score-entry-difficulty`)
+  const scriptPath = resolvePath(__dirname, 'score-entry-difficulty.mjs')
+  const exitCode = await new Promise((resolve) => {
+    const child = spawn(process.execPath, [scriptPath], {
+      stdio: 'inherit',
+      env: process.env,
+    })
+    child.on('exit', (code) => resolve(code ?? 0))
+    child.on('error', (err) => {
+      console.error(`  score-entry-difficulty spawn error: ${err.message}`)
+      resolve(1)
+    })
+  })
+  if (exitCode !== 0) failCount++
+}
+
 process.exit(failCount > 0 ? 1 : 0)
