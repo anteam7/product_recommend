@@ -20,13 +20,16 @@ const SCOUT = resolvePath(__dirname, 'improvement-scout.mjs')
 
 const TARGETS = [
   { project: 'product_recommend', cwd: resolvePath(__dirname, '..') },
-  {
-    project: 'jimscanner',
-    cwd:
-      process.env.SCOUT_JIMSCANNER_PATH ??
-      process.env.SCOUT_JIMPASS_PATH ??
-      'C:/Web/jimscanner/jimpass-agent-platform',
-  },
+  // jimscanner 스카우트는 일시 중단 (2026-05-15). 사용자 결정:
+  // - 자동 구현이 product_recommend 만 처리하는데 jimscanner 측 proposed 가 21건까지 쌓임
+  // - 더 쌓기 전에 멈추고, 필요 시 아래 객체를 다시 활성화하면 됨.
+  // {
+  //   project: 'jimscanner',
+  //   cwd:
+  //     process.env.SCOUT_JIMSCANNER_PATH ??
+  //     process.env.SCOUT_JIMPASS_PATH ??
+  //     'C:/Web/jimscanner/jimpass-agent-platform',
+  // },
 ]
 
 function runOne(target) {
