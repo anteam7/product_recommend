@@ -46,6 +46,8 @@ async function fetchRecommend(opts: {
   minSim: number
   imminentOnly: boolean
   cate: string
+  audienceAge: string
+  audienceGender: string
 }) {
   const sb = createAdminClient()
   // RPC는 DB(supabase/ggsan_recommend_rpc.sql)에 존재하나 generated 타입 미반영 — `npm run gen:types` 시 캐스팅 제거
@@ -61,8 +63,47 @@ async function fetchRecommend(opts: {
   let rows = (data ?? []) as RecommendRow[]
   if (opts.imminentOnly) rows = rows.filter((r) => r.is_imminent)
   if (opts.cate) rows = rows.filter((r) => r.cate_cd === opts.cate)
+
+  // 오디언스 필터: 운영자 채널의 타겟 (예: 50대 여성) 과 매칭되는 후보를 우선 노출.
+  // search_top_keyword 의 demographics 평균을 참조 — 없으면 통과.
+  if (opts.audienceAge || opts.audienceGender) {
+    const keywords = Array.from(
+      new Set(rows.map((r) => r.search_top_keyword).filter(Boolean)),
+    )
+    const audienceMap = new Map<string, number>()
+    if (keywords.length > 0) {
+      let q = sb
+        .from('jimscanner_trends_demographics' as never)
+        .select('keyword, age_bucket, gender, ratio_index')
+        .in('keyword', keywords)
+      if (opts.audienceAge) q = q.eq('age_bucket', opts.audienceAge)
+      if (opts.audienceGender) q = q.eq('gender', opts.audienceGender)
+      const { data: demoRows } = await q
+      for (const d of (demoRows ?? []) as unknown as Array<{ keyword: string; ratio_index: number | null }>) {
+        if (d.ratio_index == null) continue
+        const cur = audienceMap.get(d.keyword) ?? 0
+        audienceMap.set(d.keyword, cur + Number(d.ratio_index))
+      }
+    }
+    rows = rows
+      .map((r) => ({ ...r, _audienceFit: audienceMap.get(r.search_top_keyword) ?? 0 }))
+      .sort((a, b) => b._audienceFit - a._audienceFit)
+  }
   return { rows, error: null as string | null }
 }
+
+const AUDIENCE_AGES: { v: string; label: string }[] = [
+  { v: '10', label: '10대' },
+  { v: '20', label: '20대' },
+  { v: '30', label: '30대' },
+  { v: '40', label: '40대' },
+  { v: '50', label: '50대' },
+  { v: '60', label: '60대+' },
+]
+const AUDIENCE_GENDERS: { v: string; label: string }[] = [
+  { v: 'm', label: '남성' },
+  { v: 'f', label: '여성' },
+]
 
 const CATEGORIES: { code: string; label: string }[] = [
   { code: '001', label: '장건강' },
@@ -105,7 +146,7 @@ function sourceLabel(s: string): string {
 export default async function RecommendPage({
   searchParams,
 }: {
-  searchParams: Promise<{ days?: string; sim?: string; imminent?: string; cate?: string }>
+  searchParams: Promise<{ days?: string; sim?: string; imminent?: string; cate?: string; aud_age?: string; aud_gender?: string }>
 }) {
   const sp = await searchParams
   const days = parseInt(sp.days ?? '30', 10)
@@ -114,15 +155,26 @@ export default async function RecommendPage({
   const validSim = SIM_OPTIONS.some((s) => Math.abs(s.v - sim) < 0.001) ? sim : 0.2
   const imminentOnly = sp.imminent === '1'
   const cate = sp.cate ?? ''
+  const audAge = AUDIENCE_AGES.some((a) => a.v === sp.aud_age) ? (sp.aud_age as string) : ''
+  const audGender = AUDIENCE_GENDERS.some((g) => g.v === sp.aud_gender) ? (sp.aud_gender as string) : ''
 
   const current: Record<string, string> = {
     days: String(validDays),
     sim: String(validSim),
     imminent: imminentOnly ? '1' : '',
     cate,
+    aud_age: audAge,
+    aud_gender: audGender,
   }
 
-  const { rows, error } = await fetchRecommend({ days: validDays, minSim: validSim, imminentOnly, cate })
+  const { rows, error } = await fetchRecommend({
+    days: validDays,
+    minSim: validSim,
+    imminentOnly,
+    cate,
+    audienceAge: audAge,
+    audienceGender: audGender,
+  })
 
   // KPI
   const total = rows.length
@@ -201,6 +253,46 @@ export default async function RecommendPage({
               {c.label}
             </Link>
           ))}
+        </div>
+        {/* 오디언스 필터 — 운영자 채널의 타겟 분포에 매칭되는 후보 우선 */}
+        <div className="flex flex-wrap items-center gap-2 border-t border-gray-100 pt-2">
+          <span className="text-xs text-gray-500">타겟 오디언스</span>
+          <Link
+            href={buildHref(current, { aud_age: null })}
+            className={`px-2 py-1 text-xs rounded ${audAge === '' ? 'bg-purple-100 text-purple-700 font-semibold' : 'text-gray-500 hover:text-black'}`}
+          >
+            전 연령
+          </Link>
+          {AUDIENCE_AGES.map((a) => (
+            <Link
+              key={a.v}
+              href={buildHref(current, { aud_age: a.v })}
+              className={`px-2 py-1 text-xs rounded ${audAge === a.v ? 'bg-purple-100 text-purple-700 font-semibold' : 'text-gray-500 hover:text-black'}`}
+            >
+              {a.label}
+            </Link>
+          ))}
+          <span className="mx-2 text-gray-300">|</span>
+          <Link
+            href={buildHref(current, { aud_gender: null })}
+            className={`px-2 py-1 text-xs rounded ${audGender === '' ? 'bg-purple-100 text-purple-700 font-semibold' : 'text-gray-500 hover:text-black'}`}
+          >
+            전 성별
+          </Link>
+          {AUDIENCE_GENDERS.map((g) => (
+            <Link
+              key={g.v}
+              href={buildHref(current, { aud_gender: g.v })}
+              className={`px-2 py-1 text-xs rounded ${audGender === g.v ? 'bg-purple-100 text-purple-700 font-semibold' : 'text-gray-500 hover:text-black'}`}
+            >
+              {g.label}
+            </Link>
+          ))}
+          {(audAge || audGender) && (
+            <span className="text-[10px] text-gray-400 ml-2">
+              search_top_keyword 의 DataLab demographics 합산 점수로 정렬
+            </span>
+          )}
         </div>
       </div>
 

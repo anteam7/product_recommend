@@ -6,7 +6,24 @@ import {
   chunk,
   type DatalabKeywordGroup,
   type DatalabCategoryGroup,
+  type DatalabGender,
 } from './naver-datalab'
+
+// DataLab 가 인정하는 ages 코드: 1=10-, 2=10s, 3=20s ... 11=60+
+// 우리는 묶음 단위로 6 버킷 사용 — 각 버킷은 2~3개 코드를 합쳐 호출.
+const AGE_BUCKETS: Array<{ bucket: '10' | '20' | '30' | '40' | '50' | '60'; ages: string[] }> = [
+  { bucket: '10', ages: ['1', '2'] },
+  { bucket: '20', ages: ['3', '4'] },
+  { bucket: '30', ages: ['5', '6'] },
+  { bucket: '40', ages: ['7', '8'] },
+  { bucket: '50', ages: ['9', '10'] },
+  { bucket: '60', ages: ['11'] },
+]
+const GENDERS: DatalabGender[] = ['m', 'f']
+
+// cron timeout(60s) 보호 — 호출량이 폭발하지 않도록 시드 상한
+const DEMOGRAPHIC_SEED_LIMIT = 6
+const DEMOGRAPHIC_DELAY_MS = 120 // Naver DataLab QPS 보호
 
 /**
  * 트렌드 수집 코어 — cron 라우트가 호출.
@@ -53,6 +70,52 @@ async function logRun(
     started_at: new Date(startedAt).toISOString(),
     finished_at: new Date(finishedAt).toISOString(),
   })
+}
+
+async function sleep(ms: number) {
+  return new Promise((r) => setTimeout(r, ms))
+}
+
+/**
+ * 한 seed (keyword group 또는 category) 에 대해 6 ages × 2 gender = 12 segment 호출.
+ * 결과를 jimscanner_trends_demographics 에 적재.
+ *
+ * caller (search vs shopping) 에 따라 다른 fetch 함수를 주입받음.
+ *
+ * 실패는 segment 단위로 격리 — 일부 실패해도 나머지 진행.
+ * 반환값: 성공 적재된 row 수.
+ */
+async function collectSegmentsForSeed(
+  admin: SupabaseClient,
+  source: string,
+  keyword: string,
+  startDate: string,
+  endDate: string,
+  doFetch: (ages: string[], gender: DatalabGender) => Promise<number | null>,
+): Promise<{ inserted: number; error?: string }> {
+  const rows: Array<Record<string, unknown>> = []
+  let lastErr: string | undefined
+  for (const { bucket, ages } of AGE_BUCKETS) {
+    for (const gender of GENDERS) {
+      try {
+        const ratio = await doFetch(ages, gender)
+        rows.push({
+          source,
+          keyword,
+          age_bucket: bucket,
+          gender,
+          ratio_index: ratio,
+        })
+      } catch (e) {
+        lastErr = e instanceof Error ? e.message : String(e)
+      }
+      await sleep(DEMOGRAPHIC_DELAY_MS)
+    }
+  }
+  if (rows.length === 0) return { inserted: 0, error: lastErr }
+  const { error: insErr } = await admin.from('jimscanner_trends_demographics').insert(rows)
+  if (insErr) return { inserted: 0, error: insErr.message }
+  return { inserted: rows.length, error: lastErr }
 }
 
 export async function collectNaverSearchTrends(
@@ -131,6 +194,39 @@ export async function collectNaverSearchTrends(
         if (insErr) lastErr = insErr.message
         else inserted += rows.length
       }
+    } catch (e) {
+      lastErr = e instanceof Error ? e.message : String(e)
+    }
+  }
+
+  // ─── 연령·성별 분포 수집 (keyword group 단위) ───
+  // seed 상한 적용. 한 group 의 첫 keyword 만 demographics 호출용으로 사용.
+  for (const seed of seedList.slice(0, DEMOGRAPHIC_SEED_LIMIT)) {
+    const groupName = seed.config.groupName ?? seed.label
+    const keywords = seed.config.keywords ?? []
+    if (keywords.length === 0) continue
+    try {
+      const res = await collectSegmentsForSeed(
+        admin,
+        source,
+        groupName,
+        startDate,
+        endDate,
+        async (ages, gender) => {
+          const resp = await fetchSearchTrend({
+            startDate,
+            endDate,
+            timeUnit: 'date',
+            keywordGroups: [{ groupName, keywords }],
+            ages,
+            gender,
+          })
+          const data = resp.results?.[0]?.data ?? []
+          return data[data.length - 1]?.ratio ?? null
+        },
+      )
+      inserted += res.inserted
+      if (res.error) lastErr = res.error
     } catch (e) {
       lastErr = e instanceof Error ? e.message : String(e)
     }
@@ -220,6 +316,38 @@ export async function collectNaverShoppingTrends(
         if (insErr) lastErr = insErr.message
         else inserted += rows.length
       }
+    } catch (e) {
+      lastErr = e instanceof Error ? e.message : String(e)
+    }
+  }
+
+  // ─── 연령·성별 분포 수집 (category 단위) ───
+  for (const seed of seedList.slice(0, DEMOGRAPHIC_SEED_LIMIT)) {
+    const cid = seed.config.cid
+    if (!cid) continue
+    const name = seed.config.name ?? seed.label
+    try {
+      const res = await collectSegmentsForSeed(
+        admin,
+        source,
+        name,
+        startDate,
+        endDate,
+        async (ages, gender) => {
+          const resp = await fetchShoppingCategories({
+            startDate,
+            endDate,
+            timeUnit: 'date',
+            category: [{ name, param: [cid] }],
+            ages,
+            gender,
+          })
+          const data = resp.results?.[0]?.data ?? []
+          return data[data.length - 1]?.ratio ?? null
+        },
+      )
+      inserted += res.inserted
+      if (res.error) lastErr = res.error
     } catch (e) {
       lastErr = e instanceof Error ? e.message : String(e)
     }

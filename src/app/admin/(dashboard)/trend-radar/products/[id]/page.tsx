@@ -35,6 +35,13 @@ interface ScoreRow {
   score_components: any
   computed_at: string
 }
+interface DemographicRow {
+  keyword: string
+  age_bucket: '10' | '20' | '30' | '40' | '50' | '60'
+  gender: 'm' | 'f'
+  ratio_index: number | null
+  collected_at: string
+}
 
 async function fetchProduct(id: string) {
   const sb = createAdminClient()
@@ -55,10 +62,24 @@ async function fetchProduct(id: string) {
 
   if (prodRes.error || !prodRes.data) return null
 
+  // 연령·성별 분포 — alias 들과 매칭되는 키워드 또는 product_id 직접 매칭
+  const aliasTexts = (aliasRes.data ?? []).map((a: { alias: string }) => a.alias)
+  let demographics: DemographicRow[] = []
+  if (aliasTexts.length > 0) {
+    const { data: demoRows } = await sb
+      .from('jimscanner_trends_demographics' as never)
+      .select('keyword, age_bucket, gender, ratio_index, collected_at')
+      .or(`product_id.eq.${id},keyword.in.(${aliasTexts.map((a) => `"${a.replace(/"/g, '\\"')}"`).join(',')})`)
+      .order('collected_at', { ascending: false })
+      .limit(500)
+    demographics = (demoRows ?? []) as unknown as DemographicRow[]
+  }
+
   return {
     product: prodRes.data as ProductRow,
     aliases: (aliasRes.data ?? []) as AliasRow[],
     scoreHistory: (scoreRes.data ?? []) as ScoreRow[],
+    demographics,
   }
 }
 
@@ -70,8 +91,9 @@ export default async function ProductDetailPage({
   const { id } = await params
   const data = await fetchProduct(id)
   if (!data) notFound()
-  const { product, aliases, scoreHistory } = data
+  const { product, aliases, scoreHistory, demographics } = data
   const latest = scoreHistory[0]
+  const heatmap = aggregateDemographics(demographics)
 
   return (
     <div className="space-y-6 p-6">
@@ -152,6 +174,9 @@ export default async function ProductDetailPage({
         </section>
       )}
 
+      {/* 연령·성별 분포 히트맵 */}
+      <DemographicHeatmap heatmap={heatmap} sampleCount={demographics.length} />
+
       {/* score breakdown */}
       {latest?.score_components && (
         <section>
@@ -194,5 +219,108 @@ function ScoreCard({ label, value, bold }: { label: string; value: number; bold?
         {value}
       </div>
     </div>
+  )
+}
+
+const AGE_LABELS: Array<'10' | '20' | '30' | '40' | '50' | '60'> = ['10','20','30','40','50','60']
+const GENDER_LABELS: Array<'m' | 'f'> = ['m','f']
+
+type Heatmap = {
+  cells: Record<string, number>  // key = `${age}-${gender}`, value = avg ratio
+  max: number
+  topSegment: { age: string; gender: 'm' | 'f'; ratio: number } | null
+}
+
+function aggregateDemographics(rows: DemographicRow[]): Heatmap {
+  // 같은 (age,gender) 의 여러 keyword/시점 평균
+  const sums = new Map<string, { sum: number; n: number }>()
+  for (const r of rows) {
+    if (r.ratio_index == null) continue
+    const k = `${r.age_bucket}-${r.gender}`
+    const cur = sums.get(k) ?? { sum: 0, n: 0 }
+    cur.sum += Number(r.ratio_index)
+    cur.n += 1
+    sums.set(k, cur)
+  }
+  const cells: Record<string, number> = {}
+  let max = 0
+  let topSegment: Heatmap['topSegment'] = null
+  for (const [k, v] of sums.entries()) {
+    const avg = v.sum / v.n
+    cells[k] = avg
+    if (avg > max) {
+      max = avg
+      const [age, gender] = k.split('-')
+      topSegment = { age, gender: gender as 'm' | 'f', ratio: avg }
+    }
+  }
+  return { cells, max, topSegment }
+}
+
+function DemographicHeatmap({ heatmap, sampleCount }: { heatmap: Heatmap; sampleCount: number }) {
+  if (sampleCount === 0) {
+    return (
+      <section>
+        <h2 className="text-sm font-semibold mb-2">연령 × 성별 분포</h2>
+        <div className="rounded border border-dashed border-gray-300 p-6 text-xs text-gray-500 text-center">
+          DataLab 인구통계 데이터 없음 — cron 1회 이상 실행 후 표시됨.
+        </div>
+      </section>
+    )
+  }
+  const { cells, max, topSegment } = heatmap
+  return (
+    <section>
+      <h2 className="text-sm font-semibold mb-2">
+        연령 × 성별 분포
+        {topSegment && (
+          <span className="ml-2 text-xs font-normal text-gray-500">
+            top: {topSegment.age}대 {topSegment.gender === 'f' ? '여성' : '남성'} (avg ratio {topSegment.ratio.toFixed(1)})
+          </span>
+        )}
+      </h2>
+      <div className="rounded border border-gray-200 p-3 inline-block">
+        <table className="text-xs">
+          <thead>
+            <tr>
+              <th className="px-2 py-1"></th>
+              {AGE_LABELS.map((a) => (
+                <th key={a} className="px-2 py-1 text-center text-gray-500 font-normal">{a}대</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {GENDER_LABELS.map((g) => (
+              <tr key={g}>
+                <td className="px-2 py-1 text-gray-500">{g === 'f' ? '여성' : '남성'}</td>
+                {AGE_LABELS.map((a) => {
+                  const v = cells[`${a}-${g}`]
+                  const intensity = v != null && max > 0 ? v / max : 0
+                  // 0.0 → bg-gray-50, 1.0 → bg-amber-500
+                  const bg = v == null
+                    ? '#f9fafb'
+                    : `rgba(245,158,11,${0.1 + 0.85 * intensity})`
+                  return (
+                    <td
+                      key={a}
+                      className="px-3 py-2 text-center border border-gray-100"
+                      style={{ backgroundColor: bg }}
+                      title={v != null ? `avg ratio ${v.toFixed(2)}` : 'no data'}
+                    >
+                      <span className={intensity > 0.55 ? 'text-white font-semibold' : 'text-gray-700'}>
+                        {v != null ? v.toFixed(0) : '–'}
+                      </span>
+                    </td>
+                  )
+                })}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <p className="text-[10px] text-gray-400 mt-1">
+        Naver DataLab ratio (0~100, 기간 내 최댓값=100) 평균. {sampleCount} 샘플.
+      </p>
+    </section>
   )
 }
