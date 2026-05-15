@@ -31,6 +31,39 @@ interface ScoreRow {
   score_components?: any
 }
 
+interface CommunityLeadRow {
+  product_id: string
+  canonical_name: string
+  category_top: string | null
+  community_rolling_14d: number
+  commerce_rolling_14d: number
+  lead_days: number
+  dominant_board: string | null
+  ggsan_match_count: number
+}
+
+async function fetchCommunityLeadTop5() {
+  const sb = createAdminClient()
+  const { data, error } = await (sb as any).rpc('jimscanner_community_lead', {
+    days_window: 14,
+    min_sim: 0.25,
+    result_limit: 50,
+  })
+  if (error) {
+    console.error('community_lead summary rpc error', error)
+    return { top: [] as CommunityLeadRow[], total: 0, ggsanMatched: 0 }
+  }
+  const rows = (data ?? []) as CommunityLeadRow[]
+  const top = [...rows]
+    .sort((a, b) => {
+      if (b.lead_days !== a.lead_days) return b.lead_days - a.lead_days
+      return (b.community_rolling_14d - b.commerce_rolling_14d) - (a.community_rolling_14d - a.commerce_rolling_14d)
+    })
+    .slice(0, 5)
+  const ggsanMatched = rows.filter((r) => r.ggsan_match_count > 0).length
+  return { top, total: rows.length, ggsanMatched }
+}
+
 async function fetchTvGgsanMatchSummary() {
   const sb = createAdminClient()
   const { data } = await sb.rpc('jimscanner_tv_ggsan_match', {
@@ -132,10 +165,11 @@ export default async function TrendRadarPage({
   const sp = await searchParams
   const category = (CATEGORIES.includes(sp.cat as Category) ? sp.cat : 'all') as Category
 
-  const [{ products, scores, kpis }, tvPushes, tvGgsan] = await Promise.all([
+  const [{ products, scores, kpis }, tvPushes, tvGgsan, communityLead] = await Promise.all([
     fetchData(category),
     fetchTvPushes(),
     fetchTvGgsanMatchSummary(),
+    fetchCommunityLeadTop5(),
   ])
 
   const sorted = products
@@ -185,6 +219,63 @@ export default async function TrendRadarPage({
           </Link>
         ))}
       </nav>
+
+      {/* 🌊 커뮤니티 선행 Top 5 callout */}
+      <Link
+        href="/admin/trend-radar/community-lead"
+        className={`block rounded border px-4 py-3 transition-colors ${
+          communityLead.top.length > 0
+            ? 'border-cyan-300 bg-cyan-50 hover:bg-cyan-100'
+            : 'border-gray-200 hover:bg-gray-50'
+        }`}
+      >
+        <div className="flex items-center justify-between flex-wrap gap-2 mb-2">
+          <div>
+            <div className="text-sm font-semibold">
+              🌊 커뮤니티 선행 Top 5{' '}
+              <span className="text-xs font-normal text-gray-500 ml-1">
+                82cook · 네이트판 · 뽐뿌 · 디시 · 클리앙 → commerce 보다 먼저 반응한 후보
+              </span>
+            </div>
+            <div className="text-xs text-gray-600 mt-0.5">
+              {communityLead.total}개 product 후보
+              {communityLead.ggsanMatched > 0 && (
+                <span className="ml-2 text-amber-700 font-semibold">
+                  · ggsan 매칭 {communityLead.ggsanMatched}건
+                </span>
+              )}
+            </div>
+          </div>
+          <span className="text-xs text-gray-500">전체 보기 →</span>
+        </div>
+        {communityLead.top.length > 0 && (
+          <div className="space-y-1 mt-2">
+            {communityLead.top.map((r, i) => (
+              <div key={r.product_id} className="flex items-center gap-2 text-sm px-2 py-1 bg-white/60 rounded">
+                <span className="font-mono text-xs text-gray-400 w-4">{i + 1}</span>
+                <span className="flex-1 truncate font-medium">{r.canonical_name}</span>
+                {r.dominant_board && (
+                  <span className="text-[10px] px-1.5 py-0.5 rounded bg-cyan-100 text-cyan-700">
+                    {r.dominant_board.replace(/_.*$/, '')}
+                  </span>
+                )}
+                <span className="text-xs font-mono text-gray-600">
+                  c<strong className="text-cyan-700">{r.community_rolling_14d}</strong>
+                  /m{r.commerce_rolling_14d}
+                </span>
+                <span className="text-xs font-mono font-bold w-12 text-right">
+                  +{r.lead_days}d
+                </span>
+                {r.ggsan_match_count > 0 && (
+                  <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-100 text-amber-700 font-semibold">
+                    ggsan
+                  </span>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </Link>
 
       {/* 🔥 TV ↔ ggsan 매칭 callout */}
       <Link

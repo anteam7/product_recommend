@@ -9,6 +9,7 @@ const NAV = [
   { href: '/admin/trend-radar/recommend', label: '⭐ 추천' },
   { href: '/admin/trend-radar/tv-pushes', label: 'TV 편성' },
   { href: '/admin/trend-radar/tv-ggsan-match', label: 'TV ↔ ggsan' },
+  { href: '/admin/trend-radar/community-lead', label: '🌊 커뮤니티 선행' },
   { href: '/admin/trend-radar/ggsan', label: 'ggsan 카탈로그' },
   { href: '/admin/trend-radar/opportunity', label: 'Opportunity' },
   { href: '/admin/trend-radar/pins', label: '핀' },
