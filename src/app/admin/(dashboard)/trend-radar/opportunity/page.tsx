@@ -14,6 +14,15 @@ interface ScoreRow {
   computed_at: string
 }
 
+interface HalflifeRow {
+  product_id: string
+  t_half_weeks: number | null
+  ci_low: number | null
+  ci_high: number | null
+  analog_count: number
+  confidence: 'high' | 'mid' | 'low'
+}
+
 async function fetchData() {
   const sb = createAdminClient()
 
@@ -35,15 +44,27 @@ async function fetchData() {
   const ids = latest.map((s) => s.product_id)
   if (ids.length === 0) return { rows: [] }
 
-  const { data: prods } = await sb
-    .from('jimscanner_trends_products')
-    .select('id, canonical_name, category_top')
-    .in('id', ids)
-  const byId = new Map((prods ?? []).map((p: any) => [p.id, p]))
+  const [prodsRes, hlRes] = await Promise.all([
+    sb
+      .from('jimscanner_trends_products')
+      .select('id, canonical_name, category_top')
+      .in('id', ids),
+    // jimscanner_trends_halflife_latest 뷰 — generated 타입 미반영 → any 캐스팅
+    (sb as any)
+      .from('jimscanner_trends_halflife_latest')
+      .select('product_id, t_half_weeks, ci_low, ci_high, analog_count, confidence')
+      .in('product_id', ids),
+  ])
+
+  const byId = new Map((prodsRes.data ?? []).map((p: any) => [p.id, p]))
+  const hlById = new Map<string, HalflifeRow>(
+    (((hlRes as any)?.data ?? []) as HalflifeRow[]).map((h) => [h.product_id, h]),
+  )
 
   return {
     rows: latest.map((s) => {
       const p = byId.get(s.product_id) ?? {}
+      const hl = hlById.get(s.product_id)
       return {
         id: s.product_id,
         name: (p as any).canonical_name ?? '?',
@@ -53,6 +74,11 @@ async function fetchData() {
         size: Math.max(50, s.commerce_score * 4),
         final: s.final_score,
         supplier: s.supplier_score,
+        tHalf: hl?.t_half_weeks ?? null,
+        ciLow: hl?.ci_low ?? null,
+        ciHigh: hl?.ci_high ?? null,
+        hlConfidence: hl?.confidence ?? null,
+        hlAnalogCount: hl?.analog_count ?? 0,
       }
     }),
   }

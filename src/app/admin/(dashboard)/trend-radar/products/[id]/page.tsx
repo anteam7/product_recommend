@@ -36,9 +36,21 @@ interface ScoreRow {
   computed_at: string
 }
 
+interface HalflifeRow {
+  t_half_weeks: number | null
+  ci_low: number | null
+  ci_high: number | null
+  analog_ids: string[]
+  analog_count: number
+  confidence: 'high' | 'mid' | 'low'
+  current_score: number | null
+  weeks_observed: number | null
+  computed_at: string
+}
+
 async function fetchProduct(id: string) {
   const sb = createAdminClient()
-  const [prodRes, aliasRes, scoreRes] = await Promise.all([
+  const [prodRes, aliasRes, scoreRes, hlRes] = await Promise.all([
     sb.from('jimscanner_trends_products').select('*').eq('id', id).single(),
     sb
       .from('jimscanner_trends_aliases')
@@ -51,6 +63,14 @@ async function fetchProduct(id: string) {
       .eq('product_id', id)
       .order('computed_at', { ascending: false })
       .limit(30),
+    // 신규 테이블 — generated 타입 미반영 → any 캐스팅
+    (sb as any)
+      .from('jimscanner_trends_halflife_forecasts')
+      .select('t_half_weeks, ci_low, ci_high, analog_ids, analog_count, confidence, current_score, weeks_observed, computed_at')
+      .eq('product_id', id)
+      .order('computed_at', { ascending: false })
+      .limit(1)
+      .maybeSingle(),
   ])
 
   if (prodRes.error || !prodRes.data) return null
@@ -59,6 +79,7 @@ async function fetchProduct(id: string) {
     product: prodRes.data as ProductRow,
     aliases: (aliasRes.data ?? []) as AliasRow[],
     scoreHistory: (scoreRes.data ?? []) as ScoreRow[],
+    halflife: ((hlRes as any)?.data ?? null) as HalflifeRow | null,
   }
 }
 
@@ -70,8 +91,10 @@ export default async function ProductDetailPage({
   const { id } = await params
   const data = await fetchProduct(id)
   if (!data) notFound()
-  const { product, aliases, scoreHistory } = data
+  const { product, aliases, scoreHistory, halflife } = data
   const latest = scoreHistory[0]
+  // scoreHistory 는 최신→과거 순. 스파크라인엔 시간순(과거→최신)이 필요.
+  const sparkSeries = [...scoreHistory].reverse().map((s) => Number(s.final_score))
 
   return (
     <div className="space-y-6 p-6">
@@ -118,6 +141,9 @@ export default async function ProductDetailPage({
           <ScoreCard label="competition" value={latest.competition_score} />
         </section>
       )}
+
+      {/* 반감기(T½) 예측 카드 */}
+      <HalflifeCard halflife={halflife} sparkSeries={sparkSeries} latestScore={latest?.final_score ?? null} />
 
       {/* score 시계열 (최근 30 row) */}
       {scoreHistory.length > 1 && (
@@ -192,6 +218,147 @@ function ScoreCard({ label, value, bold }: { label: string; value: number; bold?
       <div className="text-xs text-gray-500 uppercase">{label}</div>
       <div className={`mt-1 ${bold ? 'text-3xl font-bold' : 'text-2xl text-gray-700'}`}>
         {value}
+      </div>
+    </div>
+  )
+}
+
+function Sparkline({ series, width = 240, height = 60 }: { series: number[]; width?: number; height?: number }) {
+  if (series.length < 2) {
+    return <div className="text-xs text-gray-400">데이터 부족</div>
+  }
+  const max = Math.max(...series, 1)
+  const min = Math.min(...series, 0)
+  const range = Math.max(max - min, 1)
+  const step = width / (series.length - 1)
+  const points = series
+    .map((v, i) => `${(i * step).toFixed(2)},${(height - ((v - min) / range) * height).toFixed(2)}`)
+    .join(' ')
+  return (
+    <svg width={width} height={height} className="block">
+      <polyline points={points} fill="none" stroke="#d97706" strokeWidth="2" />
+    </svg>
+  )
+}
+
+function HalflifeCard({
+  halflife,
+  sparkSeries,
+  latestScore,
+}: {
+  halflife: HalflifeRow | null
+  sparkSeries: number[]
+  latestScore: number | null
+}) {
+  if (!halflife) {
+    return (
+      <section className="rounded border border-dashed border-gray-300 p-4 text-sm text-gray-500">
+        <div className="font-semibold text-gray-700 mb-1">⏳ 반감기(T½) 예측</div>
+        <p className="text-xs">
+          아직 예측 row 가 없음. <code className="font-mono">scripts/predict-halflife.mjs</code> 가 24h 주기로 돈 뒤 표시됨.
+        </p>
+      </section>
+    )
+  }
+
+  const confColor =
+    halflife.confidence === 'high'
+      ? 'bg-emerald-100 text-emerald-800 border-emerald-200'
+      : halflife.confidence === 'mid'
+        ? 'bg-amber-100 text-amber-800 border-amber-200'
+        : 'bg-gray-100 text-gray-600 border-gray-200'
+
+  const tHalf = halflife.t_half_weeks
+  const ciLow = halflife.ci_low
+  const ciHigh = halflife.ci_high
+
+  return (
+    <section className="rounded border border-amber-200 bg-amber-50/30 p-4">
+      <div className="flex items-start justify-between gap-4 flex-wrap">
+        <div className="flex-1 min-w-[240px]">
+          <div className="flex items-center gap-2 mb-2">
+            <h2 className="text-sm font-semibold text-amber-900">⏳ 반감기(T½) 예측</h2>
+            <span className={`text-[10px] px-2 py-0.5 rounded border ${confColor} font-medium uppercase`}>
+              {halflife.confidence}
+            </span>
+            <span className="text-[10px] text-gray-500 font-mono">
+              analog {halflife.analog_count}건 · 관측 {halflife.weeks_observed}주
+            </span>
+          </div>
+          <div className="flex items-baseline gap-3">
+            <span className="text-4xl font-bold text-amber-700 font-mono">
+              {tHalf != null ? Number(tHalf).toFixed(1) : '—'}
+            </span>
+            <span className="text-sm text-gray-600">주 (T½)</span>
+            {ciLow != null && ciHigh != null && (
+              <span className="text-xs text-gray-500 font-mono">
+                80% CI: {Number(ciLow).toFixed(1)} ~ {Number(ciHigh).toFixed(1)}주
+              </span>
+            )}
+          </div>
+          {tHalf == null && (
+            <p className="text-xs text-gray-500 mt-2">
+              analog 풀 부족 — 신규 카테고리이거나 매칭 종료 트렌드가 없음. confidence='low' 권고: <strong>보수적 진입</strong>.
+            </p>
+          )}
+          {tHalf != null && (
+            <p className="text-xs text-gray-600 mt-2">
+              현재 점수 {latestScore ?? '—'} → 절반 {latestScore != null ? Math.round(Number(latestScore) / 2) : '—'} 도달까지 {Number(tHalf).toFixed(1)}주 예상.
+              위탁 통관 2~3주 가정 시{' '}
+              {tHalf != null && Number(tHalf) <= 3 ? (
+                <strong className="text-red-700">⚠ 입고 시점에 반감기 임박 — 진입 비권장</strong>
+              ) : tHalf != null && Number(tHalf) <= 6 ? (
+                <strong className="text-amber-700">소량 진입 권장</strong>
+              ) : (
+                <strong className="text-emerald-700">정상 진입 가능</strong>
+              )}
+              .
+            </p>
+          )}
+          <PaybackSimulator tHalf={tHalf} ciLow={ciLow} ciHigh={ciHigh} />
+        </div>
+        <div className="text-right">
+          <div className="text-[10px] text-gray-500 mb-1">final_score 추이</div>
+          <Sparkline series={sparkSeries} />
+        </div>
+      </div>
+    </section>
+  )
+}
+
+function PaybackSimulator({
+  tHalf,
+  ciLow,
+  ciHigh,
+}: {
+  tHalf: number | null
+  ciLow: number | null
+  ciHigh: number | null
+}) {
+  if (tHalf == null) return null
+  // SSR 컴포넌트라 input/state 없이, 고정 시나리오(입고 N=100, 통관 3주, 주당 판매율 30%) 로 잔여 재고 표시.
+  const stockIn = 100
+  const customsWeeks = 3
+  const weeklySellRate = 0.3
+  // T½ 도달까지 남은 주차 — 통관 기간 제외
+  const effective = Math.max(0, tHalf - customsWeeks)
+  const sold = Math.min(stockIn, Math.round(stockIn * (1 - Math.pow(1 - weeklySellRate, effective))))
+  const remaining = stockIn - sold
+  const lowEff = ciLow != null ? Math.max(0, ciLow - customsWeeks) : effective
+  const highEff = ciHigh != null ? Math.max(0, ciHigh - customsWeeks) : effective
+  const remLow = stockIn - Math.min(stockIn, Math.round(stockIn * (1 - Math.pow(1 - weeklySellRate, lowEff))))
+  const remHigh = stockIn - Math.min(stockIn, Math.round(stockIn * (1 - Math.pow(1 - weeklySellRate, highEff))))
+  return (
+    <div className="mt-3 rounded bg-white/70 border border-amber-100 px-3 py-2 text-xs">
+      <div className="font-semibold text-gray-700 mb-1">💰 payback 시뮬레이터 (입고 100개 · 통관 3주 · 주당 30% 판매)</div>
+      <div className="font-mono text-gray-700">
+        T½ 도달 시 잔여 재고: <strong className="text-amber-700 text-base">{remaining}개</strong>
+        <span className="text-gray-500 ml-2">
+          (CI: {Math.min(remLow, remHigh)} ~ {Math.max(remLow, remHigh)}개)
+        </span>
+      </div>
+      <div className="text-[10px] text-gray-500 mt-1">
+        잔여 = 100 × (1 − 0.3)^max(0, T½ − 3) · 잔여가 클수록 데드스톡 리스크 ↑
       </div>
     </div>
   )

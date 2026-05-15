@@ -144,4 +144,24 @@ if (!skipClassify) {
   if (classifyExit !== 0) failCount++
 }
 
+// predict-halflife: 트렌드 반감기(T½) 예측 — 24h 주기 (cron 호출 1회/일 기준).
+//   filter 걸리면 스킵, --no-halflife 로도 스킵 가능.
+const skipHalflife = args.includes('--no-halflife') || !!filter
+if (!skipHalflife) {
+  console.log(`[${new Date().toISOString()}] launching predict-halflife`)
+  const scriptPath = resolvePath(__dirname, 'predict-halflife.mjs')
+  const hlExit = await new Promise((resolve) => {
+    const child = spawn(process.execPath, [scriptPath], {
+      stdio: 'inherit',
+      env: process.env,
+    })
+    child.on('exit', (code) => resolve(code ?? 0))
+    child.on('error', (err) => {
+      console.error(`  predict-halflife spawn error: ${err.message}`)
+      resolve(1)
+    })
+  })
+  if (hlExit !== 0) failCount++
+}
+
 process.exit(failCount > 0 ? 1 : 0)

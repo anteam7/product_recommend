@@ -11,6 +11,11 @@ interface Row {
   size: number
   final: number
   supplier: number
+  tHalf: number | null
+  ciLow: number | null
+  ciHigh: number | null
+  hlConfidence: 'high' | 'mid' | 'low' | null
+  hlAnalogCount: number
 }
 
 const CATEGORY_COLORS: Record<string, string> = {
@@ -22,8 +27,13 @@ const CATEGORY_COLORS: Record<string, string> = {
   all: '#6b7280',
 }
 
+type SortMode = 'final' | 'tHalfAsc' | 'tHalfDesc'
+type HalflifeFilter = 'all' | 'safe' | 'risk'
+
 export default function OpportunityScatter({ rows }: { rows: Row[] }) {
   const [hover, setHover] = useState<Row | null>(null)
+  const [sort, setSort] = useState<SortMode>('final')
+  const [hlFilter, setHlFilter] = useState<HalflifeFilter>('all')
   const W = 720
   const H = 480
   const PAD = 50
@@ -96,6 +106,12 @@ export default function OpportunityScatter({ rows }: { rows: Row[] }) {
             <div className="font-semibold">{hover.name}</div>
             <div>category: {hover.category}</div>
             <div>final: {hover.final} · trend: {hover.y} · competition: {hover.x} · supplier: {hover.supplier}</div>
+            <div className="mt-1 pt-1 border-t border-white/20">
+              T½: {hover.tHalf != null ? `${Number(hover.tHalf).toFixed(1)}주` : '—'}
+              {hover.hlConfidence && (
+                <span className="ml-1 text-[10px] uppercase opacity-70">({hover.hlConfidence})</span>
+              )}
+            </div>
           </div>
         )}
       </div>
@@ -132,6 +148,128 @@ export default function OpportunityScatter({ rows }: { rows: Row[] }) {
             <div className="text-gray-400 text-xs">아직 우상단 후보 없음. 30일 누적 후 자연 등장.</div>
           )}
         </div>
+      </div>
+
+      {/* T½ 안전구간 보드 */}
+      <div className="mt-6 border-t border-gray-200 pt-4">
+        <div className="flex items-center justify-between mb-2 flex-wrap gap-2">
+          <h3 className="text-sm font-semibold">⏳ 반감기(T½) 안전구간 보드</h3>
+          <div className="flex items-center gap-1 text-xs">
+            <span className="text-gray-500 mr-1">정렬:</span>
+            <button
+              onClick={() => setSort('final')}
+              className={`px-2 py-0.5 rounded ${sort === 'final' ? 'bg-black text-white' : 'text-gray-500 hover:text-black'}`}
+            >
+              final↓
+            </button>
+            <button
+              onClick={() => setSort('tHalfDesc')}
+              className={`px-2 py-0.5 rounded ${sort === 'tHalfDesc' ? 'bg-black text-white' : 'text-gray-500 hover:text-black'}`}
+            >
+              T½↓ (안전)
+            </button>
+            <button
+              onClick={() => setSort('tHalfAsc')}
+              className={`px-2 py-0.5 rounded ${sort === 'tHalfAsc' ? 'bg-black text-white' : 'text-gray-500 hover:text-black'}`}
+            >
+              T½↑ (식어가는)
+            </button>
+            <span className="text-gray-500 ml-3 mr-1">필터:</span>
+            <button
+              onClick={() => setHlFilter('all')}
+              className={`px-2 py-0.5 rounded ${hlFilter === 'all' ? 'bg-amber-100 text-amber-700 font-semibold' : 'text-gray-500 hover:text-black'}`}
+            >
+              전체
+            </button>
+            <button
+              onClick={() => setHlFilter('safe')}
+              className={`px-2 py-0.5 rounded ${hlFilter === 'safe' ? 'bg-emerald-100 text-emerald-700 font-semibold' : 'text-gray-500 hover:text-black'}`}
+            >
+              안전 (T½&gt;6주)
+            </button>
+            <button
+              onClick={() => setHlFilter('risk')}
+              className={`px-2 py-0.5 rounded ${hlFilter === 'risk' ? 'bg-red-100 text-red-700 font-semibold' : 'text-gray-500 hover:text-black'}`}
+            >
+              위험 (T½≤3주)
+            </button>
+          </div>
+        </div>
+        <div className="rounded border border-gray-200 overflow-x-auto">
+          <table className="w-full text-xs">
+            <thead className="bg-gray-50 text-gray-500">
+              <tr>
+                <th className="px-3 py-2 text-left">상품</th>
+                <th className="px-3 py-2 text-right">final</th>
+                <th className="px-3 py-2 text-right">T½ (주)</th>
+                <th className="px-3 py-2 text-right">80% CI</th>
+                <th className="px-3 py-2 text-center">신뢰도</th>
+                <th className="px-3 py-2 text-right">analog</th>
+                <th className="px-3 py-2 text-center">권고</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-gray-100">
+              {[...rows]
+                .filter((r) => {
+                  if (hlFilter === 'safe') return r.tHalf != null && r.tHalf > 6
+                  if (hlFilter === 'risk') return r.tHalf != null && r.tHalf <= 3
+                  return true
+                })
+                .sort((a, b) => {
+                  if (sort === 'final') return b.final - a.final
+                  // null T½ 는 항상 끝으로
+                  const av = a.tHalf == null ? (sort === 'tHalfAsc' ? Infinity : -Infinity) : Number(a.tHalf)
+                  const bv = b.tHalf == null ? (sort === 'tHalfAsc' ? Infinity : -Infinity) : Number(b.tHalf)
+                  return sort === 'tHalfAsc' ? av - bv : bv - av
+                })
+                .slice(0, 30)
+                .map((r) => {
+                  const t = r.tHalf
+                  const verdict =
+                    t == null
+                      ? { label: '예측 없음', cls: 'text-gray-400' }
+                      : t <= 3
+                        ? { label: '⚠ 진입 비권장', cls: 'text-red-700 font-semibold' }
+                        : t <= 6
+                          ? { label: '소량 진입', cls: 'text-amber-700' }
+                          : { label: '정상 진입', cls: 'text-emerald-700' }
+                  return (
+                    <tr key={r.id}>
+                      <td className="px-3 py-1">
+                        <Link href={`/admin/trend-radar/products/${r.id}`} className="hover:underline">
+                          {r.name}
+                        </Link>
+                      </td>
+                      <td className="px-3 py-1 text-right font-mono">{r.final}</td>
+                      <td className="px-3 py-1 text-right font-mono font-bold">
+                        {t != null ? Number(t).toFixed(1) : '—'}
+                      </td>
+                      <td className="px-3 py-1 text-right font-mono text-gray-500">
+                        {r.ciLow != null && r.ciHigh != null
+                          ? `${Number(r.ciLow).toFixed(1)}~${Number(r.ciHigh).toFixed(1)}`
+                          : '—'}
+                      </td>
+                      <td className="px-3 py-1 text-center text-[10px] uppercase">
+                        {r.hlConfidence ?? '—'}
+                      </td>
+                      <td className="px-3 py-1 text-right font-mono text-gray-500">{r.hlAnalogCount}</td>
+                      <td className={`px-3 py-1 text-center text-xs ${verdict.cls}`}>{verdict.label}</td>
+                    </tr>
+                  )
+                })}
+              {rows.length === 0 && (
+                <tr>
+                  <td colSpan={7} className="px-3 py-6 text-center text-gray-400">
+                    데이터 없음.
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+        <p className="text-[10px] text-gray-500 mt-2">
+          method=cosine_analog_v1 · 초기 4주 final_score 벡터 vs 종료 트렌드 풀 cosine≥0.85 매칭 · T½ = analog 분포 중앙값 · CI = 10·90 백분위
+        </p>
       </div>
     </div>
   )
