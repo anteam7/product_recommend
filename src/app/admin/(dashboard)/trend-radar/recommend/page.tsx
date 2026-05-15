@@ -41,6 +41,12 @@ const SIM_OPTIONS = [
   { v: 0.3, label: '0.30 (엄격)' },
 ] as const
 
+interface RetailProbe {
+  retail_med_krw: number | null
+  margin_pct: number | null
+  listing_count: number | null
+}
+
 async function fetchRecommend(opts: {
   days: number
   minSim: number
@@ -56,12 +62,50 @@ async function fetchRecommend(opts: {
     result_limit: 200,
   } as never)
   if (error) {
-    return { rows: [] as RecommendRow[], error: error.message }
+    return { rows: [] as RecommendRow[], probes: new Map<string, RetailProbe>(), error: error.message }
   }
   let rows = (data ?? []) as RecommendRow[]
   if (opts.imminentOnly) rows = rows.filter((r) => r.is_imminent)
   if (opts.cate) rows = rows.filter((r) => r.cate_cd === opts.cate)
-  return { rows, error: null as string | null }
+
+  // retail probe (jimscanner_margin_candidates view) — generated 타입 미반영 → 캐스팅
+  const probes = new Map<string, RetailProbe>()
+  if (rows.length > 0) {
+    const goodsNos = rows.map((r) => r.goods_no)
+    const sbAny = sb as unknown as {
+      from: (t: string) => {
+        select: (s: string) => {
+          in: (
+            col: string,
+            vals: string[],
+          ) => Promise<{
+            data:
+              | Array<{
+                  goods_no: string
+                  retail_med_krw: number | null
+                  margin_pct: number | null
+                  listing_count: number | null
+                }>
+              | null
+            error: { message: string } | null
+          }>
+        }
+      }
+    }
+    const { data: probeRows } = await sbAny
+      .from('jimscanner_margin_candidates')
+      .select('goods_no,retail_med_krw,margin_pct,listing_count')
+      .in('goods_no', goodsNos)
+    for (const pr of probeRows ?? []) {
+      probes.set(pr.goods_no, {
+        retail_med_krw: pr.retail_med_krw,
+        margin_pct: pr.margin_pct,
+        listing_count: pr.listing_count,
+      })
+    }
+  }
+
+  return { rows, probes, error: null as string | null }
 }
 
 const CATEGORIES: { code: string; label: string }[] = [
@@ -122,7 +166,7 @@ export default async function RecommendPage({
     cate,
   }
 
-  const { rows, error } = await fetchRecommend({ days: validDays, minSim: validSim, imminentOnly, cate })
+  const { rows, probes, error } = await fetchRecommend({ days: validDays, minSim: validSim, imminentOnly, cate })
 
   // KPI
   const total = rows.length
@@ -235,7 +279,9 @@ export default async function RecommendPage({
         </div>
       ) : (
         <div className="space-y-2">
-          {rows.map((r, i) => (
+          {rows.map((r, i) => {
+            const probe = probes.get(r.goods_no)
+            return (
             <a
               key={r.goods_no}
               href={r.detail_url ?? '#'}
@@ -291,6 +337,17 @@ export default async function RecommendPage({
                         from {r.search_sources.map(sourceLabel).join(', ')}
                       </span>
                     )}
+                    {probe?.retail_med_krw != null && (
+                      <span className="bg-emerald-100 text-emerald-800 px-2 py-0.5 rounded">
+                        💰 리테일 중앙 {probe.retail_med_krw.toLocaleString()}원
+                        {probe.margin_pct != null && (
+                          <> · 마진 ▴{(probe.margin_pct * 100).toFixed(1)}%</>
+                        )}
+                        {probe.listing_count != null && (
+                          <> · 경쟁 {probe.listing_count.toLocaleString()}건</>
+                        )}
+                      </span>
+                    )}
                   </div>
                 </div>
 
@@ -310,7 +367,8 @@ export default async function RecommendPage({
                 </div>
               </div>
             </a>
-          ))}
+            )
+          })}
         </div>
       )}
 
