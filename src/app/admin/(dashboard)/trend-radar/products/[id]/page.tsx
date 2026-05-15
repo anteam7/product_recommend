@@ -36,9 +36,18 @@ interface ScoreRow {
   computed_at: string
 }
 
+interface SentimentSummary {
+  mention_count: number
+  pos_ratio: number
+  neg_ratio: number
+  claim_ratio: number
+  claim_keywords: string[] | null
+  window_end: string
+}
+
 async function fetchProduct(id: string) {
   const sb = createAdminClient()
-  const [prodRes, aliasRes, scoreRes] = await Promise.all([
+  const [prodRes, aliasRes, scoreRes, sentRes] = await Promise.all([
     sb.from('jimscanner_trends_products').select('*').eq('id', id).single(),
     sb
       .from('jimscanner_trends_aliases')
@@ -51,6 +60,11 @@ async function fetchProduct(id: string) {
       .eq('product_id', id)
       .order('computed_at', { ascending: false })
       .limit(30),
+    (sb as any)
+      .from('jimscanner_trends_sentiment_latest')
+      .select('mention_count, pos_ratio, neg_ratio, claim_ratio, claim_keywords, window_end')
+      .eq('product_id', id)
+      .maybeSingle(),
   ])
 
   if (prodRes.error || !prodRes.data) return null
@@ -59,6 +73,7 @@ async function fetchProduct(id: string) {
     product: prodRes.data as ProductRow,
     aliases: (aliasRes.data ?? []) as AliasRow[],
     scoreHistory: (scoreRes.data ?? []) as ScoreRow[],
+    sentiment: (sentRes && !sentRes.error ? sentRes.data : null) as SentimentSummary | null,
   }
 }
 
@@ -70,7 +85,7 @@ export default async function ProductDetailPage({
   const { id } = await params
   const data = await fetchProduct(id)
   if (!data) notFound()
-  const { product, aliases, scoreHistory } = data
+  const { product, aliases, scoreHistory, sentiment } = data
   const latest = scoreHistory[0]
 
   return (
@@ -149,6 +164,46 @@ export default async function ProductDetailPage({
               </tbody>
             </table>
           </div>
+        </section>
+      )}
+
+      {/* sentiment 요약 + CS 위험 키워드 TOP 5 */}
+      {sentiment && sentiment.mention_count > 0 && (
+        <section>
+          <h2 className="text-sm font-semibold mb-2">커뮤니티 sentiment (최근 윈도)</h2>
+          <div className="rounded border border-gray-200 p-4 grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
+            <div>
+              <div className="text-xs text-gray-500">언급</div>
+              <div className="text-xl font-semibold">{sentiment.mention_count}</div>
+            </div>
+            <div>
+              <div className="text-xs text-gray-500">긍정</div>
+              <div className="text-xl font-semibold text-emerald-600">{Math.round((sentiment.pos_ratio ?? 0) * 100)}%</div>
+            </div>
+            <div>
+              <div className="text-xs text-gray-500">부정</div>
+              <div className="text-xl font-semibold text-rose-600">{Math.round((sentiment.neg_ratio ?? 0) * 100)}%</div>
+            </div>
+            <div>
+              <div className="text-xs text-gray-500">claim 위험</div>
+              <div className={`text-xl font-semibold ${((sentiment.claim_ratio ?? 0) > 0.15) ? 'text-red-600' : 'text-gray-700'}`}>
+                {Math.round((sentiment.claim_ratio ?? 0) * 100)}%
+              </div>
+            </div>
+          </div>
+          {sentiment.claim_keywords && sentiment.claim_keywords.length > 0 && (
+            <div className="mt-3">
+              <div className="text-xs text-gray-500 mb-1">CS 위험 키워드 TOP 5</div>
+              <div className="flex flex-wrap gap-2">
+                {sentiment.claim_keywords.slice(0, 5).map((k, i) => (
+                  <span key={i} className="text-xs px-2 py-0.5 rounded bg-red-100 text-red-700 font-medium">
+                    {k}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+          <p className="text-[10px] text-gray-400 mt-2 font-mono">window_end: {sentiment.window_end?.slice(0, 19).replace('T', ' ')}</p>
         </section>
       )}
 
