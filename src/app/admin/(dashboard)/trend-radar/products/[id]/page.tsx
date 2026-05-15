@@ -36,9 +36,35 @@ interface ScoreRow {
   computed_at: string
 }
 
+interface SupplyRow {
+  product_id: string
+  supplier_count: number
+  supplier_sources: string[] | null
+  ggsan_goods_no: string | null
+  ggsan_title: string | null
+  ggsan_price_krw: number | null
+  ggsan_status: string | null
+  ggsan_is_imminent: boolean | null
+  ggsan_detail_url: string | null
+  ggsan_sim: number | null
+  in_stock_count: number
+  limited_count: number
+  out_of_stock_count: number
+  inventory_total: number
+  in_stock_ratio: number | null
+  limited_ratio: number | null
+  out_of_stock_ratio: number | null
+  avg_price: number | null
+  stddev_price: number | null
+  price_cv: number | null
+  min_lead_time_days: number | null
+  single_source_risk: boolean
+  risk_label: 'no_supplier' | 'single_supplier' | 'all_out_of_stock_or_limited' | 'ok'
+}
+
 async function fetchProduct(id: string) {
   const sb = createAdminClient()
-  const [prodRes, aliasRes, scoreRes] = await Promise.all([
+  const [prodRes, aliasRes, scoreRes, supplyRes] = await Promise.all([
     sb.from('jimscanner_trends_products').select('*').eq('id', id).single(),
     sb
       .from('jimscanner_trends_aliases')
@@ -51,6 +77,11 @@ async function fetchProduct(id: string) {
       .eq('product_id', id)
       .order('computed_at', { ascending: false })
       .limit(30),
+    (sb as any)
+      .from('v_supply_diversification')
+      .select('*')
+      .eq('product_id', id)
+      .maybeSingle(),
   ])
 
   if (prodRes.error || !prodRes.data) return null
@@ -59,6 +90,7 @@ async function fetchProduct(id: string) {
     product: prodRes.data as ProductRow,
     aliases: (aliasRes.data ?? []) as AliasRow[],
     scoreHistory: (scoreRes.data ?? []) as ScoreRow[],
+    supply: (supplyRes?.data ?? null) as SupplyRow | null,
   }
 }
 
@@ -70,7 +102,7 @@ export default async function ProductDetailPage({
   const { id } = await params
   const data = await fetchProduct(id)
   if (!data) notFound()
-  const { product, aliases, scoreHistory } = data
+  const { product, aliases, scoreHistory, supply } = data
   const latest = scoreHistory[0]
 
   return (
@@ -152,6 +184,97 @@ export default async function ProductDetailPage({
         </section>
       )}
 
+      {/* Supply 카드 (공급 다양성) */}
+      {supply && (
+        <section>
+          <h2 className="text-sm font-semibold mb-2">Supply — 공급 다양성</h2>
+          <div className={`rounded border p-4 ${supply.single_source_risk ? 'border-amber-400 bg-amber-50' : 'border-gray-200'}`}>
+            <div className="flex items-baseline justify-between flex-wrap gap-2 mb-3">
+              <div className="flex items-center gap-2">
+                {supply.single_source_risk ? (
+                  <span className="text-xs px-2 py-0.5 rounded bg-amber-200 text-amber-900 font-semibold">
+                    ⚠ {supply.risk_label === 'no_supplier' ? '공급사 0' :
+                       supply.risk_label === 'single_supplier' ? '단일 공급원' : '재고 위험'}
+                  </span>
+                ) : (
+                  <span className="text-xs px-2 py-0.5 rounded bg-emerald-100 text-emerald-700 font-semibold">
+                    ✓ 다중 공급원
+                  </span>
+                )}
+                <span className="text-sm text-gray-700">
+                  공급사 <strong>{supply.supplier_count}</strong>개
+                </span>
+              </div>
+              {supply.supplier_sources && supply.supplier_sources.length > 0 && (
+                <div className="text-xs text-gray-500">
+                  {supply.supplier_sources.join(' · ')}
+                </div>
+              )}
+            </div>
+
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs">
+              <SupplyMetric
+                label="재고 분포"
+                value={
+                  supply.inventory_total > 0
+                    ? `${supply.in_stock_count}/${supply.limited_count}/${supply.out_of_stock_count}`
+                    : '—'
+                }
+                hint={
+                  supply.inventory_total > 0
+                    ? `in ${Math.round((supply.in_stock_ratio ?? 0) * 100)}% · out ${Math.round((supply.out_of_stock_ratio ?? 0) * 100)}%`
+                    : 'inventory 미수집'
+                }
+              />
+              <SupplyMetric
+                label="가격 변동성 (CV)"
+                value={supply.price_cv != null ? supply.price_cv.toFixed(2) : '—'}
+                hint={supply.avg_price ? `평균 ${Math.round(supply.avg_price).toLocaleString()}원` : '가격 X'}
+              />
+              <SupplyMetric
+                label="최단 리드타임"
+                value={supply.min_lead_time_days != null ? `${supply.min_lead_time_days}d` : '—'}
+                hint="lead_time_days"
+              />
+              <SupplyMetric
+                label="ggsan 매칭"
+                value={supply.ggsan_goods_no ? `sim ${(supply.ggsan_sim ?? 0).toFixed(2)}` : '없음'}
+                hint={supply.ggsan_title ?? '—'}
+              />
+            </div>
+
+            {supply.ggsan_goods_no && (
+              <div className="mt-3 pt-3 border-t border-gray-200 text-xs flex items-center gap-2 flex-wrap">
+                <span className="text-gray-500">ggsan:</span>
+                {supply.ggsan_detail_url ? (
+                  <a
+                    href={supply.ggsan_detail_url}
+                    target="_blank"
+                    rel="noopener"
+                    className="text-amber-700 hover:underline truncate max-w-[400px]"
+                  >
+                    {supply.ggsan_title}
+                  </a>
+                ) : (
+                  <span className="truncate max-w-[400px]">{supply.ggsan_title}</span>
+                )}
+                {supply.ggsan_price_krw && (
+                  <span className="text-gray-700 font-mono">{supply.ggsan_price_krw.toLocaleString()}원</span>
+                )}
+                {supply.ggsan_status && supply.ggsan_status !== 'active' && (
+                  <span className="px-1.5 py-0.5 bg-red-100 text-red-700 rounded font-semibold">
+                    {supply.ggsan_status}
+                  </span>
+                )}
+                {supply.ggsan_is_imminent && (
+                  <span className="px-1.5 py-0.5 bg-red-600 text-white rounded font-semibold">임박특가</span>
+                )}
+              </div>
+            )}
+          </div>
+        </section>
+      )}
+
       {/* score breakdown */}
       {latest?.score_components && (
         <section>
@@ -182,6 +305,16 @@ export default async function ProductDetailPage({
       <section className="text-xs text-gray-500">
         first_seen: {product.first_seen_at} · last_seen: {product.last_seen_at}
       </section>
+    </div>
+  )
+}
+
+function SupplyMetric({ label, value, hint }: { label: string; value: string; hint: string }) {
+  return (
+    <div className="rounded border border-gray-200 bg-white p-2">
+      <div className="text-[10px] text-gray-500 uppercase">{label}</div>
+      <div className="text-base font-semibold mt-0.5">{value}</div>
+      <div className="text-[10px] text-gray-400 mt-0.5 truncate" title={hint}>{hint}</div>
     </div>
   )
 }
