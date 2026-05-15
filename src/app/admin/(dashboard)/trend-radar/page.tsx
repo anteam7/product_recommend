@@ -1,10 +1,14 @@
 import Link from 'next/link'
 import { createAdminClient } from '@/lib/auth/admin-supabase'
+import { estimateVelocity, simulatePayback, formatDays } from '@/lib/trends/payback'
 
 export const dynamic = 'force-dynamic'
 
 const CATEGORIES = ['all', 'health', 'living', 'digital'] as const
 type Category = (typeof CATEGORIES)[number]
+
+const SORTS = ['final', 'payback'] as const
+type Sort = (typeof SORTS)[number]
 
 const CATEGORY_LABEL: Record<Category, string> = {
   all: '전체',
@@ -95,7 +99,7 @@ async function fetchData(category: Category) {
   }
 
   const productIds = [...latestMap.keys()]
-  if (productIds.length === 0) return { products: [], scores: latestMap, kpis: { products: 0, top: 0, supplier: 0, tv: 0, llmClassified: 0 } }
+  if (productIds.length === 0) return { products: [], scores: latestMap, supplierMap: new Map<string, number>(), kpis: { products: 0, top: 0, supplier: 0, tv: 0, llmClassified: 0 } }
 
   const prodQuery = sb
     .from('jimscanner_trends_products')
@@ -105,6 +109,21 @@ async function fetchData(category: Category) {
   if (category !== 'all') prodQuery.eq('category_top', category)
 
   const { data: products } = await prodQuery
+
+  // supplier 최신 가격 — 회수속도 정렬 + 카드 표시용
+  const { data: supplierRows } = await sb
+    .from('jimscanner_trends_supplier')
+    .select('product_id, price_krw, collected_at')
+    .in('product_id', productIds)
+    .not('price_krw', 'is', null)
+    .order('collected_at', { ascending: false })
+
+  const supplierMap = new Map<string, number>()
+  for (const row of (supplierRows ?? []) as Array<{ product_id: string; price_krw: number | null }>) {
+    if (!supplierMap.has(row.product_id) && row.price_krw) {
+      supplierMap.set(row.product_id, row.price_krw)
+    }
+  }
 
   // KPI
   const allCount = (await sb.from('jimscanner_trends_products').select('*', { count: 'exact', head: true })).count ?? 0
@@ -120,28 +139,51 @@ async function fetchData(category: Category) {
   return {
     products: (products ?? []) as ProductRow[],
     scores: latestMap,
+    supplierMap,
     kpis: { products: allCount, top: topCount, supplier: supplierCount, tv: tvCount, llmClassified: llmClassifiedCount },
   }
+}
+
+// 보드용 payback (자본 100만원, 마진 30%, 기본 velocity)
+function computeBoardPayback(unitCost: number, commerceScore: number) {
+  const velocity = estimateVelocity(commerceScore)
+  return simulatePayback({
+    unitCost: unitCost || 10_000,
+    capitalWon: 1_000_000,
+    velocity,
+    marginPct: 30,
+  })
 }
 
 export default async function TrendRadarPage({
   searchParams,
 }: {
-  searchParams: Promise<{ cat?: string }>
+  searchParams: Promise<{ cat?: string; sort?: string }>
 }) {
   const sp = await searchParams
   const category = (CATEGORIES.includes(sp.cat as Category) ? sp.cat : 'all') as Category
+  const sort = (SORTS.includes(sp.sort as Sort) ? sp.sort : 'final') as Sort
 
-  const [{ products, scores, kpis }, tvPushes, tvGgsan] = await Promise.all([
+  const [{ products, scores, supplierMap, kpis }, tvPushes, tvGgsan] = await Promise.all([
     fetchData(category),
     fetchTvPushes(),
     fetchTvGgsanMatchSummary(),
   ])
 
-  const sorted = products
-    .map((p) => ({ p, s: scores.get(p.id) }))
-    .filter((x) => x.s)
-    .sort((a, b) => (b.s!.final_score - a.s!.final_score))
+  const enriched = products
+    .map((p) => {
+      const s = scores.get(p.id)
+      if (!s) return null
+      const unitCost = supplierMap.get(p.id) ?? 0
+      const payback = computeBoardPayback(unitCost, s.commerce_score ?? 30)
+      return { p, s, unitCost, payback }
+    })
+    .filter((x): x is NonNullable<typeof x> => !!x)
+
+  const sorted =
+    sort === 'payback'
+      ? enriched.slice().sort((a, b) => a.payback.paybackDays - b.payback.paybackDays)
+      : enriched.slice().sort((a, b) => b.s.final_score - a.s.final_score)
 
   return (
     <div className="space-y-6 p-6">
@@ -174,7 +216,7 @@ export default async function TrendRadarPage({
         {CATEGORIES.map((c) => (
           <Link
             key={c}
-            href={`/admin/trend-radar?cat=${c}`}
+            href={`/admin/trend-radar?cat=${c}&sort=${sort}`}
             className={`px-3 py-2 text-sm ${
               category === c
                 ? 'border-b-2 border-black font-semibold text-black'
@@ -185,6 +227,27 @@ export default async function TrendRadarPage({
           </Link>
         ))}
       </nav>
+
+      {/* 정렬 탭 */}
+      <div className="flex gap-2 items-center text-xs">
+        <span className="text-gray-500">정렬:</span>
+        <Link
+          href={`/admin/trend-radar?cat=${category}&sort=final`}
+          className={`px-2 py-1 rounded ${
+            sort === 'final' ? 'bg-black text-white' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+          }`}
+        >
+          final_score
+        </Link>
+        <Link
+          href={`/admin/trend-radar?cat=${category}&sort=payback`}
+          className={`px-2 py-1 rounded ${
+            sort === 'payback' ? 'bg-black text-white' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+          }`}
+        >
+          회수속도순 💰
+        </Link>
+      </div>
 
       {/* 🔥 TV ↔ ggsan 매칭 callout */}
       <Link
@@ -273,31 +336,47 @@ export default async function TrendRadarPage({
           <div className="grid gap-3">
             <div className="grid grid-cols-12 text-xs text-gray-500 px-3 py-1">
               <div className="col-span-1">#</div>
-              <div className="col-span-5">상품명</div>
+              <div className="col-span-4">상품명</div>
               <div className="col-span-1 text-right">final</div>
               <div className="col-span-1 text-right">trend</div>
               <div className="col-span-1 text-right">commerce</div>
               <div className="col-span-1 text-right">supplier</div>
-              <div className="col-span-1 text-right">competition</div>
-              <div className="col-span-1 text-right">aliases</div>
+              <div className="col-span-1 text-right">comp.</div>
+              <div className="col-span-1 text-right">회수</div>
+              <div className="col-span-1 text-right">ROI 90d</div>
             </div>
-            {sorted.slice(0, 50).map(({ p, s }, i) => (
+            {sorted.slice(0, 50).map(({ p, s, payback }, i) => (
               <Link
                 key={p.id}
                 href={`/admin/trend-radar/products/${p.id}`}
-                className="grid grid-cols-12 px-3 py-2 rounded border border-gray-200 hover:bg-gray-50 transition-colors"
+                className={`grid grid-cols-12 px-3 py-2 rounded border transition-colors ${
+                  payback.warning === 'negative_margin'
+                    ? 'border-red-200 bg-red-50/40 hover:bg-red-50'
+                    : payback.warning === 'slow_payback'
+                    ? 'border-amber-200 bg-amber-50/40 hover:bg-amber-50'
+                    : 'border-gray-200 hover:bg-gray-50'
+                }`}
               >
                 <div className="col-span-1 text-gray-400 font-mono">{i + 1}</div>
-                <div className="col-span-5">
+                <div className="col-span-4">
                   <div className="font-medium">{p.canonical_name}</div>
                   <div className="text-xs text-gray-500">{p.category_top}</div>
                 </div>
-                <div className="col-span-1 text-right font-mono font-bold">{s!.final_score}</div>
-                <div className="col-span-1 text-right font-mono text-gray-600">{s!.trend_score}</div>
-                <div className="col-span-1 text-right font-mono text-gray-600">{s!.commerce_score}</div>
-                <div className="col-span-1 text-right font-mono text-gray-600">{s!.supplier_score}</div>
-                <div className="col-span-1 text-right font-mono text-gray-600">{s!.competition_score}</div>
-                <div className="col-span-1 text-right text-xs text-gray-500">{p.alias_count}</div>
+                <div className="col-span-1 text-right font-mono font-bold">{s.final_score}</div>
+                <div className="col-span-1 text-right font-mono text-gray-600">{s.trend_score}</div>
+                <div className="col-span-1 text-right font-mono text-gray-600">{s.commerce_score}</div>
+                <div className="col-span-1 text-right font-mono text-gray-600">{s.supplier_score}</div>
+                <div className="col-span-1 text-right font-mono text-gray-600">{s.competition_score}</div>
+                <div className="col-span-1 text-right font-mono text-xs">
+                  {payback.warning ? (
+                    <span className="text-red-600 font-semibold">⚠ {formatDays(payback.paybackDays)}</span>
+                  ) : (
+                    <span className="text-emerald-700 font-semibold">{formatDays(payback.paybackDays)}</span>
+                  )}
+                </div>
+                <div className="col-span-1 text-right font-mono text-xs text-gray-600">
+                  {payback.roi90d.toFixed(0)}%
+                </div>
               </Link>
             ))}
           </div>

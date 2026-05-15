@@ -1,6 +1,8 @@
 import Link from 'next/link'
 import { notFound } from 'next/navigation'
 import { createAdminClient } from '@/lib/auth/admin-supabase'
+import PaybackScenarios from './PaybackScenarios'
+import { estimateVelocity } from '@/lib/trends/payback'
 
 export const dynamic = 'force-dynamic'
 
@@ -38,7 +40,7 @@ interface ScoreRow {
 
 async function fetchProduct(id: string) {
   const sb = createAdminClient()
-  const [prodRes, aliasRes, scoreRes] = await Promise.all([
+  const [prodRes, aliasRes, scoreRes, supplierRes] = await Promise.all([
     sb.from('jimscanner_trends_products').select('*').eq('id', id).single(),
     sb
       .from('jimscanner_trends_aliases')
@@ -51,14 +53,25 @@ async function fetchProduct(id: string) {
       .eq('product_id', id)
       .order('computed_at', { ascending: false })
       .limit(30),
+    sb
+      .from('jimscanner_trends_supplier')
+      .select('price_krw, collected_at')
+      .eq('product_id', id)
+      .not('price_krw', 'is', null)
+      .order('collected_at', { ascending: false })
+      .limit(1),
   ])
 
   if (prodRes.error || !prodRes.data) return null
+
+  const supplierRows = (supplierRes.data ?? []) as { price_krw: number | null }[]
+  const unitCost = supplierRows[0]?.price_krw ?? 0
 
   return {
     product: prodRes.data as ProductRow,
     aliases: (aliasRes.data ?? []) as AliasRow[],
     scoreHistory: (scoreRes.data ?? []) as ScoreRow[],
+    unitCost,
   }
 }
 
@@ -70,8 +83,9 @@ export default async function ProductDetailPage({
   const { id } = await params
   const data = await fetchProduct(id)
   if (!data) notFound()
-  const { product, aliases, scoreHistory } = data
+  const { product, aliases, scoreHistory, unitCost } = data
   const latest = scoreHistory[0]
+  const baseVelocity = estimateVelocity(latest?.commerce_score ?? null)
 
   return (
     <div className="space-y-6 p-6">
@@ -151,6 +165,13 @@ export default async function ProductDetailPage({
           </div>
         </section>
       )}
+
+      {/* Payback 시나리오 */}
+      <PaybackScenarios
+        productId={product.id}
+        baseUnitCost={unitCost}
+        baseVelocity={baseVelocity}
+      />
 
       {/* score breakdown */}
       {latest?.score_components && (
