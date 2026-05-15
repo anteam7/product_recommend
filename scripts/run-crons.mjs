@@ -142,6 +142,22 @@ if (!skipClassify) {
     })
   })
   if (classifyExit !== 0) failCount++
+
+  // 계절성·신규성 분해 — classify 직후 실행. 매일 KST 03:00 직전.
+  console.log(`[${new Date().toISOString()}] launching decompose-seasonality`)
+  const seasonalityPath = resolvePath(__dirname, 'decompose-seasonality.mjs')
+  const seasonalityExit = await new Promise((resolve) => {
+    const child = spawn(process.execPath, [seasonalityPath], {
+      stdio: 'inherit',
+      env: process.env,
+    })
+    child.on('exit', (code) => resolve(code ?? 0))
+    child.on('error', (err) => {
+      console.error(`  seasonality spawn error: ${err.message}`)
+      resolve(1)
+    })
+  })
+  if (seasonalityExit !== 0) failCount++
 }
 
 process.exit(failCount > 0 ? 1 : 0)

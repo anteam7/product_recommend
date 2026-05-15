@@ -75,6 +75,18 @@ async function fetchTvPushes() {
   return { ranked, totalKeywords: map.size, totalRows: rows.length }
 }
 
+const SEASONAL_THRESHOLD = 0.5  // seasonality_recurrence ≥ 0.5 = 시즌상품 취급
+
+function isSeasonal(s: ScoreRow): boolean {
+  const v = (s.score_components as any)?.trend?.seasonality_recurrence
+  return typeof v === 'number' && v >= SEASONAL_THRESHOLD
+}
+
+function noveltyZ(s: ScoreRow): number | null {
+  const v = (s.score_components as any)?.trend?.novelty_z
+  return typeof v === 'number' ? v : null
+}
+
 async function fetchData(category: Category) {
   const sb = createAdminClient()
 
@@ -127,10 +139,11 @@ async function fetchData(category: Category) {
 export default async function TrendRadarPage({
   searchParams,
 }: {
-  searchParams: Promise<{ cat?: string }>
+  searchParams: Promise<{ cat?: string; seasonal?: string }>
 }) {
   const sp = await searchParams
   const category = (CATEGORIES.includes(sp.cat as Category) ? sp.cat : 'all') as Category
+  const hideSeasonal = sp.seasonal === 'false'
 
   const [{ products, scores, kpis }, tvPushes, tvGgsan] = await Promise.all([
     fetchData(category),
@@ -138,10 +151,13 @@ export default async function TrendRadarPage({
     fetchTvGgsanMatchSummary(),
   ])
 
-  const sorted = products
+  const allRanked = products
     .map((p) => ({ p, s: scores.get(p.id) }))
-    .filter((x) => x.s)
-    .sort((a, b) => (b.s!.final_score - a.s!.final_score))
+    .filter((x): x is { p: ProductRow; s: ScoreRow } => !!x.s)
+
+  const seasonalCount = allRanked.filter((x) => isSeasonal(x.s)).length
+  const sorted = (hideSeasonal ? allRanked.filter((x) => !isSeasonal(x.s)) : allRanked)
+    .sort((a, b) => (b.s.final_score - a.s.final_score))
 
   return (
     <div className="space-y-6 p-6">
@@ -169,22 +185,47 @@ export default async function TrendRadarPage({
         <KpiCard label="TV push" value={kpis.tv} hint="홈쇼핑 편성 검출" />
       </section>
 
-      {/* 카테고리 탭 */}
-      <nav className="flex gap-2 border-b border-gray-200">
-        {CATEGORIES.map((c) => (
-          <Link
-            key={c}
-            href={`/admin/trend-radar?cat=${c}`}
-            className={`px-3 py-2 text-sm ${
-              category === c
-                ? 'border-b-2 border-black font-semibold text-black'
-                : 'text-gray-500 hover:text-black'
-            }`}
-          >
-            {CATEGORY_LABEL[c]}
-          </Link>
-        ))}
-      </nav>
+      {/* 카테고리 탭 + 시즌상품 토글 */}
+      <div className="flex items-end justify-between border-b border-gray-200">
+        <nav className="flex gap-2">
+          {CATEGORIES.map((c) => {
+            const qs = new URLSearchParams()
+            qs.set('cat', c)
+            if (hideSeasonal) qs.set('seasonal', 'false')
+            return (
+              <Link
+                key={c}
+                href={`/admin/trend-radar?${qs.toString()}`}
+                className={`px-3 py-2 text-sm ${
+                  category === c
+                    ? 'border-b-2 border-black font-semibold text-black'
+                    : 'text-gray-500 hover:text-black'
+                }`}
+              >
+                {CATEGORY_LABEL[c]}
+              </Link>
+            )
+          })}
+        </nav>
+        <div className="pb-2 flex items-center gap-2">
+          <span className="text-xs text-gray-500">🔁 시즌상품 {seasonalCount}건</span>
+          {hideSeasonal ? (
+            <Link
+              href={`/admin/trend-radar?cat=${category}`}
+              className="text-xs px-2 py-1 rounded border border-gray-300 bg-gray-100 hover:bg-gray-200"
+            >
+              전체 보기
+            </Link>
+          ) : (
+            <Link
+              href={`/admin/trend-radar?cat=${category}&seasonal=false`}
+              className="text-xs px-2 py-1 rounded border border-gray-300 hover:bg-gray-50"
+            >
+              시즌상품 숨기기
+            </Link>
+          )}
+        </div>
+      </div>
 
       {/* 🔥 TV ↔ ggsan 매칭 callout */}
       <Link
@@ -281,25 +322,47 @@ export default async function TrendRadarPage({
               <div className="col-span-1 text-right">competition</div>
               <div className="col-span-1 text-right">aliases</div>
             </div>
-            {sorted.slice(0, 50).map(({ p, s }, i) => (
-              <Link
-                key={p.id}
-                href={`/admin/trend-radar/products/${p.id}`}
-                className="grid grid-cols-12 px-3 py-2 rounded border border-gray-200 hover:bg-gray-50 transition-colors"
-              >
-                <div className="col-span-1 text-gray-400 font-mono">{i + 1}</div>
-                <div className="col-span-5">
-                  <div className="font-medium">{p.canonical_name}</div>
-                  <div className="text-xs text-gray-500">{p.category_top}</div>
-                </div>
-                <div className="col-span-1 text-right font-mono font-bold">{s!.final_score}</div>
-                <div className="col-span-1 text-right font-mono text-gray-600">{s!.trend_score}</div>
-                <div className="col-span-1 text-right font-mono text-gray-600">{s!.commerce_score}</div>
-                <div className="col-span-1 text-right font-mono text-gray-600">{s!.supplier_score}</div>
-                <div className="col-span-1 text-right font-mono text-gray-600">{s!.competition_score}</div>
-                <div className="col-span-1 text-right text-xs text-gray-500">{p.alias_count}</div>
-              </Link>
-            ))}
+            {sorted.slice(0, 50).map(({ p, s }, i) => {
+              const seasonal = isSeasonal(s)
+              const z = noveltyZ(s)
+              return (
+                <Link
+                  key={p.id}
+                  href={`/admin/trend-radar/products/${p.id}`}
+                  className="grid grid-cols-12 px-3 py-2 rounded border border-gray-200 hover:bg-gray-50 transition-colors"
+                >
+                  <div className="col-span-1 text-gray-400 font-mono">{i + 1}</div>
+                  <div className="col-span-5">
+                    <div className="font-medium flex items-center gap-1.5">
+                      <span>{p.canonical_name}</span>
+                      {seasonal && (
+                        <span
+                          className="text-[10px] px-1.5 py-0.5 rounded bg-amber-100 text-amber-700 font-medium"
+                          title="동주차 평균이 평년 대비 높음 — 매년 반복되는 시즌 상품"
+                        >
+                          🔁 시즌성
+                        </span>
+                      )}
+                      {z !== null && z >= 1.5 && !seasonal && (
+                        <span
+                          className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-700 font-medium"
+                          title={`novelty z=${z.toFixed(1)} — 동주차 베이스라인 대비 이례적`}
+                        >
+                          ✨ 신규
+                        </span>
+                      )}
+                    </div>
+                    <div className="text-xs text-gray-500">{p.category_top}</div>
+                  </div>
+                  <div className="col-span-1 text-right font-mono font-bold">{s.final_score}</div>
+                  <div className="col-span-1 text-right font-mono text-gray-600">{s.trend_score}</div>
+                  <div className="col-span-1 text-right font-mono text-gray-600">{s.commerce_score}</div>
+                  <div className="col-span-1 text-right font-mono text-gray-600">{s.supplier_score}</div>
+                  <div className="col-span-1 text-right font-mono text-gray-600">{s.competition_score}</div>
+                  <div className="col-span-1 text-right text-xs text-gray-500">{p.alias_count}</div>
+                </Link>
+              )
+            })}
           </div>
         )}
       </section>
