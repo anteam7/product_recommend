@@ -36,9 +36,22 @@ interface ScoreRow {
   computed_at: string
 }
 
+interface RegulationRow {
+  product_id: string
+  risk_tags: string[]
+  hs_code_guess: string | null
+  kc_required: boolean
+  kc_children: boolean
+  mfds_required: boolean
+  severity: number
+  source: string
+  summary: string | null
+  classified_at: string
+}
+
 async function fetchProduct(id: string) {
   const sb = createAdminClient()
-  const [prodRes, aliasRes, scoreRes] = await Promise.all([
+  const [prodRes, aliasRes, scoreRes, regRes] = await Promise.all([
     sb.from('jimscanner_trends_products').select('*').eq('id', id).single(),
     sb
       .from('jimscanner_trends_aliases')
@@ -51,6 +64,11 @@ async function fetchProduct(id: string) {
       .eq('product_id', id)
       .order('computed_at', { ascending: false })
       .limit(30),
+    (sb as any)
+      .from('jimscanner_trends_regulation')
+      .select('*')
+      .eq('product_id', id)
+      .maybeSingle(),
   ])
 
   if (prodRes.error || !prodRes.data) return null
@@ -59,6 +77,7 @@ async function fetchProduct(id: string) {
     product: prodRes.data as ProductRow,
     aliases: (aliasRes.data ?? []) as AliasRow[],
     scoreHistory: (scoreRes.data ?? []) as ScoreRow[],
+    regulation: (regRes?.data ?? null) as RegulationRow | null,
   }
 }
 
@@ -70,8 +89,16 @@ export default async function ProductDetailPage({
   const { id } = await params
   const data = await fetchProduct(id)
   if (!data) notFound()
-  const { product, aliases, scoreHistory } = data
+  const { product, aliases, scoreHistory, regulation } = data
   const latest = scoreHistory[0]
+  const sevColor =
+    regulation?.severity === 3
+      ? 'bg-red-100 text-red-800 border-red-300'
+      : regulation?.severity === 2
+        ? 'bg-orange-100 text-orange-800 border-orange-300'
+        : regulation?.severity === 1
+          ? 'bg-amber-50 text-amber-800 border-amber-200'
+          : 'bg-gray-50 text-gray-500 border-gray-200'
 
   return (
     <div className="space-y-6 p-6">
@@ -107,6 +134,33 @@ export default async function ProductDetailPage({
           )}
         </div>
       </header>
+
+      {/* 규제 리스크 라벨 */}
+      {regulation && regulation.severity > 0 && (
+        <section className={`rounded border px-4 py-3 ${sevColor}`}>
+          <div className="flex items-center justify-between">
+            <div>
+              <div className="text-xs font-medium uppercase opacity-70">
+                규제 리스크 · severity {regulation.severity}/3 · {regulation.source}
+              </div>
+              <div className="mt-1 text-base font-semibold">{regulation.summary}</div>
+              <div className="mt-2 flex flex-wrap gap-1">
+                {(regulation.risk_tags ?? []).map((t, i) => (
+                  <span key={i} className="text-[10px] px-1.5 py-0.5 rounded bg-white/60 font-mono">
+                    {t}
+                  </span>
+                ))}
+              </div>
+            </div>
+            {regulation.hs_code_guess && (
+              <div className="text-right">
+                <div className="text-[10px] uppercase opacity-70">HS 코드(추정)</div>
+                <div className="font-mono text-sm">{regulation.hs_code_guess}</div>
+              </div>
+            )}
+          </div>
+        </section>
+      )}
 
       {/* 4점수 카드 */}
       {latest && (
