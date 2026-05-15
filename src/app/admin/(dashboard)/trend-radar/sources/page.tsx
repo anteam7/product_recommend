@@ -21,6 +21,18 @@ interface MarketRawAggRow {
   rows_7d: number
 }
 
+interface SourceAttributionRow {
+  source: string
+  alias_count: number
+  linked_product_count: number
+  scored_product_count: number
+  avg_final_score: number | null
+  high_score_count: number
+  high_score_pct: number | null
+  first_discovery_count: number
+  latest_alias_at: string | null
+}
+
 // trends_runs 에 기록되는 source — Naver DataLab + tvtime + 분류기
 const TRENDS_RUNS_GROUPS: { label: string; sources: string[] }[] = [
   {
@@ -52,7 +64,7 @@ async function fetchData() {
   const since24h = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()
   const since7d = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString()
 
-  const [runs, raw24, raw7] = await Promise.all([
+  const [runs, raw24, raw7, attribution] = await Promise.all([
     sb
       .from('jimscanner_trends_runs')
       .select('source, status, fetched_count, inserted_count, duration_ms, error_message, started_at, triggered_by')
@@ -68,6 +80,8 @@ async function fetchData() {
       .select('source, captured_at')
       .in('source', MARKET_RAW_SOURCES)
       .gte('captured_at', since7d),
+    // RPC: supabase/source_attribution_rpc.sql — generated 타입 미반영이라 `as never` 캐스팅
+    sb.rpc('get_source_attribution' as never, { days_window: 7 } as never),
   ])
 
   // source 별 가장 최근 run
@@ -93,10 +107,23 @@ async function fetchData() {
     agg.rows_24h++
   }
 
+  const attributionRows = ((attribution?.data as SourceAttributionRow[] | null) ?? []).map((r) => ({
+    ...r,
+    alias_count: Number(r.alias_count ?? 0),
+    linked_product_count: Number(r.linked_product_count ?? 0),
+    scored_product_count: Number(r.scored_product_count ?? 0),
+    avg_final_score: r.avg_final_score != null ? Number(r.avg_final_score) : null,
+    high_score_count: Number(r.high_score_count ?? 0),
+    high_score_pct: r.high_score_pct != null ? Number(r.high_score_pct) : null,
+    first_discovery_count: Number(r.first_discovery_count ?? 0),
+  }))
+
   return {
     latestBySource,
     marketAgg,
     recentRuns: ((runs.data ?? []) as RunRow[]).slice(0, 50),
+    attributionRows,
+    attributionError: (attribution as { error?: { message?: string } } | null)?.error?.message ?? null,
   }
 }
 
@@ -114,7 +141,7 @@ function formatAge(min: number): string {
 }
 
 export default async function SourcesPage() {
-  const { latestBySource, marketAgg, recentRuns } = await fetchData()
+  const { latestBySource, marketAgg, recentRuns, attributionRows, attributionError } = await fetchData()
 
   return (
     <div className="space-y-6 p-6">
@@ -255,6 +282,95 @@ export default async function SourcesPage() {
             </tbody>
           </table>
         </div>
+      </section>
+
+      {/* Source ROI — 소스별 발굴 성과 귀속 분석 (최근 7일) */}
+      <section>
+        <div className="flex items-baseline justify-between mb-2">
+          <h2 className="text-sm font-semibold text-gray-700">
+            Source ROI — 발굴 성과 귀속 (최근 7일)
+          </h2>
+          <span className="text-xs text-gray-500">
+            jimscanner_trends_aliases × jimscanner_trends_scores
+          </span>
+        </div>
+        <p className="text-xs text-gray-500 mb-2">
+          각 수집 소스가 실제로 가치 있는 상품을 얼마나 발굴하는지 정량화. 평균 final_score ·
+          고점수(≥70) 비율 · 최초 발굴 기여 건수로 유지·폐기·강화 결정 근거.
+        </p>
+        {attributionError ? (
+          <div className="rounded border border-yellow-300 bg-yellow-50 p-3 text-xs text-yellow-800">
+            RPC 호출 실패: <code className="font-mono">{attributionError}</code>
+            {' — '}
+            <code className="font-mono">supabase/source_attribution_rpc.sql</code> 적용 필요.
+          </div>
+        ) : attributionRows.length === 0 ? (
+          <div className="rounded border border-gray-200 p-4 text-xs text-gray-500">
+            최근 7일 내 생성된 alias 가 없습니다.
+          </div>
+        ) : (
+          <div className="rounded border border-gray-200 overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead className="bg-gray-50 text-gray-500">
+                <tr>
+                  <th className="px-3 py-2 text-left">source</th>
+                  <th className="px-3 py-2 text-right">alias 수</th>
+                  <th className="px-3 py-2 text-right">연결 product</th>
+                  <th className="px-3 py-2 text-right">scored product</th>
+                  <th className="px-3 py-2 text-right">평균 final_score</th>
+                  <th className="px-3 py-2 text-right">고점수(≥70) 비율</th>
+                  <th className="px-3 py-2 text-right">최초 발굴 기여</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-100">
+                {attributionRows.map((r) => {
+                  const score = r.avg_final_score
+                  const scoreColor =
+                    score == null
+                      ? 'text-gray-400'
+                      : score >= 70
+                        ? 'text-green-700 font-semibold'
+                        : score >= 50
+                          ? 'text-gray-800'
+                          : 'text-orange-700'
+                  const pctColor =
+                    r.high_score_pct == null
+                      ? 'text-gray-400'
+                      : r.high_score_pct >= 30
+                        ? 'text-green-700 font-semibold'
+                        : r.high_score_pct >= 10
+                          ? 'text-gray-800'
+                          : 'text-orange-700'
+                  return (
+                    <tr key={r.source}>
+                      <td className="px-3 py-1 font-mono">{r.source}</td>
+                      <td className="px-3 py-1 text-right">{r.alias_count}</td>
+                      <td className="px-3 py-1 text-right">{r.linked_product_count}</td>
+                      <td className="px-3 py-1 text-right text-gray-500">
+                        {r.scored_product_count}
+                      </td>
+                      <td className={`px-3 py-1 text-right ${scoreColor}`}>
+                        {score == null ? '—' : score.toFixed(1)}
+                      </td>
+                      <td className={`px-3 py-1 text-right ${pctColor}`}>
+                        {r.high_score_pct == null
+                          ? '—'
+                          : `${r.high_score_pct.toFixed(1)}% (${r.high_score_count})`}
+                      </td>
+                      <td className="px-3 py-1 text-right text-gray-700">
+                        {r.first_discovery_count}
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+        <p className="text-xs text-gray-400 mt-2">
+          * 최초 발굴 기여 = 해당 product 의 첫 alias 가 이 소스에서 들어온 건수.
+          평균 final_score 는 product 별 최신 점수 기준.
+        </p>
       </section>
 
       <section className="rounded border border-dashed border-gray-300 p-4 text-xs text-gray-500">
