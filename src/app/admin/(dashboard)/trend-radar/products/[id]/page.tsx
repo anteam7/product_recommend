@@ -36,9 +36,31 @@ interface ScoreRow {
   computed_at: string
 }
 
+interface VelocityRow {
+  product_id: string
+  sku_count: number
+  weekly_new_reviews: number
+  avg_price: number | null
+  avg_rating: number | null
+  total_reviews: number
+  last_captured_at: string
+}
+interface SkuVelocityRow {
+  product_id: string
+  sku_url: string
+  seller: string | null
+  title: string | null
+  price: number | null
+  review_count: number | null
+  rating: number | null
+  prev_review_count: number | null
+  delta_review_7d: number
+  captured_at: string
+}
+
 async function fetchProduct(id: string) {
   const sb = createAdminClient()
-  const [prodRes, aliasRes, scoreRes] = await Promise.all([
+  const [prodRes, aliasRes, scoreRes, velocityRes, skuVelocityRes] = await Promise.all([
     sb.from('jimscanner_trends_products').select('*').eq('id', id).single(),
     sb
       .from('jimscanner_trends_aliases')
@@ -51,6 +73,20 @@ async function fetchProduct(id: string) {
       .eq('product_id', id)
       .order('computed_at', { ascending: false })
       .limit(30),
+    sb
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      .from('jimscanner_serp_product_velocity' as any)
+      .select('*')
+      .eq('product_id', id)
+      .maybeSingle(),
+    sb
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      .from('jimscanner_serp_sku_velocity' as any)
+      .select('*')
+      .eq('product_id', id)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      .order('delta_review_7d' as any, { ascending: false })
+      .limit(10),
   ])
 
   if (prodRes.error || !prodRes.data) return null
@@ -59,6 +95,8 @@ async function fetchProduct(id: string) {
     product: prodRes.data as ProductRow,
     aliases: (aliasRes.data ?? []) as AliasRow[],
     scoreHistory: (scoreRes.data ?? []) as ScoreRow[],
+    velocity: (velocityRes.data ?? null) as VelocityRow | null,
+    skuVelocity: ((skuVelocityRes.data ?? []) as unknown) as SkuVelocityRow[],
   }
 }
 
@@ -70,7 +108,7 @@ export default async function ProductDetailPage({
   const { id } = await params
   const data = await fetchProduct(id)
   if (!data) notFound()
-  const { product, aliases, scoreHistory } = data
+  const { product, aliases, scoreHistory, velocity, skuVelocity } = data
   const latest = scoreHistory[0]
 
   return (
@@ -152,6 +190,93 @@ export default async function ProductDetailPage({
         </section>
       )}
 
+      {/* 📈 실판매 속도 — Smartstore SERP review delta */}
+      <section>
+        <h2 className="text-sm font-semibold mb-2">
+          📈 실판매 속도 (Smartstore SERP)
+          <Link
+            href="/admin/trend-radar/sales-velocity"
+            className="ml-2 text-xs font-normal text-gray-500 hover:text-black underline"
+          >
+            전체 보드 →
+          </Link>
+        </h2>
+        {velocity ? (
+          <>
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-3">
+              <VelocityCard
+                label="주간 신규 리뷰"
+                value={velocity.weekly_new_reviews ?? 0}
+                hint="SKU 합산 · 회전 속도 proxy"
+                bold
+              />
+              <VelocityCard label="추적 SKU" value={velocity.sku_count ?? 0} hint="top 10 캡처" />
+              <VelocityCard
+                label="평균가"
+                value={velocity.avg_price ?? 0}
+                hint="원 · SKU 평균"
+                fmt="krw"
+              />
+              <VelocityCard
+                label="평균 별점"
+                value={velocity.avg_rating ?? 0}
+                hint="0~5"
+                fmt="rating"
+              />
+            </div>
+            {skuVelocity.length > 0 && (
+              <div className="rounded border border-gray-200 overflow-x-auto">
+                <table className="w-full text-xs">
+                  <thead className="bg-gray-50 text-gray-500">
+                    <tr>
+                      <th className="px-3 py-2 text-left">SKU</th>
+                      <th className="px-3 py-2 text-left">판매자</th>
+                      <th className="px-3 py-2 text-right">가격</th>
+                      <th className="px-3 py-2 text-right">7d 신규</th>
+                      <th className="px-3 py-2 text-right">누적</th>
+                      <th className="px-3 py-2 text-right">별점</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-100">
+                    {skuVelocity.map((s, i) => (
+                      <tr key={`${s.sku_url}-${i}`}>
+                        <td className="px-3 py-1.5">
+                          <a
+                            href={s.sku_url}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="text-blue-700 hover:underline"
+                          >
+                            {s.title ?? s.sku_url.slice(0, 50)}
+                          </a>
+                        </td>
+                        <td className="px-3 py-1.5 text-gray-600">{s.seller ?? '—'}</td>
+                        <td className="px-3 py-1.5 text-right font-mono text-gray-600">
+                          {s.price ? s.price.toLocaleString() : '—'}
+                        </td>
+                        <td className="px-3 py-1.5 text-right font-bold text-red-700">
+                          {s.delta_review_7d}
+                        </td>
+                        <td className="px-3 py-1.5 text-right text-gray-600">
+                          {s.review_count ?? '—'}
+                        </td>
+                        <td className="px-3 py-1.5 text-right text-gray-600">
+                          {s.rating ? s.rating.toFixed(2) : '—'}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </>
+        ) : (
+          <div className="rounded border border-gray-200 bg-gray-50 p-4 text-sm text-gray-500">
+            아직 SERP SKU 캡처가 없다. 첫 캡처 후 약 7일 뒤부터 의미 있는 델타가 잡힌다.
+          </div>
+        )}
+      </section>
+
       {/* score breakdown */}
       {latest?.score_components && (
         <section>
@@ -182,6 +307,44 @@ export default async function ProductDetailPage({
       <section className="text-xs text-gray-500">
         first_seen: {product.first_seen_at} · last_seen: {product.last_seen_at}
       </section>
+    </div>
+  )
+}
+
+function VelocityCard({
+  label,
+  value,
+  hint,
+  bold,
+  fmt,
+}: {
+  label: string
+  value: number
+  hint?: string
+  bold?: boolean
+  fmt?: 'krw' | 'rating'
+}) {
+  const display =
+    fmt === 'krw'
+      ? value > 0
+        ? `${value.toLocaleString()}원`
+        : '—'
+      : fmt === 'rating'
+        ? value > 0
+          ? value.toFixed(2)
+          : '—'
+        : value.toLocaleString()
+  return (
+    <div className="rounded border border-gray-200 p-3">
+      <div className="text-xs text-gray-500">{label}</div>
+      <div
+        className={`mt-1 ${bold ? 'text-2xl font-bold' : 'text-xl text-gray-700'} ${
+          bold && value >= 10 ? 'text-red-700' : ''
+        }`}
+      >
+        {display}
+      </div>
+      {hint && <div className="text-xs text-gray-400 mt-0.5">{hint}</div>}
     </div>
   )
 }
