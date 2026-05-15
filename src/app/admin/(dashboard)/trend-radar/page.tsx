@@ -75,6 +75,26 @@ async function fetchTvPushes() {
   return { ranked, totalKeywords: map.size, totalRows: rows.length }
 }
 
+interface PersistenceRow {
+  product_id: string
+  persistence_days: number
+  streak_days: number
+  direction_net: number
+  reproducibility_score: number | null
+}
+
+async function fetchPersistence() {
+  const sb = createAdminClient()
+  // view 는 마이그레이션 후 생성. typed builder 미인식이라 `as any`.
+  const { data } = await (sb as any)
+    .from('jimscanner_trends_persistence_v')
+    .select('product_id, persistence_days, streak_days, direction_net, reproducibility_score')
+    .limit(2000)
+  const map = new Map<string, PersistenceRow>()
+  for (const r of ((data ?? []) as PersistenceRow[])) map.set(r.product_id, r)
+  return map
+}
+
 async function fetchData(category: Category) {
   const sb = createAdminClient()
 
@@ -132,10 +152,11 @@ export default async function TrendRadarPage({
   const sp = await searchParams
   const category = (CATEGORIES.includes(sp.cat as Category) ? sp.cat : 'all') as Category
 
-  const [{ products, scores, kpis }, tvPushes, tvGgsan] = await Promise.all([
+  const [{ products, scores, kpis }, tvPushes, tvGgsan, persistence] = await Promise.all([
     fetchData(category),
     fetchTvPushes(),
     fetchTvGgsanMatchSummary(),
+    fetchPersistence(),
   ])
 
   const sorted = products
@@ -271,39 +292,69 @@ export default async function TrendRadarPage({
           <EmptyState category={category} />
         ) : (
           <div className="grid gap-3">
-            <div className="grid grid-cols-12 text-xs text-gray-500 px-3 py-1">
+            <div className="grid grid-cols-14 text-xs text-gray-500 px-3 py-1" style={{ gridTemplateColumns: 'repeat(14, minmax(0, 1fr))' }}>
               <div className="col-span-1">#</div>
-              <div className="col-span-5">상품명</div>
+              <div className="col-span-4">상품명</div>
+              <div className="col-span-2">진성도 (30d)</div>
               <div className="col-span-1 text-right">final</div>
               <div className="col-span-1 text-right">trend</div>
               <div className="col-span-1 text-right">commerce</div>
               <div className="col-span-1 text-right">supplier</div>
-              <div className="col-span-1 text-right">competition</div>
+              <div className="col-span-1 text-right">comp</div>
+              <div className="col-span-1 text-right">repro</div>
               <div className="col-span-1 text-right">aliases</div>
             </div>
-            {sorted.slice(0, 50).map(({ p, s }, i) => (
-              <Link
-                key={p.id}
-                href={`/admin/trend-radar/products/${p.id}`}
-                className="grid grid-cols-12 px-3 py-2 rounded border border-gray-200 hover:bg-gray-50 transition-colors"
-              >
-                <div className="col-span-1 text-gray-400 font-mono">{i + 1}</div>
-                <div className="col-span-5">
-                  <div className="font-medium">{p.canonical_name}</div>
-                  <div className="text-xs text-gray-500">{p.category_top}</div>
-                </div>
-                <div className="col-span-1 text-right font-mono font-bold">{s!.final_score}</div>
-                <div className="col-span-1 text-right font-mono text-gray-600">{s!.trend_score}</div>
-                <div className="col-span-1 text-right font-mono text-gray-600">{s!.commerce_score}</div>
-                <div className="col-span-1 text-right font-mono text-gray-600">{s!.supplier_score}</div>
-                <div className="col-span-1 text-right font-mono text-gray-600">{s!.competition_score}</div>
-                <div className="col-span-1 text-right text-xs text-gray-500">{p.alias_count}</div>
-              </Link>
-            ))}
+            {sorted.slice(0, 50).map(({ p, s }, i) => {
+              const pr = persistence.get(p.id)
+              return (
+                <Link
+                  key={p.id}
+                  href={`/admin/trend-radar/products/${p.id}`}
+                  className="grid grid-cols-14 px-3 py-2 rounded border border-gray-200 hover:bg-gray-50 transition-colors"
+                  style={{ gridTemplateColumns: 'repeat(14, minmax(0, 1fr))' }}
+                >
+                  <div className="col-span-1 text-gray-400 font-mono">{i + 1}</div>
+                  <div className="col-span-4">
+                    <div className="font-medium truncate">{p.canonical_name}</div>
+                    <div className="text-xs text-gray-500">{p.category_top}</div>
+                  </div>
+                  <div className="col-span-2">
+                    {pr ? (
+                      <PersistenceBadge persistenceDays={pr.persistence_days} streakDays={pr.streak_days} />
+                    ) : (
+                      <span className="text-xs text-gray-300">—</span>
+                    )}
+                  </div>
+                  <div className="col-span-1 text-right font-mono font-bold">{s!.final_score}</div>
+                  <div className="col-span-1 text-right font-mono text-gray-600">{s!.trend_score}</div>
+                  <div className="col-span-1 text-right font-mono text-gray-600">{s!.commerce_score}</div>
+                  <div className="col-span-1 text-right font-mono text-gray-600">{s!.supplier_score}</div>
+                  <div className="col-span-1 text-right font-mono text-gray-600">{s!.competition_score}</div>
+                  <div className="col-span-1 text-right font-mono text-gray-700">
+                    {pr?.reproducibility_score != null ? Number(pr.reproducibility_score).toFixed(0) : '—'}
+                  </div>
+                  <div className="col-span-1 text-right text-xs text-gray-500">{p.alias_count}</div>
+                </Link>
+              )
+            })}
           </div>
         )}
       </section>
     </div>
+  )
+}
+
+function PersistenceBadge({ persistenceDays, streakDays }: { persistenceDays: number; streakDays: number }) {
+  const color =
+    streakDays >= 7 ? 'bg-green-100 text-green-800'
+    : persistenceDays >= 10 ? 'bg-blue-100 text-blue-800'
+    : persistenceDays <= 1 ? 'bg-red-100 text-red-700'
+    : 'bg-gray-100 text-gray-700'
+  const dot = streakDays >= 7 ? '🟢' : persistenceDays >= 10 ? '🔵' : persistenceDays <= 1 ? '🔴' : '⚪️'
+  return (
+    <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-mono ${color}`}>
+      {dot} {persistenceDays}/30 · {streakDays}d
+    </span>
   )
 }
 
