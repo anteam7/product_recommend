@@ -30,6 +30,31 @@ interface ScoreRow {
   computed_at: string
   score_components?: any
 }
+interface ConvergenceRow {
+  product_id: string
+  sources: string[]
+  source_count: number
+  convergence_score: number
+}
+interface MomentumRow {
+  product_id: string
+  cur_score: number
+  prev_score: number
+  delta: number
+}
+
+async function fetchConvergence() {
+  const sb = createAdminClient() as any
+  const [{ data: conv }, { data: mom }] = await Promise.all([
+    sb.from('jimscanner_trends_source_convergence').select('*'),
+    sb.from('jimscanner_trends_score_momentum').select('*'),
+  ])
+  const convMap = new Map<string, ConvergenceRow>()
+  for (const c of (conv ?? []) as ConvergenceRow[]) convMap.set(c.product_id, c)
+  const momMap = new Map<string, MomentumRow>()
+  for (const m of (mom ?? []) as MomentumRow[]) momMap.set(m.product_id, m)
+  return { convMap, momMap }
+}
 
 async function fetchTvGgsanMatchSummary() {
   const sb = createAdminClient()
@@ -132,16 +157,39 @@ export default async function TrendRadarPage({
   const sp = await searchParams
   const category = (CATEGORIES.includes(sp.cat as Category) ? sp.cat : 'all') as Category
 
-  const [{ products, scores, kpis }, tvPushes, tvGgsan] = await Promise.all([
+  const [{ products, scores, kpis }, tvPushes, tvGgsan, { convMap, momMap }] = await Promise.all([
     fetchData(category),
     fetchTvPushes(),
     fetchTvGgsanMatchSummary(),
+    fetchConvergence(),
   ])
 
   const sorted = products
     .map((p) => ({ p, s: scores.get(p.id) }))
     .filter((x) => x.s)
     .sort((a, b) => (b.s!.final_score - a.s!.final_score))
+
+  // 합치(Convergence) 보드
+  const enriched = sorted.map(({ p, s }) => {
+    const c = convMap.get(p.id)
+    const m = momMap.get(p.id)
+    return {
+      p,
+      s: s!,
+      convergence: c?.convergence_score ?? 0,
+      sources: c?.sources ?? [],
+      sourceCount: c?.source_count ?? 0,
+      delta: m?.delta ?? 0,
+    }
+  })
+  const strongBuy = enriched
+    .filter((x) => x.sourceCount >= 4 && x.delta > 0)
+    .sort((a, b) => b.convergence - a.convergence || b.delta - a.delta)
+    .slice(0, 10)
+  const singleSourceSuspect = enriched
+    .filter((x) => x.sourceCount === 1 && x.delta > 0 && x.s.final_score >= 30)
+    .sort((a, b) => b.s.final_score - a.s.final_score)
+    .slice(0, 10)
 
   return (
     <div className="space-y-6 p-6">
@@ -265,6 +313,32 @@ export default async function TrendRadarPage({
         )}
       </section>
 
+      {/* 다중 소스 합치(Convergence) 보드 */}
+      <section className="rounded border border-gray-200 p-4">
+        <div className="flex items-baseline justify-between mb-3">
+          <h2 className="text-sm font-semibold text-gray-700">
+            🎯 다중 소스 합치 보드{' '}
+            <span className="text-xs font-normal text-gray-500 ml-2">
+              (14일 윈도우 · distinct 채널 ≥4 = 진짜 트렌드, =1 = 단일 소스 의심)
+            </span>
+          </h2>
+        </div>
+        <div className="grid md:grid-cols-2 gap-4">
+          <ConvergenceColumn
+            title="Strong Buy — 합치 ≥4 + 모멘텀↑"
+            tone="green"
+            rows={strongBuy}
+            empty="아직 4채널 이상 동시 출현한 상품이 없습니다."
+          />
+          <ConvergenceColumn
+            title="단일 소스 의심 — 합치=1 + 점수↑"
+            tone="amber"
+            rows={singleSourceSuspect}
+            empty="단일 소스 노이즈 의심 상품이 없습니다."
+          />
+        </div>
+      </section>
+
       {/* Top 카드 */}
       <section>
         {sorted.length === 0 ? (
@@ -303,6 +377,88 @@ export default async function TrendRadarPage({
           </div>
         )}
       </section>
+    </div>
+  )
+}
+
+const SOURCE_LABEL: Record<string, string> = {
+  naver_tvtime: 'TV',
+  naver_shopping_insight: 'Shop',
+  naver_search_trend: 'Search',
+  naver_news: 'News',
+  naver_blog: 'Blog',
+  clien_park: 'Clien',
+  quasarzone_sale: 'Quasar',
+  ggsan: 'ggsan',
+}
+
+function SourceChip({ source }: { source: string }) {
+  return (
+    <span
+      className="inline-block px-1.5 py-0.5 rounded text-[10px] font-mono bg-gray-100 text-gray-700 border border-gray-200"
+      title={source}
+    >
+      {SOURCE_LABEL[source] ?? source}
+    </span>
+  )
+}
+
+function ConvergenceColumn({
+  title,
+  tone,
+  rows,
+  empty,
+}: {
+  title: string
+  tone: 'green' | 'amber'
+  rows: { p: ProductRow; s: ScoreRow; convergence: number; sources: string[]; sourceCount: number; delta: number }[]
+  empty: string
+}) {
+  const headerBg = tone === 'green' ? 'bg-green-50 border-green-200' : 'bg-amber-50 border-amber-200'
+  const badgeBg = tone === 'green' ? 'bg-green-100 text-green-800' : 'bg-amber-100 text-amber-800'
+  return (
+    <div className={`rounded border ${headerBg}`}>
+      <div className="px-3 py-2 text-xs font-semibold text-gray-700 border-b border-inherit">
+        {title} <span className="text-gray-500 font-normal">({rows.length})</span>
+      </div>
+      {rows.length === 0 ? (
+        <div className="px-3 py-6 text-center text-xs text-gray-500">{empty}</div>
+      ) : (
+        <div className="divide-y divide-gray-100 bg-white">
+          {rows.map(({ p, s, convergence, sources, sourceCount, delta }) => (
+            <Link
+              key={p.id}
+              href={`/admin/trend-radar/products/${p.id}`}
+              className="block px-3 py-2 hover:bg-gray-50"
+            >
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex-1 min-w-0">
+                  <div className="text-sm font-medium truncate">{p.canonical_name}</div>
+                  <div className="mt-1 flex items-center gap-1 flex-wrap">
+                    {sources.map((src) => (
+                      <SourceChip key={src} source={src} />
+                    ))}
+                  </div>
+                </div>
+                <div className="flex flex-col items-end gap-0.5 shrink-0">
+                  <span className={`text-[10px] px-1.5 py-0.5 rounded font-mono ${badgeBg}`}>
+                    합치 {convergence} · {sourceCount}/8
+                  </span>
+                  <span className="text-[10px] text-gray-500 font-mono">
+                    final {s.final_score}
+                    {delta !== 0 && (
+                      <span className={delta > 0 ? 'text-green-700 ml-1' : 'text-red-600 ml-1'}>
+                        {delta > 0 ? '▲' : '▼'}
+                        {Math.abs(Math.round(Number(delta)))}
+                      </span>
+                    )}
+                  </span>
+                </div>
+              </div>
+            </Link>
+          ))}
+        </div>
+      )}
     </div>
   )
 }

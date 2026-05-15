@@ -36,9 +36,22 @@ interface ScoreRow {
   computed_at: string
 }
 
+interface ConvergenceRow {
+  product_id: string
+  sources: string[]
+  source_count: number
+  convergence_score: number
+}
+interface ConvergenceDailyRow {
+  product_id: string
+  day: string
+  source_count: number
+}
+
 async function fetchProduct(id: string) {
   const sb = createAdminClient()
-  const [prodRes, aliasRes, scoreRes] = await Promise.all([
+  const sbAny = sb as any
+  const [prodRes, aliasRes, scoreRes, convRes, sparkRes] = await Promise.all([
     sb.from('jimscanner_trends_products').select('*').eq('id', id).single(),
     sb
       .from('jimscanner_trends_aliases')
@@ -51,6 +64,16 @@ async function fetchProduct(id: string) {
       .eq('product_id', id)
       .order('computed_at', { ascending: false })
       .limit(30),
+    sbAny
+      .from('jimscanner_trends_source_convergence')
+      .select('*')
+      .eq('product_id', id)
+      .maybeSingle(),
+    sbAny
+      .from('jimscanner_trends_source_convergence_daily')
+      .select('*')
+      .eq('product_id', id)
+      .order('day', { ascending: true }),
   ])
 
   if (prodRes.error || !prodRes.data) return null
@@ -59,6 +82,8 @@ async function fetchProduct(id: string) {
     product: prodRes.data as ProductRow,
     aliases: (aliasRes.data ?? []) as AliasRow[],
     scoreHistory: (scoreRes.data ?? []) as ScoreRow[],
+    convergence: (convRes.data ?? null) as ConvergenceRow | null,
+    sparkline: (sparkRes.data ?? []) as ConvergenceDailyRow[],
   }
 }
 
@@ -70,7 +95,7 @@ export default async function ProductDetailPage({
   const { id } = await params
   const data = await fetchProduct(id)
   if (!data) notFound()
-  const { product, aliases, scoreHistory } = data
+  const { product, aliases, scoreHistory, convergence, sparkline } = data
   const latest = scoreHistory[0]
 
   return (
@@ -105,6 +130,19 @@ export default async function ProductDetailPage({
               {product.llm_model ? ` · ${product.llm_model}` : ''}
             </p>
           )}
+          {/* 소스 합치 칩 + sparkline */}
+          <div className="mt-3 flex items-center gap-3 flex-wrap">
+            <ConvergenceBadge convergence={convergence} />
+            <div className="flex items-center gap-1 flex-wrap">
+              {(convergence?.sources ?? []).map((s) => (
+                <SourceChip key={s} source={s} />
+              ))}
+              {(!convergence || convergence.sources.length === 0) && (
+                <span className="text-xs text-gray-400">최근 14일 매칭 채널 없음</span>
+              )}
+            </div>
+            <Sparkline rows={sparkline} />
+          </div>
         </div>
       </header>
 
@@ -183,6 +221,79 @@ export default async function ProductDetailPage({
         first_seen: {product.first_seen_at} · last_seen: {product.last_seen_at}
       </section>
     </div>
+  )
+}
+
+const SOURCE_LABEL: Record<string, string> = {
+  naver_tvtime: 'TV',
+  naver_shopping_insight: 'Shop',
+  naver_search_trend: 'Search',
+  naver_news: 'News',
+  naver_blog: 'Blog',
+  clien_park: 'Clien',
+  quasarzone_sale: 'Quasar',
+  ggsan: 'ggsan',
+}
+
+function SourceChip({ source }: { source: string }) {
+  return (
+    <span
+      className="inline-block px-2 py-0.5 rounded text-[11px] font-mono bg-gray-100 text-gray-700 border border-gray-200"
+      title={source}
+    >
+      {SOURCE_LABEL[source] ?? source}
+    </span>
+  )
+}
+
+function ConvergenceBadge({ convergence }: { convergence: ConvergenceRow | null }) {
+  const count = convergence?.source_count ?? 0
+  const score = convergence?.convergence_score ?? 0
+  const tone =
+    count >= 4
+      ? 'bg-green-100 text-green-800 border-green-200'
+      : count >= 2
+      ? 'bg-amber-100 text-amber-800 border-amber-200'
+      : 'bg-gray-100 text-gray-600 border-gray-200'
+  return (
+    <span className={`inline-flex items-center gap-1 px-2 py-1 rounded border text-xs font-mono ${tone}`}>
+      <span className="font-semibold">합치 {score}</span>
+      <span className="text-[10px] opacity-80">{count}/8 채널</span>
+    </span>
+  )
+}
+
+function Sparkline({ rows }: { rows: ConvergenceDailyRow[] }) {
+  // 14일 격자 만들기 (없는 날은 0)
+  const today = new Date()
+  today.setHours(0, 0, 0, 0)
+  const days: { day: string; count: number }[] = []
+  for (let i = 13; i >= 0; i--) {
+    const d = new Date(today.getTime() - i * 86400_000)
+    const key = d.toISOString().slice(0, 10)
+    const hit = rows.find((r) => r.day?.slice(0, 10) === key)
+    days.push({ day: key, count: hit?.source_count ?? 0 })
+  }
+  const max = Math.max(1, ...days.map((d) => d.count))
+  const width = 14 * 8
+  const height = 24
+  return (
+    <span
+      className="inline-flex items-end gap-[1px] h-6"
+      title={`최근 14일 합치 추이 (max ${max})`}
+      style={{ width }}
+    >
+      {days.map((d, i) => {
+        const h = Math.max(2, Math.round((d.count / max) * height))
+        const color = d.count >= 4 ? '#15803d' : d.count >= 2 ? '#b45309' : '#9ca3af'
+        return (
+          <span
+            key={i}
+            style={{ width: 6, height: h, background: color, display: 'inline-block', borderRadius: 1 }}
+          />
+        )
+      })}
+    </span>
   )
 }
 
