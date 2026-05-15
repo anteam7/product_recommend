@@ -144,4 +144,27 @@ if (!skipClassify) {
   if (classifyExit !== 0) failCount++
 }
 
+// mine-review-painpoints: classify 이후, 같은 claude CLI 의존성으로
+// 상위 점수 상품의 경쟁 SKU 리뷰 페인포인트를 마이닝한다.
+//   filter 가 걸리면 (특정 cron 만 돌리는 경우) 건너뜀.
+//   --no-painpoints 또는 --no-classify 플래그면 건너뜀(같은 의존성이므로).
+const skipPainpoints =
+  args.includes('--no-painpoints') || args.includes('--no-classify') || !!filter
+if (!skipPainpoints) {
+  console.log(`[${new Date().toISOString()}] launching mine-review-painpoints (claude CLI)`)
+  const scriptPath = resolvePath(__dirname, 'mine-review-painpoints.mjs')
+  const painpointExit = await new Promise((resolve) => {
+    const child = spawn(process.execPath, [scriptPath], {
+      stdio: 'inherit',
+      env: process.env,
+    })
+    child.on('exit', (code) => resolve(code ?? 0))
+    child.on('error', (err) => {
+      console.error(`  mine-review-painpoints spawn error: ${err.message}`)
+      resolve(1)
+    })
+  })
+  if (painpointExit !== 0) failCount++
+}
+
 process.exit(failCount > 0 ? 1 : 0)

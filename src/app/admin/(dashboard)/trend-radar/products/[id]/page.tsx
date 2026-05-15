@@ -35,10 +35,24 @@ interface ScoreRow {
   score_components: any
   computed_at: string
 }
+interface PainpointQuote {
+  quote: string
+  competitor_sku: string
+  severity: number
+  mentions: number
+  sentiment: number
+}
+interface PainpointGapRow {
+  painpoint_category: string
+  total_mentions: number
+  weighted_severity: number | string
+  competitor_count: number
+  top_quotes: PainpointQuote[]
+}
 
 async function fetchProduct(id: string) {
   const sb = createAdminClient()
-  const [prodRes, aliasRes, scoreRes] = await Promise.all([
+  const [prodRes, aliasRes, scoreRes, painpointRes] = await Promise.all([
     sb.from('jimscanner_trends_products').select('*').eq('id', id).single(),
     sb
       .from('jimscanner_trends_aliases')
@@ -51,15 +65,41 @@ async function fetchProduct(id: string) {
       .eq('product_id', id)
       .order('computed_at', { ascending: false })
       .limit(30),
+    sb.rpc('jimscanner_painpoint_gap_matrix' as never, { p_product_id: id } as never),
   ])
 
   if (prodRes.error || !prodRes.data) return null
+
+  const painpointRows = Array.isArray(painpointRes.data)
+    ? (painpointRes.data as unknown as PainpointGapRow[])
+    : []
 
   return {
     product: prodRes.data as ProductRow,
     aliases: (aliasRes.data ?? []) as AliasRow[],
     scoreHistory: (scoreRes.data ?? []) as ScoreRow[],
+    painpoints: painpointRows,
   }
+}
+
+const CATEGORY_LABELS: Record<string, { label: string; emoji: string }> = {
+  shipping: { label: '배송', emoji: '🚚' },
+  quality: { label: '품질', emoji: '🛠' },
+  size: { label: '사이즈', emoji: '📏' },
+  flavor: { label: '향·맛', emoji: '👃' },
+  efficacy: { label: '효능 체감', emoji: '⚡' },
+  price: { label: '가격', emoji: '💰' },
+  other: { label: '기타', emoji: '•' },
+}
+
+function heatColor(total: number, max: number) {
+  if (max <= 0) return 'bg-gray-50 text-gray-400'
+  const r = total / max
+  if (r >= 0.75) return 'bg-rose-600 text-white'
+  if (r >= 0.5) return 'bg-rose-400 text-white'
+  if (r >= 0.25) return 'bg-amber-300 text-amber-900'
+  if (r > 0) return 'bg-amber-100 text-amber-800'
+  return 'bg-gray-50 text-gray-400'
 }
 
 export default async function ProductDetailPage({
@@ -70,8 +110,12 @@ export default async function ProductDetailPage({
   const { id } = await params
   const data = await fetchProduct(id)
   if (!data) notFound()
-  const { product, aliases, scoreHistory } = data
+  const { product, aliases, scoreHistory, painpoints } = data
   const latest = scoreHistory[0]
+  const maxMentions = painpoints.reduce(
+    (m, r) => Math.max(m, r.total_mentions || 0),
+    0,
+  )
 
   return (
     <div className="space-y-6 p-6">
@@ -161,6 +205,91 @@ export default async function ProductDetailPage({
           </pre>
         </section>
       )}
+
+      {/* 경쟁 리뷰 갭 매트릭스 */}
+      <section>
+        <h2 className="text-sm font-semibold mb-2">
+          경쟁 리뷰 갭 매트릭스
+          {painpoints.length > 0 && (
+            <span className="ml-2 text-xs font-normal text-gray-500">
+              ({painpoints.length} 카테고리 · 페인 {painpoints.reduce((s, r) => s + (r.total_mentions || 0), 0)}건)
+            </span>
+          )}
+        </h2>
+        {painpoints.length === 0 ? (
+          <div className="rounded border border-dashed border-gray-200 p-4 text-xs text-gray-500">
+            아직 마이닝된 페인포인트가 없습니다. 일 1회 cron <code>mine-review-painpoints</code> 에서 상위
+            점수 상품의 경쟁 SKU 리뷰를 분류해 적재합니다.
+          </div>
+        ) : (
+          <div className="space-y-3">
+            <div className="grid grid-cols-2 md:grid-cols-7 gap-2">
+              {(['shipping', 'quality', 'size', 'flavor', 'efficacy', 'price', 'other'] as const).map(
+                (cat) => {
+                  const row = painpoints.find((p) => p.painpoint_category === cat)
+                  const meta = CATEGORY_LABELS[cat]
+                  const total = row?.total_mentions ?? 0
+                  return (
+                    <div
+                      key={cat}
+                      className={`rounded p-2 text-center text-xs ${heatColor(total, maxMentions)}`}
+                      title={
+                        row
+                          ? `총 ${total}건 · 가중 ${row.weighted_severity} · SKU ${row.competitor_count}`
+                          : '데이터 없음'
+                      }
+                    >
+                      <div className="text-base leading-none">{meta.emoji}</div>
+                      <div className="mt-1 font-medium">{meta.label}</div>
+                      <div className="mt-1 font-mono text-[11px]">{total}</div>
+                    </div>
+                  )
+                },
+              )}
+            </div>
+
+            <div className="space-y-2">
+              {painpoints
+                .slice()
+                .sort((a, b) => (b.total_mentions || 0) - (a.total_mentions || 0))
+                .map((row) => {
+                  const meta =
+                    CATEGORY_LABELS[row.painpoint_category] ?? CATEGORY_LABELS.other
+                  const quotes = (row.top_quotes ?? []).slice(0, 3)
+                  return (
+                    <div
+                      key={row.painpoint_category}
+                      className="rounded border border-gray-200 p-3"
+                    >
+                      <div className="flex items-center justify-between text-xs text-gray-600">
+                        <div className="font-medium text-gray-800">
+                          {meta.emoji} {meta.label}
+                        </div>
+                        <div className="font-mono">
+                          총 {row.total_mentions}건 · 가중 {row.weighted_severity} · SKU{' '}
+                          {row.competitor_count}
+                        </div>
+                      </div>
+                      <ul className="mt-2 space-y-1 text-sm text-gray-700">
+                        {quotes.map((q, i) => (
+                          <li key={i} className="flex items-start gap-2">
+                            <span className="mt-0.5 inline-block rounded bg-rose-100 px-1.5 py-0.5 text-[10px] font-mono text-rose-700">
+                              sev {q.severity}
+                            </span>
+                            <span className="flex-1">
+                              "{q.quote}"
+                              <span className="ml-2 text-xs text-gray-400">— {q.competitor_sku}</span>
+                            </span>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )
+                })}
+            </div>
+          </div>
+        )}
+      </section>
 
       {/* aliases */}
       <section>
