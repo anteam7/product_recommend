@@ -18,6 +18,7 @@ interface RecommendRow {
   search_score: number
   raw_score: number
   imminent_bonus: number
+  price_drop_bonus: number | null
   final_score: number
 
   tv_match_count: number
@@ -26,6 +27,10 @@ interface RecommendRow {
   search_match_count: number
   search_top_keyword: string
   search_sources: string[]
+
+  price_delta_7d_pct: number | null
+  price_delta_30d_pct: number | null
+  lowest_price_in_30d: number | null
 }
 
 const DAYS_OPTIONS = [
@@ -286,6 +291,12 @@ export default async function RecommendPage({
                         🔍 검색 {r.search_match_count}건 · &quot;{r.search_top_keyword}&quot;
                       </span>
                     )}
+                    {r.price_delta_7d_pct != null && (
+                      <PriceDeltaBadge pct={r.price_delta_7d_pct} window="7d" />
+                    )}
+                    {r.price_delta_7d_pct == null && r.price_delta_30d_pct != null && (
+                      <PriceDeltaBadge pct={r.price_delta_30d_pct} window="30d" />
+                    )}
                     {r.search_sources.length > 0 && (
                       <span className="text-gray-500">
                         from {r.search_sources.map(sourceLabel).join(', ')}
@@ -306,6 +317,9 @@ export default async function RecommendPage({
                     <div>TV {Number(r.tv_score).toFixed(2)} × 1.5</div>
                     <div>검색 {Number(r.search_score).toFixed(2)} × 1.0</div>
                     {r.is_imminent && <div className="text-red-600">× 1.3 (임박)</div>}
+                    {r.price_drop_bonus != null && Number(r.price_drop_bonus) > 1.0 && (
+                      <div className="text-emerald-700">× {Number(r.price_drop_bonus).toFixed(2)} (인하)</div>
+                    )}
                   </div>
                 </div>
               </div>
@@ -327,10 +341,30 @@ export default async function RecommendPage({
           imminent_bonus = is_imminent ? 1.3 : 1.0
         </code>
         <div className="pt-2">
-          <strong>V1 보강 예정:</strong> ÷ (1 + log(스마트스토어 등록상품수)) saturation_penalty · 커뮤니티 시그널 LLM 정규화 후 추가 · ggsan_price_history 가격 인하 추세 보너스
+          <strong>V1 적용:</strong> price_drop_bonus (7일내 -10%↓ ×1.2 · -5%~-10% ×1.1) ·
+          <Link href="/admin/trend-radar/price-momentum" className="underline mx-1 text-amber-700">price-momentum 뷰</Link>
+          에서 모멘텀 매수 신호 우선 정렬.
+          <br />
+          <strong>V2 예정:</strong> ÷ (1 + log(스마트스토어 등록상품수)) saturation_penalty · 커뮤니티 시그널 LLM 정규화
         </div>
       </section>
     </div>
+  )
+}
+
+function PriceDeltaBadge({ pct, window }: { pct: number; window: '7d' | '30d' }) {
+  const v = Number(pct)
+  const isDown = v < 0
+  const isFlat = Math.abs(v) < 0.5
+  if (isFlat) return null
+  const arrow = isDown ? '▼' : '▲'
+  const cls = isDown
+    ? 'bg-emerald-100 text-emerald-800'
+    : 'bg-rose-100 text-rose-800'
+  return (
+    <span className={`px-2 py-0.5 rounded font-mono ${cls}`} title={`${window} 도매가 변화율`}>
+      {arrow}{Math.abs(v).toFixed(1)}% <span className="opacity-60">({window})</span>
+    </span>
   )
 }
 
