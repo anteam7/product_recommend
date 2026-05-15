@@ -1,6 +1,8 @@
 import Link from 'next/link'
 import { notFound } from 'next/navigation'
 import { createAdminClient } from '@/lib/auth/admin-supabase'
+import SignalTimeline, { type ScorePoint, type SignalPoint, type PriceTick } from './SignalTimeline'
+import WhyNowBadge from './WhyNowBadge'
 
 export const dynamic = 'force-dynamic'
 
@@ -36,6 +38,13 @@ interface ScoreRow {
   computed_at: string
 }
 
+const SIGNAL_SOURCES = [
+  'naver_search_trend',
+  'naver_shopping_insight',
+  'naver_news',
+  'naver_tvtime',
+] as const
+
 async function fetchProduct(id: string) {
   const sb = createAdminClient()
   const [prodRes, aliasRes, scoreRes] = await Promise.all([
@@ -50,7 +59,7 @@ async function fetchProduct(id: string) {
       .select('trend_score, commerce_score, supplier_score, competition_score, final_score, score_components, computed_at')
       .eq('product_id', id)
       .order('computed_at', { ascending: false })
-      .limit(30),
+      .limit(60),
   ])
 
   if (prodRes.error || !prodRes.data) return null
@@ -60,6 +69,89 @@ async function fetchProduct(id: string) {
     aliases: (aliasRes.data ?? []) as AliasRow[],
     scoreHistory: (scoreRes.data ?? []) as ScoreRow[],
   }
+}
+
+async function fetchSignals(aliases: string[]): Promise<Record<string, SignalPoint[]>> {
+  const sb = createAdminClient()
+  const since = new Date()
+  since.setUTCDate(since.getUTCDate() - 30)
+  const sinceISO = since.toISOString()
+
+  const empty: Record<string, SignalPoint[]> = {}
+  for (const s of SIGNAL_SOURCES) empty[s] = []
+  if (aliases.length === 0) return empty
+
+  const { data } = (await sb
+    .from('jimscanner_trends_keywords')
+    .select('source, collected_at')
+    .in('keyword', aliases)
+    .in('source', SIGNAL_SOURCES as unknown as string[])
+    .gte('collected_at', sinceISO)
+    .limit(5000)) as { data: Array<{ source: string; collected_at: string }> | null }
+
+  const bySource: Record<string, Record<string, number>> = {}
+  for (const s of SIGNAL_SOURCES) bySource[s] = {}
+  for (const row of data ?? []) {
+    if (!bySource[row.source]) continue
+    const day = row.collected_at.slice(0, 10)
+    bySource[row.source][day] = (bySource[row.source][day] ?? 0) + 1
+  }
+  const out: Record<string, SignalPoint[]> = {}
+  for (const s of SIGNAL_SOURCES) {
+    out[s] = Object.entries(bySource[s])
+      .map(([date, count]) => ({ date, count }))
+      .sort((a, b) => a.date.localeCompare(b.date))
+  }
+  return out
+}
+
+async function fetchGgsanPrice(aliases: string[]): Promise<{ title: string | null; ticks: PriceTick[] }> {
+  if (aliases.length === 0) return { title: null, ticks: [] }
+  const sb = createAdminClient()
+
+  // Try to find a ggsan product matching any alias by ILIKE (title contains)
+  // Pick short, informative aliases (between 3 and 20 chars, not pure-numeric).
+  const candidates = aliases
+    .filter((a) => a && a.length >= 3 && a.length <= 30 && !/^\d+$/.test(a))
+    .slice(0, 8)
+  if (candidates.length === 0) return { title: null, ticks: [] }
+
+  let bestGoodsNo: string | null = null
+  let bestTitle: string | null = null
+  for (const alias of candidates) {
+    const escaped = alias.replace(/[%_\\]/g, (m) => `\\${m}`)
+    const { data } = (await sb
+      .from('jimscanner_ggsan_products')
+      .select('goods_no, title')
+      .ilike('title', `%${escaped}%`)
+      .limit(1)) as { data: Array<{ goods_no: string; title: string }> | null }
+    if (data && data.length > 0) {
+      bestGoodsNo = data[0].goods_no
+      bestTitle = data[0].title
+      break
+    }
+  }
+  if (!bestGoodsNo) return { title: null, ticks: [] }
+
+  const since = new Date()
+  since.setUTCDate(since.getUTCDate() - 30)
+  const { data: hist } = (await sb
+    .from('jimscanner_ggsan_price_history')
+    .select('price_krw, observed_at')
+    .eq('goods_no', bestGoodsNo)
+    .gte('observed_at', since.toISOString())
+    .order('observed_at', { ascending: true })
+    .limit(500)) as { data: Array<{ price_krw: number | null; observed_at: string }> | null }
+
+  const byDate: Record<string, number | null> = {}
+  for (const r of hist ?? []) {
+    const d = r.observed_at.slice(0, 10)
+    byDate[d] = r.price_krw
+  }
+  const ticks: PriceTick[] = Object.entries(byDate)
+    .map(([date, price_krw]) => ({ date, price_krw }))
+    .sort((a, b) => a.date.localeCompare(b.date))
+  return { title: bestTitle, ticks }
 }
 
 export default async function ProductDetailPage({
@@ -72,6 +164,26 @@ export default async function ProductDetailPage({
   if (!data) notFound()
   const { product, aliases, scoreHistory } = data
   const latest = scoreHistory[0]
+  const previous = scoreHistory[1]
+
+  const aliasStrings = aliases.map((a) => a.alias)
+  const [signals, ggsan] = await Promise.all([fetchSignals(aliasStrings), fetchGgsanPrice(aliasStrings)])
+
+  // Score series sorted ascending for sparklines
+  const scoreSeries: ScorePoint[] = scoreHistory
+    .slice()
+    .reverse()
+    .map((s) => ({
+      computed_at: s.computed_at,
+      trend: Number(s.trend_score) || 0,
+      commerce: Number(s.commerce_score) || 0,
+      supplier: Number(s.supplier_score) || 0,
+      competition: Number(s.competition_score) || 0,
+      final: Number(s.final_score) || 0,
+    }))
+  // SignalTimeline expects scoreSeries[0] to be the latest for "latest" display.
+  // Currently it iterates and reads .computed_at; latest is last. Adjust by passing reversed:
+  const scoreSeriesForUi = scoreSeries.slice().reverse() // desc (latest first) — matches Sparkline 'scoreSeries[0]' usage
 
   return (
     <div className="space-y-6 p-6">
@@ -116,6 +228,28 @@ export default async function ProductDetailPage({
           <ScoreCard label="commerce" value={latest.commerce_score} />
           <ScoreCard label="supplier" value={latest.supplier_score} />
           <ScoreCard label="competition" value={latest.competition_score} />
+        </section>
+      )}
+
+      {/* Why now badge */}
+      {latest && previous && (
+        <WhyNowBadge
+          latest={latest.score_components}
+          previous={previous.score_components}
+          latestAt={latest.computed_at}
+          previousAt={previous.computed_at}
+        />
+      )}
+
+      {/* 시그널 시계열 (스파크라인 + stacked area) */}
+      {scoreSeries.length > 0 && (
+        <section>
+          <SignalTimeline
+            scoreSeries={scoreSeriesForUi}
+            signals={signals}
+            prices={ggsan.ticks}
+            ggsanTitle={ggsan.title}
+          />
         </section>
       )}
 
