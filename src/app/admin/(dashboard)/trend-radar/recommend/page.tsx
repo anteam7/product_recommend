@@ -64,6 +64,36 @@ async function fetchRecommend(opts: {
   return { rows, error: null as string | null }
 }
 
+/**
+ * alias keyword → {cycle_days, ltv_score} 매핑.
+ * recommend 카드의 search_top_keyword 와 매칭해 '재구매 ◯일 추정' 배지에 사용.
+ * trends_v4_repurchase 마이그레이션 미적용 환경에선 빈 맵 반환 — UI 무영향.
+ */
+async function fetchRepurchaseByAlias(): Promise<Map<string, { cycle: number; ltv: number }>> {
+  const sb = createAdminClient()
+  const map = new Map<string, { cycle: number; ltv: number }>()
+  // generated types 미반영 — `npm run gen:types` 시 캐스팅 제거
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const { data, error } = await (sb as any)
+    .from('jimscanner_trends_aliases')
+    .select(
+      'alias, jimscanner_trends_products!inner(id, repurchase_cycle_days, ltv_score)',
+    )
+    .not('jimscanner_trends_products.repurchase_cycle_days', 'is', null)
+    .limit(5000)
+  if (error || !data) return map
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  for (const row of data as any[]) {
+    const prod = row.jimscanner_trends_products
+    if (!prod?.repurchase_cycle_days) continue
+    map.set(row.alias, {
+      cycle: prod.repurchase_cycle_days,
+      ltv: Number(prod.ltv_score ?? 0),
+    })
+  }
+  return map
+}
+
 const CATEGORIES: { code: string; label: string }[] = [
   { code: '001', label: '장건강' },
   { code: '002', label: '눈건강' },
@@ -122,7 +152,21 @@ export default async function RecommendPage({
     cate,
   }
 
-  const { rows, error } = await fetchRecommend({ days: validDays, minSim: validSim, imminentOnly, cate })
+  const [{ rows, error }, repurchaseMap] = await Promise.all([
+    fetchRecommend({ days: validDays, minSim: validSim, imminentOnly, cate }),
+    fetchRepurchaseByAlias(),
+  ])
+
+  function repurchaseBadge(r: RecommendRow): { cycle: number; ltv: number } | null {
+    const candidates: string[] = []
+    if (r.search_top_keyword) candidates.push(r.search_top_keyword)
+    if (r.tv_top_keyword) candidates.push(r.tv_top_keyword)
+    for (const c of candidates) {
+      const hit = repurchaseMap.get(c)
+      if (hit) return hit
+    }
+    return null
+  }
 
   // KPI
   const total = rows.length
@@ -291,6 +335,18 @@ export default async function RecommendPage({
                         from {r.search_sources.map(sourceLabel).join(', ')}
                       </span>
                     )}
+                    {(() => {
+                      const rp = repurchaseBadge(r)
+                      if (!rp) return null
+                      return (
+                        <span
+                          className="bg-emerald-100 text-emerald-800 px-2 py-0.5 rounded font-medium"
+                          title={`LTV ${rp.ltv.toFixed(1)} — 재구매 주기 분석 기반`}
+                        >
+                          🔄 재구매 ~{rp.cycle}일
+                        </span>
+                      )
+                    })()}
                   </div>
                 </div>
 
