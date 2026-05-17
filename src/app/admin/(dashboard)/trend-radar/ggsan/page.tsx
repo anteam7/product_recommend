@@ -16,6 +16,19 @@ interface ProductRow {
   is_imminent: boolean
   last_seen_at: string
   last_changed_at: string
+  first_seen_at: string
+}
+
+interface LagRow {
+  cate_cd: string | null
+  cate_label: string | null
+  price_band: string | null
+  sample_count: number
+  lag_p25: number | null
+  lag_p50: number | null
+  lag_p75: number | null
+  lag_p90: number | null
+  lag_mean: number | null
 }
 
 const CATEGORIES: { code: string; label: string }[] = [
@@ -77,6 +90,33 @@ async function fetchData(opts: {
   return { products: (data ?? []) as ProductRow[], total: count ?? 0 }
 }
 
+function priceBand(price: number | null): string {
+  if (price == null) return 'unknown'
+  if (price < 10000) return '0-10k'
+  if (price < 30000) return '10-30k'
+  if (price < 50000) return '30-50k'
+  if (price < 100000) return '50-100k'
+  return '100k+'
+}
+
+async function fetchLagStats(): Promise<Map<string, LagRow>> {
+  const sb = createAdminClient()
+  // RPC는 supabase/trends_v4_supply_demand_lag.sql 적용 후 사용 가능
+  const { data, error } = await sb.rpc('jimscanner_supply_demand_lag' as never, {
+    days_window: 180,
+    min_sim: 0.30,
+    spike_threshold: 40,
+    p_cate_cd: null,
+    p_price_band: null,
+  } as never)
+  const map = new Map<string, LagRow>()
+  if (error || !data) return map
+  for (const r of data as LagRow[]) {
+    map.set(`${r.cate_cd ?? ''}::${r.price_band ?? ''}`, r)
+  }
+  return map
+}
+
 async function fetchMeta() {
   const sb = createAdminClient()
   const [{ count: totalProducts }, { data: lastRun }, { data: queueRow }] = await Promise.all([
@@ -123,10 +163,53 @@ export default async function GgsanPage({
 
   const current: Record<string, string> = { cat, imminent: imminent ? '1' : '', q, sort, page: String(page) }
 
-  const [{ products, total }, meta] = await Promise.all([
+  const [{ products, total }, meta, lagStats] = await Promise.all([
     fetchData({ cat, imminent, q, sort, page }),
     fetchMeta(),
+    fetchLagStats(),
   ])
+
+  const now = Date.now()
+  function dDayInfo(p: ProductRow): { p50: number; p90: number; remain50: number; remain90: number; n: number } | null {
+    if (!p.cate_cd) return null
+    const key = `${p.cate_cd}::${priceBand(p.price_krw)}`
+    let stat = lagStats.get(key)
+    if (!stat || stat.sample_count < 3) {
+      // 가격대 표본 부족 시 카테고리 전체 평균으로 폴백 — '::' 키 + p_cate_cd 매칭 row
+      let agg: { sum50: number; sum90: number; n: number } | null = null
+      for (const r of lagStats.values()) {
+        if (r.cate_cd !== p.cate_cd) continue
+        if (r.lag_p50 == null || r.lag_p90 == null) continue
+        agg ??= { sum50: 0, sum90: 0, n: 0 }
+        agg.sum50 += Number(r.lag_p50) * r.sample_count
+        agg.sum90 += Number(r.lag_p90) * r.sample_count
+        agg.n += r.sample_count
+      }
+      if (!agg || agg.n < 3) return null
+      stat = {
+        cate_cd: p.cate_cd,
+        cate_label: p.cate_label,
+        price_band: priceBand(p.price_krw),
+        sample_count: agg.n,
+        lag_p25: null,
+        lag_p50: agg.sum50 / agg.n,
+        lag_p75: null,
+        lag_p90: agg.sum90 / agg.n,
+        lag_mean: null,
+      }
+    }
+    if (stat.lag_p50 == null || stat.lag_p90 == null) return null
+    const ageDays = Math.max(0, (now - new Date(p.first_seen_at).getTime()) / 86400000)
+    const p50 = Number(stat.lag_p50)
+    const p90 = Number(stat.lag_p90)
+    return {
+      p50,
+      p90,
+      remain50: p50 - ageDays,
+      remain90: p90 - ageDays,
+      n: stat.sample_count,
+    }
+  }
 
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE))
 
@@ -228,7 +311,9 @@ export default async function GgsanPage({
         </div>
       ) : (
         <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6 gap-3">
-          {products.map((p) => (
+          {products.map((p) => {
+            const d = dDayInfo(p)
+            return (
             <a
               key={p.goods_no}
               href={p.detail_url ?? '#'}
@@ -260,9 +345,28 @@ export default async function GgsanPage({
                 <div className="text-base font-bold">
                   {p.price_krw ? `${p.price_krw.toLocaleString()}원` : <span className="text-gray-400 text-xs">가격 X</span>}
                 </div>
+                {d && (
+                  <div
+                    className={`inline-flex items-center gap-1 mt-1 px-1.5 py-0.5 rounded text-[10px] font-mono ${
+                      d.remain50 > 0
+                        ? 'bg-emerald-100 text-emerald-700'
+                        : d.remain90 > 0
+                          ? 'bg-amber-100 text-amber-700'
+                          : 'bg-gray-100 text-gray-500'
+                    }`}
+                    title={`카테고리 표본 ${d.n}건 · 입고 후 검색 정점까지 P50=${d.p50.toFixed(1)}일, P90=${d.p90.toFixed(1)}일`}
+                  >
+                    {d.remain50 > 0
+                      ? `정점 D+${Math.ceil(d.remain50)} (P90 +${Math.max(0, Math.ceil(d.remain90))})`
+                      : d.remain90 > 0
+                        ? `P50지남 · P90 D+${Math.ceil(d.remain90)}`
+                        : '윈도우 종료'}
+                  </div>
+                )}
               </div>
             </a>
-          ))}
+            )
+          })}
         </div>
       )}
 
