@@ -10,12 +10,13 @@ async function fetchData() {
   const sb = createAdminClient()
 
   // 기존 jimscanner_trends_pins (Phase A 부터 존재) 사용 — 향후 v4 product 단위 핀 테이블 추가 가능.
-  const { data: pins } = await sb
+  // listing_status / listing_product_id 는 trends_v4_listing_studio.sql 로 추가됨.
+  const { data: pins } = await (sb as any)
     .from('jimscanner_trends_pins')
-    .select('keyword, source, notes, pinned_at')
+    .select('keyword, source, notes, pinned_at, listing_status, listing_product_id')
     .order('pinned_at', { ascending: false })
 
-  return { pins: (pins ?? []) as PinRow[] }
+  return { pins: (pins ?? []) as (PinRow & { listing_status?: string; listing_product_id?: string | null })[] }
 }
 
 export default async function PinsPage() {
@@ -48,11 +49,35 @@ export default async function PinsPage() {
         <div className="rounded border border-gray-200 divide-y divide-gray-100">
           {pins.map((p) => (
             <div key={`${p.source}::${p.keyword}`} className="px-4 py-3 grid grid-cols-12 items-center text-sm">
-              <div className="col-span-6">
-                <div className="font-medium">{p.keyword}</div>
+              <div className="col-span-5">
+                <div className="font-medium flex items-center gap-2">
+                  {p.listing_product_id ? (
+                    <Link
+                      href={`/admin/trend-radar/products/${p.listing_product_id}`}
+                      className="hover:underline"
+                    >
+                      {p.keyword}
+                    </Link>
+                  ) : (
+                    p.keyword
+                  )}
+                  <ListingStatusBadge status={p.listing_status ?? 'pending'} />
+                </div>
                 {p.notes && <div className="text-xs text-gray-500 mt-1">{p.notes}</div>}
               </div>
-              <div className="col-span-3 text-xs text-gray-500">{p.source}</div>
+              <div className="col-span-2 text-xs text-gray-500">{p.source}</div>
+              <div className="col-span-2 text-xs text-gray-500">
+                {p.listing_product_id ? (
+                  <Link
+                    href={`/admin/trend-radar/products/${p.listing_product_id}`}
+                    className="text-indigo-600 hover:underline"
+                  >
+                    Listing Studio →
+                  </Link>
+                ) : (
+                  <span className="text-gray-400">상품 미연결</span>
+                )}
+              </div>
               <div className="col-span-3 text-right text-xs text-gray-400 font-mono">
                 {p.pinned_at?.slice(0, 16)}
               </div>
@@ -62,4 +87,14 @@ export default async function PinsPage() {
       )}
     </div>
   )
+}
+
+function ListingStatusBadge({ status }: { status: string }) {
+  const map: Record<string, { label: string; cls: string }> = {
+    pending: { label: 'pending', cls: 'bg-gray-100 text-gray-600' },
+    drafted: { label: 'drafted', cls: 'bg-amber-100 text-amber-700' },
+    published: { label: 'published', cls: 'bg-emerald-100 text-emerald-700' },
+  }
+  const m = map[status] ?? map.pending
+  return <span className={`text-[10px] rounded px-1.5 py-0.5 font-medium ${m.cls}`}>{m.label}</span>
 }

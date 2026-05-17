@@ -1,6 +1,7 @@
 import Link from 'next/link'
 import { notFound } from 'next/navigation'
 import { createAdminClient } from '@/lib/auth/admin-supabase'
+import ListingStudioPanel, { type ExistingDraft } from './ListingStudioPanel'
 
 export const dynamic = 'force-dynamic'
 
@@ -38,7 +39,7 @@ interface ScoreRow {
 
 async function fetchProduct(id: string) {
   const sb = createAdminClient()
-  const [prodRes, aliasRes, scoreRes] = await Promise.all([
+  const [prodRes, aliasRes, scoreRes, draftsRes, pinRes] = await Promise.all([
     sb.from('jimscanner_trends_products').select('*').eq('id', id).single(),
     sb
       .from('jimscanner_trends_aliases')
@@ -51,6 +52,19 @@ async function fetchProduct(id: string) {
       .eq('product_id', id)
       .order('computed_at', { ascending: false })
       .limit(30),
+    (sb as any)
+      .from('jimscanner_listing_drafts')
+      .select('variant_idx, kind, content_md, llm_model, created_at')
+      .eq('product_id', id)
+      .order('variant_idx', { ascending: false })
+      .order('created_at', { ascending: false }),
+    (sb as any)
+      .from('jimscanner_trends_pins')
+      .select('listing_status')
+      .eq('listing_product_id', id)
+      .order('pinned_at', { ascending: false })
+      .limit(1)
+      .maybeSingle(),
   ])
 
   if (prodRes.error || !prodRes.data) return null
@@ -59,6 +73,8 @@ async function fetchProduct(id: string) {
     product: prodRes.data as ProductRow,
     aliases: (aliasRes.data ?? []) as AliasRow[],
     scoreHistory: (scoreRes.data ?? []) as ScoreRow[],
+    drafts: ((draftsRes as any)?.data ?? []) as ExistingDraft[],
+    pinStatus: ((pinRes as any)?.data?.listing_status as string | null | undefined) ?? null,
   }
 }
 
@@ -70,7 +86,7 @@ export default async function ProductDetailPage({
   const { id } = await params
   const data = await fetchProduct(id)
   if (!data) notFound()
-  const { product, aliases, scoreHistory } = data
+  const { product, aliases, scoreHistory, drafts, pinStatus } = data
   const latest = scoreHistory[0]
 
   return (
@@ -107,6 +123,12 @@ export default async function ProductDetailPage({
           )}
         </div>
       </header>
+
+      <ListingStudioPanel
+        productId={product.id}
+        initialDrafts={drafts}
+        initialPinStatus={pinStatus}
+      />
 
       {/* 4점수 카드 */}
       {latest && (
