@@ -36,9 +36,24 @@ interface ScoreRow {
   computed_at: string
 }
 
+interface DecisionRow {
+  id: string
+  decision_type: 'pin' | 'unpin' | 'reject' | 'note'
+  keyword: string | null
+  source: string | null
+  notes: string | null
+  snapshot_final_score: number | null
+  snapshot_trend_score: number | null
+  snapshot_commerce_score: number | null
+  snapshot_supplier_score: number | null
+  snapshot_competition_score: number | null
+  decided_at: string
+}
+
 async function fetchProduct(id: string) {
   const sb = createAdminClient()
-  const [prodRes, aliasRes, scoreRes] = await Promise.all([
+  const sbAny = sb as any
+  const [prodRes, aliasRes, scoreRes, decisionRes] = await Promise.all([
     sb.from('jimscanner_trends_products').select('*').eq('id', id).single(),
     sb
       .from('jimscanner_trends_aliases')
@@ -51,6 +66,14 @@ async function fetchProduct(id: string) {
       .eq('product_id', id)
       .order('computed_at', { ascending: false })
       .limit(30),
+    sbAny
+      .from('jimscanner_trends_decisions')
+      .select(
+        'id, decision_type, keyword, source, notes, snapshot_final_score, snapshot_trend_score, snapshot_commerce_score, snapshot_supplier_score, snapshot_competition_score, decided_at',
+      )
+      .eq('product_id', id)
+      .order('decided_at', { ascending: false })
+      .limit(50),
   ])
 
   if (prodRes.error || !prodRes.data) return null
@@ -59,6 +82,7 @@ async function fetchProduct(id: string) {
     product: prodRes.data as ProductRow,
     aliases: (aliasRes.data ?? []) as AliasRow[],
     scoreHistory: (scoreRes.data ?? []) as ScoreRow[],
+    decisions: (decisionRes.data ?? []) as DecisionRow[],
   }
 }
 
@@ -70,7 +94,7 @@ export default async function ProductDetailPage({
   const { id } = await params
   const data = await fetchProduct(id)
   if (!data) notFound()
-  const { product, aliases, scoreHistory } = data
+  const { product, aliases, scoreHistory, decisions } = data
   const latest = scoreHistory[0]
 
   return (
@@ -159,6 +183,51 @@ export default async function ProductDetailPage({
           <pre className="rounded border border-gray-200 p-3 text-xs overflow-x-auto bg-gray-50">
             {JSON.stringify(latest.score_components, null, 2)}
           </pre>
+        </section>
+      )}
+
+      {/* 결정 타임라인 */}
+      {decisions.length > 0 && (
+        <section>
+          <h2 className="text-sm font-semibold mb-2">
+            이 SKU 에 대한 과거 결정 ({decisions.length}건)
+          </h2>
+          <div className="rounded border border-gray-200 divide-y divide-gray-100">
+            {decisions.map((d) => (
+              <div key={d.id} className="grid grid-cols-12 px-3 py-2 text-xs items-center">
+                <div className="col-span-2 font-mono text-gray-500">
+                  {d.decided_at.slice(0, 16).replace('T', ' ')}
+                </div>
+                <div className="col-span-1">
+                  <span
+                    className={
+                      'px-1.5 py-0.5 rounded text-[10px] font-medium ' +
+                      (d.decision_type === 'pin'
+                        ? 'bg-green-100 text-green-700'
+                        : d.decision_type === 'reject'
+                          ? 'bg-red-100 text-red-700'
+                          : d.decision_type === 'unpin'
+                            ? 'bg-gray-100 text-gray-700'
+                            : 'bg-blue-100 text-blue-700')
+                    }
+                  >
+                    {d.decision_type}
+                  </span>
+                </div>
+                <div className="col-span-3 truncate text-gray-600">
+                  {d.keyword ?? '—'}
+                  {d.source ? <span className="text-gray-400"> · {d.source}</span> : null}
+                </div>
+                <div className="col-span-1 text-right font-mono font-bold">
+                  {d.snapshot_final_score?.toFixed(0) ?? '—'}
+                </div>
+                <div className="col-span-5 text-gray-500 truncate">{d.notes ?? ''}</div>
+              </div>
+            ))}
+          </div>
+          <p className="text-[10px] text-gray-400 mt-1">
+            snapshot final = 결정 당시의 final_score. 현재값과 비교하면 직관 보정 가능.
+          </p>
         </section>
       )}
 
