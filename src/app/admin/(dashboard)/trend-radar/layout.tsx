@@ -6,6 +6,7 @@ export const metadata = {
 
 const NAV = [
   { href: '/admin/trend-radar', label: '대시보드' },
+  { href: '/admin/trend-radar/inbox', label: '📥 Triage Inbox' },
   { href: '/admin/trend-radar/recommend', label: '⭐ 추천' },
   { href: '/admin/trend-radar/tv-pushes', label: 'TV 편성' },
   { href: '/admin/trend-radar/tv-ggsan-match', label: 'TV ↔ ggsan' },
