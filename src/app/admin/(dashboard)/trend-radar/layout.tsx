@@ -12,6 +12,7 @@ const NAV = [
   { href: '/admin/trend-radar/ggsan', label: 'ggsan 카탈로그' },
   { href: '/admin/trend-radar/opportunity', label: 'Opportunity' },
   { href: '/admin/trend-radar/pins', label: '핀' },
+  { href: '/admin/trend-radar/keyword-tree', label: '키워드 트리' },
   { href: '/admin/trend-radar/sources', label: '소스 헬스' },
 ]
 
