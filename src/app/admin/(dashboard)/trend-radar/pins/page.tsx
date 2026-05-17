@@ -30,9 +30,17 @@ export default async function PinsPage() {
             위탁 검토 후보. 메모 + 검토 상태 토글은 다음 버전.
           </p>
         </div>
-        <Link href="/admin/trend-radar" className="text-sm text-gray-700 hover:text-black underline">
-          ← 대시보드
-        </Link>
+        <div className="flex items-center gap-4">
+          <Link
+            href="/admin/trend-radar/pins/overlap"
+            className="text-sm text-red-700 hover:text-red-900 underline"
+          >
+            잠식 진단 →
+          </Link>
+          <Link href="/admin/trend-radar" className="text-sm text-gray-700 hover:text-black underline">
+            ← 대시보드
+          </Link>
+        </div>
       </header>
 
       {pins.length === 0 ? (
