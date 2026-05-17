@@ -36,9 +36,20 @@ interface ScoreRow {
   computed_at: string
 }
 
+interface CounterfactualRow {
+  component: string
+  current_value: number
+  required_value: number
+  delta_needed: number
+  feasible: boolean
+  effort_rank: number
+  suggestion: string
+  sub_signals: any
+}
+
 async function fetchProduct(id: string) {
   const sb = createAdminClient()
-  const [prodRes, aliasRes, scoreRes] = await Promise.all([
+  const [prodRes, aliasRes, scoreRes, cfRes] = await Promise.all([
     sb.from('jimscanner_trends_products').select('*').eq('id', id).single(),
     sb
       .from('jimscanner_trends_aliases')
@@ -51,6 +62,7 @@ async function fetchProduct(id: string) {
       .eq('product_id', id)
       .order('computed_at', { ascending: false })
       .limit(30),
+    sb.rpc('jimscanner_score_counterfactual' as never, { p_product_id: id } as never),
   ])
 
   if (prodRes.error || !prodRes.data) return null
@@ -59,6 +71,7 @@ async function fetchProduct(id: string) {
     product: prodRes.data as ProductRow,
     aliases: (aliasRes.data ?? []) as AliasRow[],
     scoreHistory: (scoreRes.data ?? []) as ScoreRow[],
+    counterfactual: ((cfRes as any).data ?? []) as CounterfactualRow[],
   }
 }
 
@@ -70,8 +83,11 @@ export default async function ProductDetailPage({
   const { id } = await params
   const data = await fetchProduct(id)
   if (!data) notFound()
-  const { product, aliases, scoreHistory } = data
+  const { product, aliases, scoreHistory, counterfactual } = data
   const latest = scoreHistory[0]
+  const showGateCard =
+    latest && latest.final_score < 50 && counterfactual.length > 0
+  const topActions = counterfactual.slice(0, 3)
 
   return (
     <div className="space-y-6 p-6">
@@ -107,6 +123,64 @@ export default async function ProductDetailPage({
           )}
         </div>
       </header>
+
+      {/* 진입 게이트 카드 — 경계권 상품에서만 표시 */}
+      {showGateCard && (
+        <section className="rounded border border-amber-300 bg-amber-50/60 p-4">
+          <div className="flex items-baseline justify-between flex-wrap gap-2 mb-3">
+            <div>
+              <h2 className="text-sm font-semibold text-amber-900">
+                🚪 진입 게이트 카드{' '}
+                <span className="text-xs font-normal text-amber-700/70 ml-1">
+                  final {latest.final_score} → 50 까지 부족분 {Math.max(0, 50 - Number(latest.final_score)).toFixed(1)}
+                </span>
+              </h2>
+              <p className="text-xs text-amber-800/80 mt-0.5">
+                4 컴포넌트 중 어느 한 조각만 보강하면 게이트 통과 — 가장 적은 변화 순.
+              </p>
+            </div>
+          </div>
+          <div className="space-y-2">
+            {topActions.map((a) => {
+              const cur = Number(a.current_value)
+              const req = Number(a.required_value)
+              const delta = Number(a.delta_needed)
+              const pct = Math.min(100, Math.max(0, (cur / Math.max(1, req)) * 100))
+              return (
+                <div
+                  key={a.component}
+                  className={`rounded border px-3 py-2 ${
+                    a.feasible ? 'bg-white border-amber-200' : 'bg-gray-50 border-gray-200 opacity-70'
+                  }`}
+                >
+                  <div className="flex items-baseline justify-between gap-2">
+                    <div className="font-medium text-sm">
+                      <span className="text-amber-600 font-bold mr-1">#{a.effort_rank}</span>
+                      {a.component}
+                      {!a.feasible && (
+                        <span className="ml-2 text-[10px] px-1.5 py-0.5 rounded bg-gray-200 text-gray-600">
+                          단독 불가 (다른 컴포넌트 동반 필요)
+                        </span>
+                      )}
+                    </div>
+                    <div className="text-xs font-mono text-gray-600">
+                      {cur.toFixed(1)} → <span className="font-bold text-amber-700">{req.toFixed(1)}</span>{' '}
+                      <span className="text-gray-400">(+{delta.toFixed(1)})</span>
+                    </div>
+                  </div>
+                  <div className="mt-1.5 h-1.5 rounded-full bg-amber-100 overflow-hidden">
+                    <div
+                      className={`h-full ${a.feasible ? 'bg-amber-500' : 'bg-gray-400'}`}
+                      style={{ width: `${pct}%` }}
+                    />
+                  </div>
+                  <p className="text-xs text-gray-600 mt-1.5">💡 {a.suggestion}</p>
+                </div>
+              )
+            })}
+          </div>
+        </section>
+      )}
 
       {/* 4점수 카드 */}
       {latest && (
