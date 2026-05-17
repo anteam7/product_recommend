@@ -36,9 +36,24 @@ interface ScoreRow {
   computed_at: string
 }
 
+interface KmLookupRow {
+  category_top: string
+  category_mid: string | null
+  entered_at: string
+  current_age_weeks: number
+  median_remaining_weeks: number | null
+  survival_now: number | null
+  p_plus_1w: number | null
+  p_plus_2w: number | null
+  p_plus_4w: number | null
+  p_plus_8w: number | null
+  recommended_take_profit_week: number | null
+  recommended_stop_loss_week: number | null
+}
+
 async function fetchProduct(id: string) {
   const sb = createAdminClient()
-  const [prodRes, aliasRes, scoreRes] = await Promise.all([
+  const [prodRes, aliasRes, scoreRes, kmRes] = await Promise.all([
     sb.from('jimscanner_trends_products').select('*').eq('id', id).single(),
     sb
       .from('jimscanner_trends_aliases')
@@ -51,14 +66,18 @@ async function fetchProduct(id: string) {
       .eq('product_id', id)
       .order('computed_at', { ascending: false })
       .limit(30),
+    sb.rpc('jimscanner_product_km_lookup' as never, { p_product_id: id } as never),
   ])
 
   if (prodRes.error || !prodRes.data) return null
+
+  const kmRows = ((kmRes.data ?? []) as unknown) as KmLookupRow[]
 
   return {
     product: prodRes.data as ProductRow,
     aliases: (aliasRes.data ?? []) as AliasRow[],
     scoreHistory: (scoreRes.data ?? []) as ScoreRow[],
+    km: kmRows[0] ?? null,
   }
 }
 
@@ -70,7 +89,7 @@ export default async function ProductDetailPage({
   const { id } = await params
   const data = await fetchProduct(id)
   if (!data) notFound()
-  const { product, aliases, scoreHistory } = data
+  const { product, aliases, scoreHistory, km } = data
   const latest = scoreHistory[0]
 
   return (
@@ -116,6 +135,101 @@ export default async function ProductDetailPage({
           <ScoreCard label="commerce" value={latest.commerce_score} />
           <ScoreCard label="supplier" value={latest.supplier_score} />
           <ScoreCard label="competition" value={latest.competition_score} />
+        </section>
+      )}
+
+      {/* Kaplan-Meier 기반 익절·손절 권장 */}
+      {km && (
+        <section className="rounded border border-gray-200 p-4 bg-blue-50/30">
+          <div className="flex items-baseline justify-between mb-2">
+            <h2 className="text-sm font-semibold text-gray-700">
+              📈 동일 카테고리 KM 기반 익절·손절 권장
+            </h2>
+            <Link
+              href="/admin/trend-radar/survival"
+              className="text-xs text-gray-500 hover:text-black underline"
+            >
+              카테고리 KM 보드 →
+            </Link>
+          </div>
+          <div className="grid grid-cols-2 md:grid-cols-6 gap-3 text-sm">
+            <KmStat
+              label="현재 진입 후"
+              value={`${km.current_age_weeks}주차`}
+              hint={km.entered_at?.slice(0, 10) ?? ''}
+            />
+            <KmStat
+              label="카테고리 median"
+              value={km.median_remaining_weeks !== null ? `${km.median_remaining_weeks}w` : '—'}
+              hint={`${km.category_top}${km.category_mid ? ' / ' + km.category_mid : ''}`}
+            />
+            <KmStat
+              label="현재 잔존 S(t)"
+              value={
+                km.survival_now !== null
+                  ? `${(Number(km.survival_now) * 100).toFixed(0)}%`
+                  : '—'
+              }
+              hint="진입 시점 대비"
+            />
+            <KmStat
+              label="조건부 +4w 생존"
+              value={
+                km.p_plus_4w !== null
+                  ? `${(Number(km.p_plus_4w) * 100).toFixed(0)}%`
+                  : '—'
+              }
+              hint="익절 판단 기준"
+              tone={
+                km.p_plus_4w === null
+                  ? 'neutral'
+                  : Number(km.p_plus_4w) >= 0.5
+                  ? 'good'
+                  : Number(km.p_plus_4w) >= 0.25
+                  ? 'warn'
+                  : 'bad'
+              }
+            />
+            <KmStat
+              label="익절 권장 (+w)"
+              value={
+                km.recommended_take_profit_week !== null
+                  ? `+${km.recommended_take_profit_week}w`
+                  : '—'
+              }
+              hint="S(t)/S(now) ≤ 0.5"
+              tone="warn"
+            />
+            <KmStat
+              label="손절 권장 (+w)"
+              value={
+                km.recommended_stop_loss_week !== null
+                  ? `+${km.recommended_stop_loss_week}w`
+                  : '—'
+              }
+              hint="S(t)/S(now) ≤ 0.25"
+              tone="bad"
+            />
+          </div>
+          {km.p_plus_1w !== null && (
+            <div className="mt-3 text-xs text-gray-600 flex gap-4 flex-wrap">
+              <span>
+                +1w: <span className="font-mono">{(Number(km.p_plus_1w) * 100).toFixed(0)}%</span>
+              </span>
+              {km.p_plus_2w !== null && (
+                <span>
+                  +2w:{' '}
+                  <span className="font-mono">{(Number(km.p_plus_2w) * 100).toFixed(0)}%</span>
+                </span>
+              )}
+              {km.p_plus_8w !== null && (
+                <span>
+                  +8w:{' '}
+                  <span className="font-mono">{(Number(km.p_plus_8w) * 100).toFixed(0)}%</span>
+                </span>
+              )}
+            </div>
+          )}
         </section>
       )}
 
@@ -182,6 +296,34 @@ export default async function ProductDetailPage({
       <section className="text-xs text-gray-500">
         first_seen: {product.first_seen_at} · last_seen: {product.last_seen_at}
       </section>
+    </div>
+  )
+}
+
+function KmStat({
+  label,
+  value,
+  hint,
+  tone = 'neutral',
+}: {
+  label: string
+  value: string
+  hint?: string
+  tone?: 'neutral' | 'good' | 'warn' | 'bad'
+}) {
+  const toneClass =
+    tone === 'good'
+      ? 'text-green-700'
+      : tone === 'warn'
+      ? 'text-amber-700'
+      : tone === 'bad'
+      ? 'text-red-700'
+      : 'text-gray-900'
+  return (
+    <div className="rounded border border-gray-200 bg-white p-2.5">
+      <div className="text-[10px] text-gray-500 uppercase tracking-wide">{label}</div>
+      <div className={`text-lg font-bold mt-0.5 ${toneClass}`}>{value}</div>
+      {hint && <div className="text-[10px] text-gray-400 mt-0.5 truncate">{hint}</div>}
     </div>
   )
 }
