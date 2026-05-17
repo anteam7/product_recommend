@@ -12,6 +12,7 @@
     { "path": "/api/cron/collect-quasarzone-sale", "schedule": "40 18 * * *" },
     { "path": "/api/cron/collect-kca-press", "schedule": "50 18 * * *" },
     { "path": "/api/cron/collect-gsc-daily", "schedule": "0 19 * * *" },
-    { "path": "/api/cron/collect-naver-tvtime", "schedule": "10 19 * * *" }
+    { "path": "/api/cron/collect-naver-tvtime", "schedule": "10 19 * * *" },
+    { "path": "/api/cron/collect-naver-kin", "schedule": "55 18 * * *" }
   ]
 }

@@ -45,6 +45,7 @@ const MARKET_RAW_SOURCES = [
   'clien_park',
   'quasarzone_sale',
   'kca_press',
+  'naver_kin',
 ]
 
 async function fetchData() {
