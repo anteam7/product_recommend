@@ -64,6 +64,34 @@ async function fetchRecommend(opts: {
   return { rows, error: null as string | null }
 }
 
+interface TwinInfo {
+  cluster_id: number
+  source_count: number
+  has_aliex: boolean
+  has_musinsa: boolean
+  has_danawa: boolean
+  has_domeggook: boolean
+}
+
+async function fetchVisualTwinMap(goodsNos: string[]): Promise<Map<string, TwinInfo>> {
+  if (goodsNos.length === 0) return new Map()
+  const sb = createAdminClient()
+  // 뷰 `jimscanner_ggsan_visual_twin` 가 supabase/visual_twin_embeddings.sql 적용 후 존재.
+  // generated 타입 반영 전이라 `as any` 캐스팅.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const sbAny = sb as any
+  const { data, error } = await sbAny
+    .from('jimscanner_ggsan_visual_twin')
+    .select('goods_no, cluster_id, source_count, has_aliex, has_musinsa, has_danawa, has_domeggook')
+    .in('goods_no', goodsNos)
+  if (error) return new Map()
+  const map = new Map<string, TwinInfo>()
+  for (const r of (data ?? []) as Array<TwinInfo & { goods_no: string }>) {
+    map.set(r.goods_no, r)
+  }
+  return map
+}
+
 const CATEGORIES: { code: string; label: string }[] = [
   { code: '001', label: '장건강' },
   { code: '002', label: '눈건강' },
@@ -123,6 +151,7 @@ export default async function RecommendPage({
   }
 
   const { rows, error } = await fetchRecommend({ days: validDays, minSim: validSim, imminentOnly, cate })
+  const twinMap = await fetchVisualTwinMap(rows.map((r) => r.goods_no))
 
   // KPI
   const total = rows.length
@@ -276,6 +305,24 @@ export default async function RecommendPage({
                   </div>
                   {/* 매칭 근거 */}
                   <div className="flex flex-wrap gap-2 text-xs pt-1">
+                    {twinMap.has(r.goods_no) && (() => {
+                      const t = twinMap.get(r.goods_no)!
+                      const channels: string[] = []
+                      if (t.has_aliex) channels.push('알리')
+                      if (t.has_musinsa) channels.push('무신사')
+                      if (t.has_danawa) channels.push('다나와')
+                      if (t.has_domeggook) channels.push('도매꾹')
+                      return (
+                        <Link
+                          href={`/admin/trend-radar/visual-twins?filter=ggsan#c${t.cluster_id}`}
+                          className="bg-emerald-100 text-emerald-800 px-2 py-0.5 rounded hover:bg-emerald-200"
+                          title="이미지 임베딩 cosine ≥ 0.88 매칭"
+                        >
+                          🪞 비전트윈 ×{t.source_count}
+                          {channels.length > 0 && ` · ${channels.join('/')}`}
+                        </Link>
+                      )
+                    })()}
                     {r.tv_match_count > 0 && (
                       <span className="bg-amber-100 text-amber-800 px-2 py-0.5 rounded">
                         📺 TV {r.tv_match_count}건 · &quot;{r.tv_top_keyword}&quot; ({r.tv_total_pushes}회 편성)
