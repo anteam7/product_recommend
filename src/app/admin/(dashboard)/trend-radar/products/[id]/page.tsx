@@ -36,9 +36,22 @@ interface ScoreRow {
   computed_at: string
 }
 
+interface AnalogRow {
+  product_id: string
+  canonical_name: string
+  category_top: string
+  sim: number
+  outcome_label: 'winner' | 'sideways' | 'decay' | 'dead' | 'unknown'
+  peak_final: number
+  days_to_peak: number
+  post_peak_drawdown_pct: number
+  history_days: number
+  last_seen_at: string
+}
+
 async function fetchProduct(id: string) {
   const sb = createAdminClient()
-  const [prodRes, aliasRes, scoreRes] = await Promise.all([
+  const [prodRes, aliasRes, scoreRes, analogRes] = await Promise.all([
     sb.from('jimscanner_trends_products').select('*').eq('id', id).single(),
     sb
       .from('jimscanner_trends_aliases')
@@ -51,14 +64,49 @@ async function fetchProduct(id: string) {
       .eq('product_id', id)
       .order('computed_at', { ascending: false })
       .limit(30),
+    // 유사 과거 케이스 top-5 (window 14d) — RPC 가 없거나 데이터 부족 시 빈 배열
+    (sb as any).rpc('jimscanner_find_analogs', {
+      target_id: id,
+      window_days: 14,
+      k: 5,
+    }),
   ])
 
   if (prodRes.error || !prodRes.data) return null
 
+  // 본인 시계열의 마지막 14일 — overlay 차트 비교용
+  const scoreHistory = (scoreRes.data ?? []) as ScoreRow[]
+  const targetSeries = [...scoreHistory]
+    .reverse()
+    .slice(-14)
+    .map((s) => Number(s.final_score))
+
+  // analog 들의 동일 길이 시계열 — overlay sparkline 용
+  const analogs = ((analogRes as any)?.data ?? []) as AnalogRow[]
+  let analogSeriesMap = new Map<string, number[]>()
+  if (analogs.length > 0) {
+    const ids = analogs.map((a) => a.product_id)
+    const { data: analogScores } = await sb
+      .from('jimscanner_trends_scores')
+      .select('product_id, final_score, computed_at')
+      .in('product_id', ids)
+      .order('computed_at', { ascending: true })
+    for (const id of ids) {
+      const rows = (analogScores ?? []).filter((r) => r.product_id === id)
+      analogSeriesMap.set(
+        id,
+        rows.slice(-targetSeries.length).map((r) => Number(r.final_score)),
+      )
+    }
+  }
+
   return {
     product: prodRes.data as ProductRow,
     aliases: (aliasRes.data ?? []) as AliasRow[],
-    scoreHistory: (scoreRes.data ?? []) as ScoreRow[],
+    scoreHistory,
+    targetSeries,
+    analogs,
+    analogSeriesMap,
   }
 }
 
@@ -70,7 +118,7 @@ export default async function ProductDetailPage({
   const { id } = await params
   const data = await fetchProduct(id)
   if (!data) notFound()
-  const { product, aliases, scoreHistory } = data
+  const { product, aliases, scoreHistory, targetSeries, analogs, analogSeriesMap } = data
   const latest = scoreHistory[0]
 
   return (
@@ -152,6 +200,67 @@ export default async function ProductDetailPage({
         </section>
       )}
 
+      {/* 🪞 Analog Overlay — 유사 과거 케이스 결과 매칭 */}
+      <section>
+        <div className="flex items-baseline justify-between mb-2">
+          <h2 className="text-sm font-semibold">
+            🪞 유사 과거 케이스 5건{' '}
+            <span className="text-xs font-normal text-gray-500 ml-1">
+              (최근 14일 final 시계열 ↔ 누적 이력 매칭)
+            </span>
+          </h2>
+          <Link
+            href="/admin/trend-radar/analogs"
+            className="text-xs text-gray-600 hover:text-black underline"
+          >
+            아카이브 →
+          </Link>
+        </div>
+        {analogs.length === 0 ? (
+          <div className="rounded border border-dashed border-gray-300 p-6 text-center text-sm text-gray-500">
+            누적 시계열이 부족해서 매칭할 과거 케이스가 없습니다 (target 시계열 ≥ 2 day-bucket 필요).
+          </div>
+        ) : (
+          <div className="rounded border border-gray-200 divide-y divide-gray-100">
+            {analogs.map((a) => {
+              const series = analogSeriesMap.get(a.product_id) ?? []
+              return (
+                <Link
+                  key={a.product_id}
+                  href={`/admin/trend-radar/products/${a.product_id}`}
+                  className="grid grid-cols-12 items-center gap-2 px-3 py-2 text-sm hover:bg-gray-50"
+                >
+                  <div className="col-span-5">
+                    <div className="font-medium truncate">{a.canonical_name}</div>
+                    <div className="text-xs text-gray-500">
+                      {a.category_top} · history {a.history_days}d
+                    </div>
+                  </div>
+                  <div className="col-span-3">
+                    <Sparkline
+                      target={targetSeries}
+                      candidate={series}
+                      width={140}
+                      height={28}
+                    />
+                  </div>
+                  <div className="col-span-1 text-right">
+                    <OutcomeBadge label={a.outcome_label} />
+                  </div>
+                  <div className="col-span-2 text-right text-xs text-gray-600 font-mono">
+                    peak {Math.round(Number(a.peak_final))} · -
+                    {Math.round(Number(a.post_peak_drawdown_pct))}%
+                  </div>
+                  <div className="col-span-1 text-right font-mono text-xs">
+                    {(a.sim * 100).toFixed(0)}%
+                  </div>
+                </Link>
+              )
+            })}
+          </div>
+        )}
+      </section>
+
       {/* score breakdown */}
       {latest?.score_components && (
         <section>
@@ -183,6 +292,69 @@ export default async function ProductDetailPage({
         first_seen: {product.first_seen_at} · last_seen: {product.last_seen_at}
       </section>
     </div>
+  )
+}
+
+const OUTCOME_STYLE: Record<string, { label: string; cls: string }> = {
+  winner: { label: '✅ winner', cls: 'bg-green-100 text-green-700' },
+  sideways: { label: '➖ sideways', cls: 'bg-gray-100 text-gray-700' },
+  decay: { label: '📉 decay', cls: 'bg-amber-100 text-amber-700' },
+  dead: { label: '💀 dead', cls: 'bg-red-100 text-red-700' },
+  unknown: { label: '? unknown', cls: 'bg-gray-50 text-gray-400' },
+}
+
+function OutcomeBadge({ label }: { label: string }) {
+  const s = OUTCOME_STYLE[label] ?? OUTCOME_STYLE.unknown
+  return (
+    <span className={`text-[10px] px-2 py-0.5 rounded font-medium ${s.cls}`}>
+      {s.label}
+    </span>
+  )
+}
+
+function Sparkline({
+  target,
+  candidate,
+  width = 120,
+  height = 24,
+}: {
+  target: number[]
+  candidate: number[]
+  width?: number
+  height?: number
+}) {
+  if (target.length < 2 && candidate.length < 2) {
+    return <div className="text-xs text-gray-400">—</div>
+  }
+  const all = [...target, ...candidate]
+  const min = Math.min(...all)
+  const max = Math.max(...all)
+  const range = max - min || 1
+  const toPath = (arr: number[]) => {
+    if (arr.length < 2) return ''
+    return arr
+      .map((v, i) => {
+        const x = (i / (arr.length - 1)) * width
+        const y = height - ((v - min) / range) * height
+        return `${i === 0 ? 'M' : 'L'}${x.toFixed(1)},${y.toFixed(1)}`
+      })
+      .join(' ')
+  }
+  return (
+    <svg width={width} height={height} className="overflow-visible">
+      {candidate.length >= 2 && (
+        <path
+          d={toPath(candidate)}
+          fill="none"
+          stroke="#9ca3af"
+          strokeWidth={1.5}
+          strokeDasharray="3 2"
+        />
+      )}
+      {target.length >= 2 && (
+        <path d={toPath(target)} fill="none" stroke="#111827" strokeWidth={1.5} />
+      )}
+    </svg>
   )
 }
 
