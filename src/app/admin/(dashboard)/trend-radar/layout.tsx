@@ -11,6 +11,7 @@ const NAV = [
   { href: '/admin/trend-radar/tv-ggsan-match', label: 'TV ↔ ggsan' },
   { href: '/admin/trend-radar/ggsan', label: 'ggsan 카탈로그' },
   { href: '/admin/trend-radar/opportunity', label: 'Opportunity' },
+  { href: '/admin/trend-radar/elasticity', label: '탄력성' },
   { href: '/admin/trend-radar/pins', label: '핀' },
   { href: '/admin/trend-radar/sources', label: '소스 헬스' },
 ]

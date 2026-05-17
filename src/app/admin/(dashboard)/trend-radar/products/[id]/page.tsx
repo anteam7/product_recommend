@@ -35,10 +35,23 @@ interface ScoreRow {
   score_components: any
   computed_at: string
 }
+interface ElasticityRow {
+  elasticity_coef: number | null
+  competitor_coef: number | null
+  r_squared: number | null
+  sample_days: number
+  price_band_p10: number | null
+  price_band_p50: number | null
+  price_band_p90: number | null
+  optimal_entry_price: number | null
+  decision_label: string | null
+  confidence: string
+  computed_at: string
+}
 
 async function fetchProduct(id: string) {
   const sb = createAdminClient()
-  const [prodRes, aliasRes, scoreRes] = await Promise.all([
+  const [prodRes, aliasRes, scoreRes, elastRes] = await Promise.all([
     sb.from('jimscanner_trends_products').select('*').eq('id', id).single(),
     sb
       .from('jimscanner_trends_aliases')
@@ -51,14 +64,25 @@ async function fetchProduct(id: string) {
       .eq('product_id', id)
       .order('computed_at', { ascending: false })
       .limit(30),
+    sb
+      .from('jimscanner_trends_elasticity' as never)
+      .select(
+        'elasticity_coef, competitor_coef, r_squared, sample_days, price_band_p10, price_band_p50, price_band_p90, optimal_entry_price, decision_label, confidence, computed_at',
+      )
+      .eq('product_id', id)
+      .order('computed_at', { ascending: false })
+      .limit(1),
   ])
 
   if (prodRes.error || !prodRes.data) return null
+
+  const elasticityList = (elastRes.data ?? []) as unknown as ElasticityRow[]
 
   return {
     product: prodRes.data as ProductRow,
     aliases: (aliasRes.data ?? []) as AliasRow[],
     scoreHistory: (scoreRes.data ?? []) as ScoreRow[],
+    elasticity: (elasticityList[0] ?? null) as ElasticityRow | null,
   }
 }
 
@@ -70,7 +94,7 @@ export default async function ProductDetailPage({
   const { id } = await params
   const data = await fetchProduct(id)
   if (!data) notFound()
-  const { product, aliases, scoreHistory } = data
+  const { product, aliases, scoreHistory, elasticity } = data
   const latest = scoreHistory[0]
 
   return (
@@ -118,6 +142,9 @@ export default async function ProductDetailPage({
           <ScoreCard label="competition" value={latest.competition_score} />
         </section>
       )}
+
+      {/* 탄력성 카드 */}
+      <ElasticityCard data={elasticity} />
 
       {/* score 시계열 (최근 30 row) */}
       {scoreHistory.length > 1 && (
@@ -183,6 +210,93 @@ export default async function ProductDetailPage({
         first_seen: {product.first_seen_at} · last_seen: {product.last_seen_at}
       </section>
     </div>
+  )
+}
+
+function ElasticityCard({ data }: { data: ElasticityRow | null }) {
+  if (!data) {
+    return (
+      <section className="rounded border border-dashed border-gray-200 p-4 text-xs text-gray-500">
+        가격 탄력성: 아직 계산되지 않음 (scripts/compute-price-elasticity.mjs 실행 필요)
+      </section>
+    )
+  }
+  const dim = data.confidence === 'low'
+  const beta = data.elasticity_coef
+  const absBeta = beta == null ? null : Math.abs(beta)
+  let label: string
+  let color: string
+  if (dim) {
+    label = '신뢰도 낮음'
+    color = 'bg-gray-100 text-gray-500'
+  } else if (data.decision_label === 'price_sensitive') {
+    label = '가격민감 — 저가공세 권장'
+    color = 'bg-red-100 text-red-700'
+  } else if (data.decision_label === 'differentiable') {
+    label = '차별화 가능 — 프리미엄 포지셔닝'
+    color = 'bg-emerald-100 text-emerald-700'
+  } else {
+    label = '중간 — p50 부근 마진 최적화'
+    color = 'bg-amber-100 text-amber-700'
+  }
+  const textCls = dim ? 'text-gray-400' : 'text-gray-800'
+  return (
+    <section className={`rounded border border-gray-200 p-4 ${textCls}`}>
+      <div className="flex items-baseline justify-between mb-2">
+        <h2 className="text-sm font-semibold">가격 탄력성</h2>
+        <span className={`text-xs px-2 py-0.5 rounded ${color}`}>{label}</span>
+      </div>
+      <div className="grid grid-cols-2 md:grid-cols-5 gap-3 text-center">
+        <div>
+          <div className="text-[10px] uppercase text-gray-500">β</div>
+          <div className="text-2xl font-bold font-mono mt-1">
+            {beta?.toFixed(2) ?? '—'}
+          </div>
+          <div className="text-[10px] text-gray-400 mt-0.5">
+            {absBeta != null
+              ? absBeta >= 1.5
+                ? '|β|≥1.5 고탄력'
+                : absBeta <= 0.5
+                  ? '|β|≤0.5 저탄력'
+                  : '중간'
+              : ''}
+          </div>
+        </div>
+        <div>
+          <div className="text-[10px] uppercase text-gray-500">R²</div>
+          <div className="text-xl font-mono mt-1">{data.r_squared?.toFixed(2) ?? '—'}</div>
+          <div className="text-[10px] text-gray-400 mt-0.5">n={data.sample_days}</div>
+        </div>
+        <div>
+          <div className="text-[10px] uppercase text-gray-500">p10</div>
+          <div className="text-xl font-mono mt-1">
+            {data.price_band_p10?.toLocaleString() ?? '—'}
+          </div>
+        </div>
+        <div>
+          <div className="text-[10px] uppercase text-gray-500">p50</div>
+          <div className="text-xl font-mono mt-1">
+            {data.price_band_p50?.toLocaleString() ?? '—'}
+          </div>
+        </div>
+        <div>
+          <div className="text-[10px] uppercase text-gray-500">p90</div>
+          <div className="text-xl font-mono mt-1">
+            {data.price_band_p90?.toLocaleString() ?? '—'}
+          </div>
+        </div>
+      </div>
+      <div className="mt-3 text-sm">
+        권장 진입가:{' '}
+        <span className="font-bold font-mono text-base">
+          {data.optimal_entry_price?.toLocaleString() ?? '—'}원
+        </span>
+      </div>
+      <div className="text-[10px] text-gray-400 mt-1 font-mono">
+        computed_at: {data.computed_at?.slice(0, 19).replace('T', ' ')} · confidence:{' '}
+        {data.confidence}
+      </div>
+    </section>
   )
 }
 
