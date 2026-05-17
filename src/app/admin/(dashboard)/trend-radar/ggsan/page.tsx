@@ -16,6 +16,65 @@ interface ProductRow {
   is_imminent: boolean
   last_seen_at: string
   last_changed_at: string
+  volume_value: number | null
+  volume_unit: string | null
+  pack_count: number | null
+  pack_unit: string | null
+  unit_price: number | null
+  unit_price_basis: string | null
+}
+
+interface UnitPriceViewRow {
+  goods_no: string
+  quantile_label: 'low' | 'mid' | 'high' | null
+  p25: number | null
+  p50: number | null
+  p75: number | null
+  pct_diff_from_median: number | null
+  unit_price: number | null
+  unit_price_basis: string | null
+}
+
+interface DistRow {
+  cate_cd: string
+  unit_price_basis: string
+  sample_count: number
+  p10: number
+  p25: number
+  p50: number
+  p75: number
+  p90: number
+}
+
+function formatUnitPrice(unitPrice: number | null, basis: string | null): string {
+  if (unitPrice == null || !basis) return '—'
+  const labelMap: Record<string, string> = {
+    per_mg: '원/mg',
+    per_g: '원/g',
+    per_ml: '원/ml',
+    per_tablet: '원/정',
+    per_pack: '원/개',
+  }
+  const lbl = labelMap[basis] ?? basis
+  // 작은 값(원/mg)은 소수점 2자리, 큰 값(원/정)은 정수
+  const v = unitPrice < 10 ? unitPrice.toFixed(2) : Math.round(unitPrice).toLocaleString()
+  return `${v} ${lbl}`
+}
+
+function quantileBadge(label: 'low' | 'mid' | 'high' | null, pctDiff: number | null) {
+  if (!label) return null
+  const cfg = {
+    low: { bg: 'bg-emerald-100', text: 'text-emerald-700', kr: '저가' },
+    mid: { bg: 'bg-gray-100', text: 'text-gray-600', kr: '중가' },
+    high: { bg: 'bg-rose-100', text: 'text-rose-700', kr: '고가' },
+  }[label]
+  const diffTxt =
+    pctDiff == null ? '' : ` ${pctDiff > 0 ? '+' : ''}${pctDiff.toFixed(0)}%`
+  return (
+    <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${cfg.bg} ${cfg.text}`}>
+      {cfg.kr}{diffTxt}
+    </span>
+  )
 }
 
 const CATEGORIES: { code: string; label: string }[] = [
@@ -44,6 +103,8 @@ const SORT_OPTIONS = [
   { v: 'recent', label: '최신 갱신순' },
   { v: 'price_asc', label: '가격 낮은순' },
   { v: 'price_desc', label: '가격 높은순' },
+  { v: 'unit_asc', label: '단위가 낮은순' },
+  { v: 'unit_desc', label: '단위가 높은순' },
   { v: 'title', label: '이름순' },
 ] as const
 type SortKey = (typeof SORT_OPTIONS)[number]['v']
@@ -66,6 +127,8 @@ async function fetchData(opts: {
   switch (opts.sort) {
     case 'price_asc':  query = query.order('price_krw', { ascending: true, nullsFirst: false }); break
     case 'price_desc': query = query.order('price_krw', { ascending: false, nullsFirst: false }); break
+    case 'unit_asc':   query = (query as any).order('unit_price', { ascending: true, nullsFirst: false }); break
+    case 'unit_desc':  query = (query as any).order('unit_price', { ascending: false, nullsFirst: false }); break
     case 'title':      query = query.order('title', { ascending: true }); break
     case 'recent':
     default:           query = query.order('last_changed_at', { ascending: false })
@@ -74,7 +137,32 @@ async function fetchData(opts: {
   const offset = (opts.page - 1) * PAGE_SIZE
   query = query.range(offset, offset + PAGE_SIZE - 1)
   const { data, count } = await query
-  return { products: (data ?? []) as ProductRow[], total: count ?? 0 }
+  const products = (data ?? []) as unknown as ProductRow[]
+
+  // 같은 카테고리×basis 분위수 라벨을 view 에서 일괄 조회
+  let viewRows: UnitPriceViewRow[] = []
+  if (products.length > 0) {
+    const ids = products.map((p) => p.goods_no)
+    const { data: vData } = await (sb as any)
+      .from('jimscanner_ggsan_unit_price_view')
+      .select('goods_no, quantile_label, p25, p50, p75, pct_diff_from_median, unit_price, unit_price_basis')
+      .in('goods_no', ids)
+    viewRows = (vData ?? []) as UnitPriceViewRow[]
+  }
+  const byGoodsNo = new Map<string, UnitPriceViewRow>()
+  for (const r of viewRows) byGoodsNo.set(r.goods_no, r)
+
+  return { products, total: count ?? 0, viewByGoodsNo: byGoodsNo }
+}
+
+async function fetchDist(cat: string): Promise<DistRow[]> {
+  if (!cat) return []
+  const sb = createAdminClient()
+  const { data } = await (sb as any)
+    .from('jimscanner_ggsan_unit_price_dist')
+    .select('cate_cd, unit_price_basis, sample_count, p10, p25, p50, p75, p90')
+    .eq('cate_cd', cat)
+  return (data ?? []) as DistRow[]
 }
 
 async function fetchMeta() {
@@ -123,9 +211,10 @@ export default async function GgsanPage({
 
   const current: Record<string, string> = { cat, imminent: imminent ? '1' : '', q, sort, page: String(page) }
 
-  const [{ products, total }, meta] = await Promise.all([
+  const [{ products, total, viewByGoodsNo }, meta, distRows] = await Promise.all([
     fetchData({ cat, imminent, q, sort, page }),
     fetchMeta(),
+    fetchDist(cat),
   ])
 
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE))
@@ -216,6 +305,41 @@ export default async function GgsanPage({
         </div>
       </div>
 
+      {/* 카테고리 단위가 분포 (박스플롯 요약) — 카테고리 필터 적용 시 */}
+      {distRows.length > 0 && (
+        <section className="rounded border border-gray-200 p-3 bg-gray-50/50">
+          <div className="text-xs font-semibold text-gray-700 mb-2">
+            카테고리 단위가 분포 (저가/중가/고가 기준)
+          </div>
+          <div className="space-y-1">
+            {distRows.map((d) => {
+              const basisLabel = {
+                per_mg: '원/mg',
+                per_g: '원/g',
+                per_ml: '원/ml',
+                per_pack: '원/개',
+              }[d.unit_price_basis] ?? d.unit_price_basis
+              const fmt = (n: number) =>
+                n < 10 ? n.toFixed(2) : Math.round(n).toLocaleString()
+              return (
+                <div key={d.unit_price_basis} className="grid grid-cols-12 items-center text-[11px] font-mono gap-2">
+                  <div className="col-span-2 font-sans font-medium text-gray-700">{basisLabel}</div>
+                  <div className="col-span-1 text-gray-400">n={d.sample_count}</div>
+                  <div className="col-span-1 text-emerald-700">p10 {fmt(d.p10)}</div>
+                  <div className="col-span-1 text-emerald-700">p25 {fmt(d.p25)}</div>
+                  <div className="col-span-2 text-gray-800 font-semibold">중간값 {fmt(d.p50)}</div>
+                  <div className="col-span-1 text-rose-700">p75 {fmt(d.p75)}</div>
+                  <div className="col-span-1 text-rose-700">p90 {fmt(d.p90)}</div>
+                  <div className="col-span-3">
+                    <div className="relative h-1.5 bg-gradient-to-r from-emerald-200 via-gray-200 to-rose-200 rounded" />
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+        </section>
+      )}
+
       {/* 결과 카운트 */}
       <div className="text-xs text-gray-500">
         {total.toLocaleString()}건 · {page}/{totalPages} 페이지
@@ -228,7 +352,9 @@ export default async function GgsanPage({
         </div>
       ) : (
         <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6 gap-3">
-          {products.map((p) => (
+          {products.map((p) => {
+            const v = viewByGoodsNo.get(p.goods_no)
+            return (
             <a
               key={p.goods_no}
               href={p.detail_url ?? '#'}
@@ -251,6 +377,11 @@ export default async function GgsanPage({
                     임박특가
                   </span>
                 )}
+                {v?.quantile_label && (
+                  <span className="absolute top-1 right-1">
+                    {quantileBadge(v.quantile_label, v.pct_diff_from_median)}
+                  </span>
+                )}
               </div>
               <div className="p-2 space-y-1">
                 <div className="text-xs text-gray-400 font-mono">{p.cate_label ?? p.cate_cd}</div>
@@ -260,9 +391,21 @@ export default async function GgsanPage({
                 <div className="text-base font-bold">
                   {p.price_krw ? `${p.price_krw.toLocaleString()}원` : <span className="text-gray-400 text-xs">가격 X</span>}
                 </div>
+                {p.unit_price != null && p.unit_price_basis && (
+                  <div className="text-[11px] font-mono text-gray-600">
+                    {formatUnitPrice(p.unit_price, p.unit_price_basis)}
+                    {p.volume_value && p.volume_unit && (
+                      <span className="text-gray-400">
+                        {' '}· {p.volume_value}{p.volume_unit}
+                        {p.pack_count ? `×${p.pack_count}${p.pack_unit ?? ''}` : ''}
+                      </span>
+                    )}
+                  </div>
+                )}
               </div>
             </a>
-          ))}
+            )
+          })}
         </div>
       )}
 
