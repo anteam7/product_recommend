@@ -1,5 +1,9 @@
 import Link from 'next/link'
 import { createAdminClient } from '@/lib/auth/admin-supabase'
+import {
+  returnRiskLabel,
+  RETURN_RISK_TONE_CLASS,
+} from '@/lib/trends/return-risk'
 
 export const dynamic = 'force-dynamic'
 
@@ -11,6 +15,15 @@ const CATEGORY_LABEL: Record<Category, string> = {
   health: '건강식품',
   living: '생활/리빙',
   digital: '디지털/가전',
+}
+
+const RETURN_RISK_FILTERS = ['all', 'safe', 'warn'] as const
+type ReturnRiskFilter = (typeof RETURN_RISK_FILTERS)[number]
+
+const RETURN_RISK_FILTER_LABEL: Record<ReturnRiskFilter, string> = {
+  all: '전체',
+  safe: '안전(<40)',
+  warn: '경고+위험(≥40)',
 }
 
 interface ProductRow {
@@ -29,6 +42,7 @@ interface ScoreRow {
   final_score: number
   computed_at: string
   score_components?: any
+  return_risk_score?: number | null
 }
 
 async function fetchTvGgsanMatchSummary() {
@@ -79,16 +93,17 @@ async function fetchData(category: Category) {
   const sb = createAdminClient()
 
   // 최신 score 별 product_id 조회 — 같은 product 의 가장 최근 row 만.
+  // NB: return_risk_score 는 마이그레이션(trends_v4_return_risk.sql) 후 채워짐.
   const { data: latestScores } = await sb
     .from('jimscanner_trends_scores')
-    .select('product_id, trend_score, commerce_score, supplier_score, competition_score, final_score, computed_at, score_components')
+    .select('product_id, trend_score, commerce_score, supplier_score, competition_score, final_score, computed_at, score_components, return_risk_score' as any)
     .order('computed_at', { ascending: false })
     .limit(2000)
 
   // product_id 별 첫 등장 (가장 최근) 만 keep
   const seen = new Set<string>()
   const latestMap = new Map<string, ScoreRow>()
-  for (const s of (latestScores ?? []) as ScoreRow[]) {
+  for (const s of (latestScores ?? []) as unknown as ScoreRow[]) {
     if (seen.has(s.product_id)) continue
     seen.add(s.product_id)
     latestMap.set(s.product_id, s)
@@ -127,10 +142,13 @@ async function fetchData(category: Category) {
 export default async function TrendRadarPage({
   searchParams,
 }: {
-  searchParams: Promise<{ cat?: string }>
+  searchParams: Promise<{ cat?: string; risk?: string }>
 }) {
   const sp = await searchParams
   const category = (CATEGORIES.includes(sp.cat as Category) ? sp.cat : 'all') as Category
+  const riskFilter = (
+    RETURN_RISK_FILTERS.includes(sp.risk as ReturnRiskFilter) ? sp.risk : 'all'
+  ) as ReturnRiskFilter
 
   const [{ products, scores, kpis }, tvPushes, tvGgsan] = await Promise.all([
     fetchData(category),
@@ -141,6 +159,14 @@ export default async function TrendRadarPage({
   const sorted = products
     .map((p) => ({ p, s: scores.get(p.id) }))
     .filter((x) => x.s)
+    .filter(({ s }) => {
+      if (riskFilter === 'all') return true
+      const risk = s?.return_risk_score
+      if (risk == null) return false
+      if (riskFilter === 'safe') return risk < 40
+      if (riskFilter === 'warn') return risk >= 40
+      return true
+    })
     .sort((a, b) => (b.s!.final_score - a.s!.final_score))
 
   return (
@@ -174,7 +200,7 @@ export default async function TrendRadarPage({
         {CATEGORIES.map((c) => (
           <Link
             key={c}
-            href={`/admin/trend-radar?cat=${c}`}
+            href={`/admin/trend-radar?cat=${c}${riskFilter !== 'all' ? `&risk=${riskFilter}` : ''}`}
             className={`px-3 py-2 text-sm ${
               category === c
                 ? 'border-b-2 border-black font-semibold text-black'
@@ -185,6 +211,24 @@ export default async function TrendRadarPage({
           </Link>
         ))}
       </nav>
+
+      {/* 반품위험 필터 */}
+      <div className="flex items-center gap-2 text-xs">
+        <span className="text-gray-500">⚠️ 반품위험 필터:</span>
+        {RETURN_RISK_FILTERS.map((r) => (
+          <Link
+            key={r}
+            href={`/admin/trend-radar?cat=${category}${r !== 'all' ? `&risk=${r}` : ''}`}
+            className={`px-2 py-1 rounded border ${
+              riskFilter === r
+                ? 'border-black bg-black text-white'
+                : 'border-gray-200 text-gray-600 hover:bg-gray-50'
+            }`}
+          >
+            {RETURN_RISK_FILTER_LABEL[r]}
+          </Link>
+        ))}
+      </div>
 
       {/* 🔥 TV ↔ ggsan 매칭 callout */}
       <Link
@@ -271,35 +315,51 @@ export default async function TrendRadarPage({
           <EmptyState category={category} />
         ) : (
           <div className="grid gap-3">
-            <div className="grid grid-cols-12 text-xs text-gray-500 px-3 py-1">
+            <div className="grid grid-cols-14 text-xs text-gray-500 px-3 py-1" style={{ gridTemplateColumns: 'repeat(14, minmax(0, 1fr))' }}>
               <div className="col-span-1">#</div>
-              <div className="col-span-5">상품명</div>
+              <div className="col-span-4">상품명</div>
               <div className="col-span-1 text-right">final</div>
               <div className="col-span-1 text-right">trend</div>
               <div className="col-span-1 text-right">commerce</div>
               <div className="col-span-1 text-right">supplier</div>
-              <div className="col-span-1 text-right">competition</div>
+              <div className="col-span-1 text-right">comp.</div>
+              <div className="col-span-3 text-right">⚠️ 반품위험</div>
               <div className="col-span-1 text-right">aliases</div>
             </div>
-            {sorted.slice(0, 50).map(({ p, s }, i) => (
-              <Link
-                key={p.id}
-                href={`/admin/trend-radar/products/${p.id}`}
-                className="grid grid-cols-12 px-3 py-2 rounded border border-gray-200 hover:bg-gray-50 transition-colors"
-              >
-                <div className="col-span-1 text-gray-400 font-mono">{i + 1}</div>
-                <div className="col-span-5">
-                  <div className="font-medium">{p.canonical_name}</div>
-                  <div className="text-xs text-gray-500">{p.category_top}</div>
-                </div>
-                <div className="col-span-1 text-right font-mono font-bold">{s!.final_score}</div>
-                <div className="col-span-1 text-right font-mono text-gray-600">{s!.trend_score}</div>
-                <div className="col-span-1 text-right font-mono text-gray-600">{s!.commerce_score}</div>
-                <div className="col-span-1 text-right font-mono text-gray-600">{s!.supplier_score}</div>
-                <div className="col-span-1 text-right font-mono text-gray-600">{s!.competition_score}</div>
-                <div className="col-span-1 text-right text-xs text-gray-500">{p.alias_count}</div>
-              </Link>
-            ))}
+            {sorted.slice(0, 50).map(({ p, s }, i) => {
+              const risk = s!.return_risk_score
+              const riskLabel = returnRiskLabel(risk)
+              return (
+                <Link
+                  key={p.id}
+                  href={`/admin/trend-radar/products/${p.id}`}
+                  className="grid grid-cols-14 px-3 py-2 rounded border border-gray-200 hover:bg-gray-50 transition-colors items-center"
+                  style={{ gridTemplateColumns: 'repeat(14, minmax(0, 1fr))' }}
+                >
+                  <div className="col-span-1 text-gray-400 font-mono">{i + 1}</div>
+                  <div className="col-span-4 min-w-0">
+                    <div className="font-medium truncate">{p.canonical_name}</div>
+                    <div className="text-xs text-gray-500">{p.category_top}</div>
+                  </div>
+                  <div className="col-span-1 text-right font-mono font-bold">{s!.final_score}</div>
+                  <div className="col-span-1 text-right font-mono text-gray-600">{s!.trend_score}</div>
+                  <div className="col-span-1 text-right font-mono text-gray-600">{s!.commerce_score}</div>
+                  <div className="col-span-1 text-right font-mono text-gray-600">{s!.supplier_score}</div>
+                  <div className="col-span-1 text-right font-mono text-gray-600">{s!.competition_score}</div>
+                  <div className="col-span-3 flex items-center justify-end gap-2">
+                    <span
+                      className={`text-[10px] px-1.5 py-0.5 rounded border ${RETURN_RISK_TONE_CLASS[riskLabel.tone]}`}
+                    >
+                      {riskLabel.label}
+                    </span>
+                    <span className="font-mono text-xs text-gray-600 w-8 text-right">
+                      {risk != null ? Math.round(risk) : '—'}
+                    </span>
+                  </div>
+                  <div className="col-span-1 text-right text-xs text-gray-500">{p.alias_count}</div>
+                </Link>
+              )
+            })}
           </div>
         )}
       </section>
