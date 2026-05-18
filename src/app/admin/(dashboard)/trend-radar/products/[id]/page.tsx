@@ -1,6 +1,7 @@
 import Link from 'next/link'
 import { notFound } from 'next/navigation'
 import { createAdminClient } from '@/lib/auth/admin-supabase'
+import SellerDonut from './SellerDonut'
 
 export const dynamic = 'force-dynamic'
 
@@ -36,9 +37,26 @@ interface ScoreRow {
   computed_at: string
 }
 
+interface SellerShareRow {
+  seller_name: string
+  share_pct: number
+  review_count: number
+  listing_rank: number
+  snapshot_at: string
+}
+interface SellerHhiRow {
+  hhi: number
+  top1_share: number
+  top3_share: number
+  seller_count_effective: number
+  total_listings: number
+  top1_seller: string | null
+  snapshot_at: string
+}
+
 async function fetchProduct(id: string) {
   const sb = createAdminClient()
-  const [prodRes, aliasRes, scoreRes] = await Promise.all([
+  const [prodRes, aliasRes, scoreRes, hhiRes] = await Promise.all([
     sb.from('jimscanner_trends_products').select('*').eq('id', id).single(),
     sb
       .from('jimscanner_trends_aliases')
@@ -51,14 +69,35 @@ async function fetchProduct(id: string) {
       .eq('product_id', id)
       .order('computed_at', { ascending: false })
       .limit(30),
+    (sb as any)
+      .from('jimscanner_trends_seller_hhi')
+      .select('hhi, top1_share, top3_share, seller_count_effective, total_listings, top1_seller, snapshot_at')
+      .eq('product_id', id)
+      .order('snapshot_at', { ascending: false })
+      .limit(1)
+      .maybeSingle(),
   ])
 
   if (prodRes.error || !prodRes.data) return null
+
+  let sellerShares: SellerShareRow[] = []
+  const sellerHhi = (hhiRes?.data ?? null) as SellerHhiRow | null
+  if (sellerHhi) {
+    const { data: sh } = await (sb as any)
+      .from('jimscanner_trends_seller_share')
+      .select('seller_name, share_pct, review_count, listing_rank, snapshot_at')
+      .eq('product_id', id)
+      .eq('snapshot_at', sellerHhi.snapshot_at)
+      .order('share_pct', { ascending: false })
+    sellerShares = (sh ?? []) as SellerShareRow[]
+  }
 
   return {
     product: prodRes.data as ProductRow,
     aliases: (aliasRes.data ?? []) as AliasRow[],
     scoreHistory: (scoreRes.data ?? []) as ScoreRow[],
+    sellerHhi,
+    sellerShares,
   }
 }
 
@@ -70,7 +109,7 @@ export default async function ProductDetailPage({
   const { id } = await params
   const data = await fetchProduct(id)
   if (!data) notFound()
-  const { product, aliases, scoreHistory } = data
+  const { product, aliases, scoreHistory, sellerHhi, sellerShares } = data
   const latest = scoreHistory[0]
 
   return (
@@ -116,6 +155,20 @@ export default async function ProductDetailPage({
           <ScoreCard label="commerce" value={latest.commerce_score} />
           <ScoreCard label="supplier" value={latest.supplier_score} />
           <ScoreCard label="competition" value={latest.competition_score} />
+        </section>
+      )}
+
+      {/* 판매자 점유율 도넛 */}
+      {sellerHhi && sellerShares.length > 0 && (
+        <section>
+          <SellerDonut
+            shares={sellerShares.map((s) => ({ seller_name: s.seller_name, share_pct: s.share_pct }))}
+            hhi={sellerHhi.hhi}
+            top1Share={sellerHhi.top1_share}
+            top3Share={sellerHhi.top3_share}
+            effective={sellerHhi.seller_count_effective}
+            snapshotAt={sellerHhi.snapshot_at}
+          />
         </section>
       )}
 
