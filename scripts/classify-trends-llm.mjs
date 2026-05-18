@@ -53,9 +53,16 @@ const SYSTEM_PROMPT = `한국 위탁 판매 상품 분류기. 입력 리스트�
 - category_mid: 5-10자 한국어 (예: "오메가3", "수납용품")
 - intent_label: 5-7자 (예: "예방건강", "문제해결", "소모품")
 - description: 15자 이내 1문장 (위탁 판매 의사결정 단서)
+- jtbd_tags: 1-3개 JTBD(Job-to-be-Done) 태그 배열. 소비자가 이 상품으로 해결하려는 '니즈' 공간.
+  표준 태그(가능하면 재사용): 수면개선, 에너지부스트, 면역강화, 다이어트, 스트레스완화, 디지털디톡스,
+  피부개선, 관절완화, 혈행개선, 소화개선, 집중력향상, 공간정리, 청결유지, 차량관리,
+  요리효율, 휴대성향상, 충전편의, 조명개선, 보온유지, 보습유지. 표준 태그로 안 잡히면 5-7자 한국어 신규 태그.
+- regulation_risk: 0-10 정수. 직구·위탁 판매 시 규제 리스크 (10=식약처 허가 필수·직구 금지, 5=식품 일반, 0=잡화).
+- entry_difficulty: 0-10 정수. 진입난이도 (10=MOQ·총판 락인·경쟁포화, 5=중간, 0=쉬움).
+- margin_score: 0-10 정수. 위탁 마진 매력도 (10=고마진, 5=평균, 0=박리).
 
 예시 입력: - id="abc" name="닥터린 초임계 알티지 오메가3 60캡슐" cur_top=health aliases=2 samples=[종근당 오메가3 | 일양 오메가3] sources=[naver_shopping_hot,musinsa_best]
-예시 출력: [{"id":"abc","canonical_name":"오메가3","brand":"닥터린","category_top":"health","category_mid":"오메가3","intent_label":"예방건강","description":"혈행건강 영양제"}]`
+예시 출력: [{"id":"abc","canonical_name":"오메가3","brand":"닥터린","category_top":"health","category_mid":"오메가3","intent_label":"예방건강","description":"혈행건강 영양제","jtbd_tags":["혈행개선","면역강화"],"regulation_risk":4,"entry_difficulty":7,"margin_score":4}]`
 
 function buildUserPrompt(items) {
   const lines = items.map(
@@ -89,6 +96,25 @@ function tryParseJsonArray(text) {
   return null
 }
 
+function clampScore(v) {
+  if (v == null) return null
+  const n = Number(v)
+  if (!Number.isFinite(n)) return null
+  return Math.max(0, Math.min(10, Math.round(n)))
+}
+
+function normalizeJtbdTags(v) {
+  if (!Array.isArray(v)) return null
+  const out = []
+  for (const item of v) {
+    if (typeof item !== 'string') continue
+    const t = item.trim().slice(0, 20)
+    if (t && !out.includes(t)) out.push(t)
+    if (out.length >= 5) break
+  }
+  return out.length ? out : null
+}
+
 function normalizeResult(o, fallbackId) {
   if (!o || typeof o !== 'object') return null
   const id = String(o.id ?? fallbackId).trim()
@@ -106,6 +132,10 @@ function normalizeResult(o, fallbackId) {
     category_mid: typeof o.category_mid === 'string' ? o.category_mid.trim().slice(0, 30) : '',
     intent_label: typeof o.intent_label === 'string' ? o.intent_label.trim().slice(0, 20) : '',
     description: typeof o.description === 'string' ? o.description.trim().slice(0, 80) : '',
+    jtbd_tags: normalizeJtbdTags(o.jtbd_tags),
+    regulation_risk: clampScore(o.regulation_risk),
+    entry_difficulty: clampScore(o.entry_difficulty),
+    margin_score: clampScore(o.margin_score),
   }
 }
 
@@ -193,13 +223,32 @@ async function bumpCounter(day, delta) {
 }
 
 async function fetchCandidates() {
-  const { data } = await sb
+  // 1차: 아직 LLM 분류 안 된 product
+  const { data: pri } = await sb
     .from('jimscanner_trends_products')
     .select('id, canonical_name, category_top, alias_count, llm_classified_at, updated_at')
     .is('llm_classified_at', null)
     .order('updated_at', { ascending: false })
     .limit(PRODUCT_FETCH_LIMIT)
-  return data ?? []
+
+  let rows = pri ?? []
+  if (rows.length >= PRODUCT_FETCH_LIMIT) return rows
+
+  // 2차: 기존 분류는 됐는데 JTBD 태그가 비어 있는 product (마이그레이션 적용 직후 backfill)
+  const remaining = PRODUCT_FETCH_LIMIT - rows.length
+  try {
+    const { data: sec } = await sb
+      .from('jimscanner_trends_products')
+      .select('id, canonical_name, category_top, alias_count, llm_classified_at, updated_at')
+      .not('llm_classified_at', 'is', null)
+      .is('jtbd_classified_at', null)
+      .order('updated_at', { ascending: false })
+      .limit(remaining)
+    if (sec) rows = rows.concat(sec)
+  } catch {
+    /* jtbd_classified_at 컬럼 미배포 환경 — 무시 */
+  }
+  return rows
 }
 
 async function fetchSampleAliases(productIds) {
@@ -223,21 +272,37 @@ async function applyResults(results) {
   if (results.length === 0) return
   const now = new Date().toISOString()
   await Promise.all(
-    results.map((r) =>
-      sb
-        .from('jimscanner_trends_products')
-        .update({
-          canonical_name: r.canonical_name,
-          brand: r.brand,
-          category_top: r.category_top,
-          category_mid: r.category_mid,
-          intent_label: r.intent_label,
-          description: r.description,
-          llm_classified_at: now,
-          llm_model: MODEL,
-        })
-        .eq('id', r.id),
-    ),
+    results.map(async (r) => {
+      const update = {
+        canonical_name: r.canonical_name,
+        brand: r.brand,
+        category_top: r.category_top,
+        category_mid: r.category_mid,
+        intent_label: r.intent_label,
+        description: r.description,
+        llm_classified_at: now,
+        llm_model: MODEL,
+      }
+      // JTBD 필드는 새 컬럼(마이그레이션 미적용 환경 대비) — 있을 때만 채움
+      if (r.jtbd_tags) {
+        update.jtbd_tags = r.jtbd_tags
+        update.jtbd_classified_at = now
+      }
+      if (r.regulation_risk != null) update.regulation_risk = r.regulation_risk
+      if (r.entry_difficulty != null) update.entry_difficulty = r.entry_difficulty
+      if (r.margin_score != null) update.margin_score = r.margin_score
+
+      await sb.from('jimscanner_trends_products').update(update).eq('id', r.id)
+
+      // JTBD 태그가 부여됐다면 그래프 엣지 재구축 (실패해도 무시 — RPC 미배포 환경 대비)
+      if (r.jtbd_tags) {
+        try {
+          await sb.rpc('jimscanner_trends_jtbd_rebuild_edges', { p_product_id: r.id })
+        } catch {
+          /* RPC 미배포 환경 */
+        }
+      }
+    }),
   )
 }
 
