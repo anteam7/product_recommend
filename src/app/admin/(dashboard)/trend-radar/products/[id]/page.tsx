@@ -36,9 +36,18 @@ interface ScoreRow {
   computed_at: string
 }
 
+interface BundleSuggestRow {
+  complement_id: string
+  score: number
+  reasons: any
+  cheapest_supplier_source: string | null
+  cheapest_supplier_price_krw: number | null
+  cheapest_supplier_moq: number | null
+}
+
 async function fetchProduct(id: string) {
   const sb = createAdminClient()
-  const [prodRes, aliasRes, scoreRes] = await Promise.all([
+  const [prodRes, aliasRes, scoreRes, bundleRes] = await Promise.all([
     sb.from('jimscanner_trends_products').select('*').eq('id', id).single(),
     sb
       .from('jimscanner_trends_aliases')
@@ -51,14 +60,34 @@ async function fetchProduct(id: string) {
       .eq('product_id', id)
       .order('computed_at', { ascending: false })
       .limit(30),
+    (sb as any)
+      .from('jimscanner_trends_bundle_candidates')
+      .select('complement_id, score, reasons, cheapest_supplier_source, cheapest_supplier_price_krw, cheapest_supplier_moq')
+      .eq('anchor_id', id)
+      .order('score', { ascending: false })
+      .limit(10),
   ])
 
   if (prodRes.error || !prodRes.data) return null
+
+  const bundles = (bundleRes?.data ?? []) as BundleSuggestRow[]
+  let bundleComplements = new Map<string, { canonical_name: string; category_top: string }>()
+  if (bundles.length > 0) {
+    const { data: comps } = await sb
+      .from('jimscanner_trends_products')
+      .select('id, canonical_name, category_top')
+      .in('id', bundles.map((b) => b.complement_id))
+    for (const c of (comps ?? []) as { id: string; canonical_name: string; category_top: string }[]) {
+      bundleComplements.set(c.id, { canonical_name: c.canonical_name, category_top: c.category_top })
+    }
+  }
 
   return {
     product: prodRes.data as ProductRow,
     aliases: (aliasRes.data ?? []) as AliasRow[],
     scoreHistory: (scoreRes.data ?? []) as ScoreRow[],
+    bundles,
+    bundleComplements,
   }
 }
 
@@ -70,7 +99,7 @@ export default async function ProductDetailPage({
   const { id } = await params
   const data = await fetchProduct(id)
   if (!data) notFound()
-  const { product, aliases, scoreHistory } = data
+  const { product, aliases, scoreHistory, bundles, bundleComplements } = data
   const latest = scoreHistory[0]
 
   return (
@@ -161,6 +190,77 @@ export default async function ProductDetailPage({
           </pre>
         </section>
       )}
+
+      {/* 번들 추천 (보완재) */}
+      <section>
+        <div className="flex items-baseline justify-between mb-2">
+          <h2 className="text-sm font-semibold">
+            🎁 번들 추천 — 보완재 Top {bundles.length}
+            <span className="text-xs font-normal text-gray-500 ml-2">
+              객단가 부스터 (임베딩 0.55~0.80 + 카테고리 + 페르소나 + co-occurrence)
+            </span>
+          </h2>
+          <Link
+            href={`/admin/trend-radar/bundles?anchor=${product.id}`}
+            className="text-xs text-gray-600 hover:text-black underline"
+          >
+            전체 보드 →
+          </Link>
+        </div>
+        {bundles.length === 0 ? (
+          <div className="rounded border border-dashed border-gray-300 p-6 text-center text-xs text-gray-500">
+            아직 보완재가 산출되지 않았습니다. <br />
+            <code className="px-1 bg-gray-100 rounded">
+              node scripts/compute-bundle-candidates.mjs --anchor={product.id}
+            </code>
+          </div>
+        ) : (
+          <div className="rounded border border-gray-200 overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead className="bg-gray-50 text-gray-500">
+                <tr>
+                  <th className="px-3 py-2 text-left w-8">#</th>
+                  <th className="px-3 py-2 text-left">보완재</th>
+                  <th className="px-3 py-2 text-right">score</th>
+                  <th className="px-3 py-2 text-right">최저 공급가</th>
+                  <th className="px-3 py-2 text-right">MOQ</th>
+                  <th className="px-3 py-2 text-left">공급사</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-100">
+                {bundles.map((b, i) => {
+                  const comp = bundleComplements.get(b.complement_id)
+                  return (
+                    <tr key={b.complement_id} className="hover:bg-gray-50">
+                      <td className="px-3 py-1 font-mono text-gray-400">{i + 1}</td>
+                      <td className="px-3 py-1">
+                        {comp ? (
+                          <Link href={`/admin/trend-radar/products/${b.complement_id}`} className="hover:underline">
+                            {comp.canonical_name}
+                            <span className="text-gray-400 ml-1">· {comp.category_top}</span>
+                          </Link>
+                        ) : (
+                          <span className="text-gray-400 font-mono">{b.complement_id.slice(0, 8)}…</span>
+                        )}
+                      </td>
+                      <td className="px-3 py-1 text-right font-mono font-bold">{b.score.toFixed(2)}</td>
+                      <td className="px-3 py-1 text-right font-mono text-gray-700">
+                        {b.cheapest_supplier_price_krw != null
+                          ? `${Math.round(b.cheapest_supplier_price_krw).toLocaleString()}원`
+                          : '—'}
+                      </td>
+                      <td className="px-3 py-1 text-right font-mono text-gray-700">
+                        {b.cheapest_supplier_moq ?? '—'}
+                      </td>
+                      <td className="px-3 py-1 text-gray-600">{b.cheapest_supplier_source ?? '—'}</td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
 
       {/* aliases */}
       <section>
