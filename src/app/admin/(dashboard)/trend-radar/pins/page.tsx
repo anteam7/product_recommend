@@ -35,6 +35,14 @@ export default async function PinsPage() {
         </Link>
       </header>
 
+      <div className="rounded border border-blue-300 bg-blue-50 px-4 py-3 text-sm text-blue-900">
+        <span className="font-semibold">신규</span>: 핀 이후의 실제 진척은{' '}
+        <Link href="/admin/trend-radar/pipeline" className="underline font-semibold">
+          파이프라인 보드
+        </Link>
+        에서 5단계 칸반으로 추적. 단계 전환 로그는 회고·캘리브레이션 ground truth 로 사용.
+      </div>
+
       {pins.length === 0 ? (
         <div className="rounded border border-dashed border-gray-300 p-12 text-center text-gray-500">
           <p className="text-base font-medium">핀한 항목 없음</p>
