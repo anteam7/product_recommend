@@ -26,6 +26,9 @@ interface RecommendRow {
   search_match_count: number
   search_top_keyword: string
   search_sources: string[]
+
+  restock_velocity?: number
+  restock_count_30d?: number
 }
 
 const DAYS_OPTIONS = [
@@ -46,14 +49,16 @@ async function fetchRecommend(opts: {
   minSim: number
   imminentOnly: boolean
   cate: string
+  restockWeight: number
 }) {
   const sb = createAdminClient()
-  // RPC는 DB(supabase/ggsan_recommend_rpc.sql)에 존재하나 generated 타입 미반영 — `npm run gen:types` 시 캐스팅 제거
+  // RPC는 DB(supabase/ggsan_recommend_rpc.sql, ggsan_restock_cadence.sql)에 존재하나 generated 타입 미반영 — `npm run gen:types` 시 캐스팅 제거
   const { data, error } = await sb.rpc('jimscanner_ggsan_recommend' as never, {
     days_window: opts.days,
     min_sim: opts.minSim,
     min_score: 0.5,
     result_limit: 200,
+    restock_weight: opts.restockWeight,
   } as never)
   if (error) {
     return { rows: [] as RecommendRow[], error: error.message }
@@ -105,7 +110,7 @@ function sourceLabel(s: string): string {
 export default async function RecommendPage({
   searchParams,
 }: {
-  searchParams: Promise<{ days?: string; sim?: string; imminent?: string; cate?: string }>
+  searchParams: Promise<{ days?: string; sim?: string; imminent?: string; cate?: string; restock?: string }>
 }) {
   const sp = await searchParams
   const days = parseInt(sp.days ?? '30', 10)
@@ -114,15 +119,26 @@ export default async function RecommendPage({
   const validSim = SIM_OPTIONS.some((s) => Math.abs(s.v - sim) < 0.001) ? sim : 0.2
   const imminentOnly = sp.imminent === '1'
   const cate = sp.cate ?? ''
+  const restockWeight = parseFloat(sp.restock ?? '0')
+  const validRestockWeight = Number.isFinite(restockWeight) && restockWeight >= 0 && restockWeight <= 10
+    ? restockWeight
+    : 0
 
   const current: Record<string, string> = {
     days: String(validDays),
     sim: String(validSim),
     imminent: imminentOnly ? '1' : '',
     cate,
+    restock: validRestockWeight > 0 ? String(validRestockWeight) : '',
   }
 
-  const { rows, error } = await fetchRecommend({ days: validDays, minSim: validSim, imminentOnly, cate })
+  const { rows, error } = await fetchRecommend({
+    days: validDays,
+    minSim: validSim,
+    imminentOnly,
+    cate,
+    restockWeight: validRestockWeight,
+  })
 
   // KPI
   const total = rows.length
@@ -184,6 +200,21 @@ export default async function RecommendPage({
           >
             {imminentOnly ? '✓ ' : ''}임박특가만
           </Link>
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-gray-500">🔁 재입고 가중치</span>
+            {[0, 1, 2, 4].map((w) => (
+              <Link
+                key={w}
+                href={buildHref(current, { restock: w > 0 ? String(w) : null })}
+                className={`px-2 py-1 text-xs rounded ${validRestockWeight === w ? 'bg-emerald-100 text-emerald-700 font-semibold' : 'text-gray-500 hover:text-black'}`}
+              >
+                {w === 0 ? 'off' : `×${w}`}
+              </Link>
+            ))}
+            <Link href="/admin/trend-radar/restock" className="text-[11px] text-gray-400 hover:text-emerald-700 underline">
+              보드 →
+            </Link>
+          </div>
         </div>
         <div className="flex flex-wrap gap-1 border-t border-gray-100 pt-2">
           <Link
@@ -289,6 +320,11 @@ export default async function RecommendPage({
                     {r.search_sources.length > 0 && (
                       <span className="text-gray-500">
                         from {r.search_sources.map(sourceLabel).join(', ')}
+                      </span>
+                    )}
+                    {(r.restock_count_30d ?? 0) > 0 && (
+                      <span className="bg-emerald-100 text-emerald-800 px-2 py-0.5 rounded">
+                        🔁 재입고 {r.restock_count_30d}회 (v {(r.restock_velocity ?? 0).toFixed(2)})
                       </span>
                     )}
                   </div>
