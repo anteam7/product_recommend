@@ -75,6 +75,32 @@ async function fetchTvPushes() {
   return { ranked, totalKeywords: map.size, totalRows: rows.length }
 }
 
+async function fetchIpRiskMap(productIds: string[]) {
+  if (productIds.length === 0)
+    return new Map<string, { risk_score: number; parallel_import_suspect: boolean }>()
+  const sb = createAdminClient()
+  // jimscanner_trends_ip_risk — 신규 테이블, types 미반영이라 any 캐스팅.
+  const { data } = await (sb as any)
+    .from('jimscanner_trends_ip_risk')
+    .select('product_id, risk_score, parallel_import_suspect')
+    .in('product_id', productIds)
+  const map = new Map<
+    string,
+    { risk_score: number; parallel_import_suspect: boolean }
+  >()
+  for (const r of (data ?? []) as Array<{
+    product_id: string
+    risk_score: number
+    parallel_import_suspect: boolean
+  }>) {
+    map.set(r.product_id, {
+      risk_score: r.risk_score,
+      parallel_import_suspect: r.parallel_import_suspect,
+    })
+  }
+  return map
+}
+
 async function fetchData(category: Category) {
   const sb = createAdminClient()
 
@@ -138,8 +164,11 @@ export default async function TrendRadarPage({
     fetchTvGgsanMatchSummary(),
   ])
 
+  const ipRiskMap = await fetchIpRiskMap(products.map((p) => p.id))
+  const highRiskCount = [...ipRiskMap.values()].filter((v) => v.risk_score >= 60).length
+
   const sorted = products
-    .map((p) => ({ p, s: scores.get(p.id) }))
+    .map((p) => ({ p, s: scores.get(p.id), ip: ipRiskMap.get(p.id) }))
     .filter((x) => x.s)
     .sort((a, b) => (b.s!.final_score - a.s!.final_score))
 
@@ -160,13 +189,14 @@ export default async function TrendRadarPage({
         </Link>
       </header>
 
-      {/* KPI 5종 */}
-      <section className="grid grid-cols-2 md:grid-cols-5 gap-4">
+      {/* KPI 6종 */}
+      <section className="grid grid-cols-2 md:grid-cols-6 gap-4">
         <KpiCard label="canonical 상품" value={kpis.products} hint="누적 매핑" />
         <KpiCard label="LLM 분류" value={kpis.llmClassified} hint={`${kpis.products > 0 ? Math.round((kpis.llmClassified / kpis.products) * 100) : 0}% 진척`} />
         <KpiCard label="고득점 (≥50)" value={kpis.top} hint="final_score 기준" />
         <KpiCard label="supplier 매칭" value={kpis.supplier} hint="도매꾹·알리 검출" />
         <KpiCard label="TV push" value={kpis.tv} hint="홈쇼핑 편성 검출" />
+        <KpiCard label="⛔ IP 고위험" value={highRiskCount} hint="risk ≥60 진입 게이트" />
       </section>
 
       {/* 카테고리 탭 */}
@@ -281,15 +311,29 @@ export default async function TrendRadarPage({
               <div className="col-span-1 text-right">competition</div>
               <div className="col-span-1 text-right">aliases</div>
             </div>
-            {sorted.slice(0, 50).map(({ p, s }, i) => (
+            {sorted.slice(0, 50).map(({ p, s, ip }, i) => (
               <Link
                 key={p.id}
                 href={`/admin/trend-radar/products/${p.id}`}
-                className="grid grid-cols-12 px-3 py-2 rounded border border-gray-200 hover:bg-gray-50 transition-colors"
+                className={`grid grid-cols-12 px-3 py-2 rounded border transition-colors ${
+                  ip && ip.risk_score >= 60
+                    ? 'border-red-300 bg-red-50/40 hover:bg-red-50'
+                    : 'border-gray-200 hover:bg-gray-50'
+                }`}
               >
                 <div className="col-span-1 text-gray-400 font-mono">{i + 1}</div>
                 <div className="col-span-5">
-                  <div className="font-medium">{p.canonical_name}</div>
+                  <div className="font-medium flex items-center gap-2">
+                    <span>{p.canonical_name}</span>
+                    {ip && ip.risk_score >= 60 && (
+                      <span
+                        title={`IP 리스크 ${ip.risk_score}${ip.parallel_import_suspect ? ' · 병행수입 의심' : ''}`}
+                        className="inline-flex items-center px-1.5 py-0.5 text-[10px] font-mono rounded border border-red-300 bg-red-100 text-red-700"
+                      >
+                        ⛔ IP {ip.risk_score}
+                      </span>
+                    )}
+                  </div>
                   <div className="text-xs text-gray-500">{p.category_top}</div>
                 </div>
                 <div className="col-span-1 text-right font-mono font-bold">{s!.final_score}</div>

@@ -144,4 +144,24 @@ if (!skipClassify) {
   if (classifyExit !== 0) failCount++
 }
 
+// check-trends-ip-risk: IP/상표권 리스크 스캐너 (classify 직후).
+//   filter / --no-ip-risk 시 건너뜀.
+const skipIpRisk = args.includes('--no-ip-risk') || !!filter
+if (!skipIpRisk) {
+  console.log(`[${new Date().toISOString()}] launching check-trends-ip-risk`)
+  const scriptPath = resolvePath(__dirname, 'check-trends-ip-risk.mjs')
+  const ipExit = await new Promise((resolve) => {
+    const child = spawn(process.execPath, [scriptPath], {
+      stdio: 'inherit',
+      env: process.env,
+    })
+    child.on('exit', (code) => resolve(code ?? 0))
+    child.on('error', (err) => {
+      console.error(`  ip-risk spawn error: ${err.message}`)
+      resolve(1)
+    })
+  })
+  if (ipExit !== 0) failCount++
+}
+
 process.exit(failCount > 0 ? 1 : 0)
