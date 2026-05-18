@@ -1,6 +1,7 @@
 import Link from 'next/link'
 import { notFound } from 'next/navigation'
 import { createAdminClient } from '@/lib/auth/admin-supabase'
+import GscMiniStrip from './GscMiniStrip'
 
 export const dynamic = 'force-dynamic'
 
@@ -36,6 +37,13 @@ interface ScoreRow {
   computed_at: string
 }
 
+interface GscDailyRow {
+  date: string
+  clicks: number
+  impressions: number
+  position: number
+}
+
 async function fetchProduct(id: string) {
   const sb = createAdminClient()
   const [prodRes, aliasRes, scoreRes] = await Promise.all([
@@ -55,10 +63,50 @@ async function fetchProduct(id: string) {
 
   if (prodRes.error || !prodRes.data) return null
 
+  // GSC 28일 시계열: alias 와 ILIKE 매칭되는 query 일별 합계
+  let gscDaily: GscDailyRow[] = []
+  const aliases = (aliasRes.data ?? []) as AliasRow[]
+  if (aliases.length > 0) {
+    // 상위 confidence alias 중 너무 짧은 것(<2) 제외 — 상위 5개만 사용해 비용 제한
+    const topAliases = aliases.filter((a) => (a.alias ?? '').length >= 2).slice(0, 5)
+    if (topAliases.length > 0) {
+      const since = new Date()
+      since.setDate(since.getDate() - 28)
+      const sinceStr = since.toISOString().slice(0, 10)
+      // OR 조건 — ilike '%alias%' (alias 가 query 의 부분문자열인 경우)
+      const orExpr = topAliases.map((a) => `query.ilike.%${a.alias.replace(/[,()]/g, '')}%`).join(',')
+      const { data: gscRows } = await sb
+        .from('jimscanner_gsc_queries')
+        .select('date, clicks, impressions, position')
+        .gte('date', sinceStr)
+        .or(orExpr)
+      if (gscRows && gscRows.length > 0) {
+        const dayMap = new Map<string, { clicks: number; impressions: number; pos_weighted: number }>()
+        for (const r of gscRows as any[]) {
+          const d = String(r.date)
+          const prev = dayMap.get(d) ?? { clicks: 0, impressions: 0, pos_weighted: 0 }
+          prev.clicks += Number(r.clicks ?? 0)
+          prev.impressions += Number(r.impressions ?? 0)
+          prev.pos_weighted += Number(r.position ?? 0) * Number(r.impressions ?? 0)
+          dayMap.set(d, prev)
+        }
+        gscDaily = Array.from(dayMap.entries())
+          .sort(([a], [b]) => (a < b ? -1 : 1))
+          .map(([date, v]) => ({
+            date,
+            clicks: v.clicks,
+            impressions: v.impressions,
+            position: v.impressions > 0 ? v.pos_weighted / v.impressions : 0,
+          }))
+      }
+    }
+  }
+
   return {
     product: prodRes.data as ProductRow,
-    aliases: (aliasRes.data ?? []) as AliasRow[],
+    aliases,
     scoreHistory: (scoreRes.data ?? []) as ScoreRow[],
+    gscDaily,
   }
 }
 
@@ -70,8 +118,19 @@ export default async function ProductDetailPage({
   const { id } = await params
   const data = await fetchProduct(id)
   if (!data) notFound()
-  const { product, aliases, scoreHistory } = data
+  const { product, aliases, scoreHistory, gscDaily } = data
   const latest = scoreHistory[0]
+  const gscTotals = gscDaily.reduce(
+    (acc, r) => {
+      acc.clicks += r.clicks
+      acc.impressions += r.impressions
+      acc.pos_weighted += r.position * r.impressions
+      return acc
+    },
+    { clicks: 0, impressions: 0, pos_weighted: 0 },
+  )
+  const gscAvgPos = gscTotals.impressions > 0 ? gscTotals.pos_weighted / gscTotals.impressions : 0
+  const gscCtr = gscTotals.impressions > 0 ? (gscTotals.clicks / gscTotals.impressions) * 100 : 0
 
   return (
     <div className="space-y-6 p-6">
@@ -118,6 +177,40 @@ export default async function ProductDetailPage({
           <ScoreCard label="competition" value={latest.competition_score} />
         </section>
       )}
+
+      {/* GSC 28일 미니 차트 */}
+      <section>
+        <h2 className="text-sm font-semibold mb-2">
+          🔍 GSC 28일 (alias 매칭 query 합산)
+        </h2>
+        {gscDaily.length === 0 ? (
+          <div className="rounded border border-dashed border-gray-300 p-4 text-xs text-gray-500">
+            매칭되는 GSC 검색어 없음 — 노출/클릭 데이터 아직 안 누적되었거나 alias 정밀화 필요
+          </div>
+        ) : (
+          <div className="rounded border border-gray-200 p-3 space-y-2">
+            <div className="flex gap-6 text-xs">
+              <div>
+                <span className="text-gray-500">노출 </span>
+                <span className="font-mono font-semibold">{gscTotals.impressions.toLocaleString()}</span>
+              </div>
+              <div>
+                <span className="text-gray-500">클릭 </span>
+                <span className="font-mono font-semibold">{gscTotals.clicks.toLocaleString()}</span>
+              </div>
+              <div>
+                <span className="text-gray-500">CTR </span>
+                <span className="font-mono font-semibold">{gscCtr.toFixed(2)}%</span>
+              </div>
+              <div>
+                <span className="text-gray-500">avg position </span>
+                <span className="font-mono font-semibold">{gscAvgPos.toFixed(1)}</span>
+              </div>
+            </div>
+            <GscMiniStrip rows={gscDaily} />
+          </div>
+        )}
+      </section>
 
       {/* score 시계열 (최근 30 row) */}
       {scoreHistory.length > 1 && (
