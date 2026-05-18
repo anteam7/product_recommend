@@ -1,8 +1,11 @@
 import Link from 'next/link'
 import { createAdminClient } from '@/lib/auth/admin-supabase'
 import OpportunityScatter from './OpportunityScatter'
+import PenetrationPanel from './PenetrationPanel'
 
 export const dynamic = 'force-dynamic'
+
+type Tab = 'matrix' | 'penetration'
 
 interface ScoreRow {
   product_id: string
@@ -14,10 +17,9 @@ interface ScoreRow {
   computed_at: string
 }
 
-async function fetchData() {
+async function fetchMatrix() {
   const sb = createAdminClient()
 
-  // 최신 score 만 (product_id 별 latest)
   const { data: scores } = await sb
     .from('jimscanner_trends_scores')
     .select('product_id, trend_score, commerce_score, supplier_score, competition_score, final_score, computed_at')
@@ -48,8 +50,8 @@ async function fetchData() {
         id: s.product_id,
         name: (p as any).canonical_name ?? '?',
         category: (p as any).category_top ?? 'all',
-        x: s.competition_score,        // 경쟁 약함 → 점수 높음 → 오른쪽
-        y: s.trend_score,              // 트렌드 강함 → 위
+        x: s.competition_score,
+        y: s.trend_score,
         size: Math.max(50, s.commerce_score * 4),
         final: s.final_score,
         supplier: s.supplier_score,
@@ -58,16 +60,40 @@ async function fetchData() {
   }
 }
 
-export default async function OpportunityPage() {
-  const { rows } = await fetchData()
+async function fetchPenetration() {
+  const sb = createAdminClient()
+  // RPC 는 DB 마이그레이션 후 동작. 미적용 환경에선 빈 배열.
+  const { data, error } = await (sb as any).rpc('jimscanner_serp_penetration_index', {
+    weeks_window: 12,
+  })
+  if (error) {
+    return { rows: [] as any[], error: error.message }
+  }
+  return { rows: (data ?? []) as any[], error: null }
+}
+
+export default async function OpportunityPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ tab?: string }>
+}) {
+  const sp = await searchParams
+  const tab: Tab = sp.tab === 'penetration' ? 'penetration' : 'matrix'
+
+  const [{ rows: matrixRows }, penetration] = await Promise.all([
+    tab === 'matrix' ? fetchMatrix() : Promise.resolve({ rows: [] }),
+    tab === 'penetration' ? fetchPenetration() : Promise.resolve({ rows: [], error: null }),
+  ])
 
   return (
     <div className="space-y-6 p-6">
       <header className="flex items-baseline justify-between">
         <div>
-          <h1 className="text-2xl font-bold">Opportunity Matrix</h1>
+          <h1 className="text-2xl font-bold">Opportunity</h1>
           <p className="text-sm text-gray-500 mt-1">
-            X = competition (오른쪽 = 경쟁 약함) · Y = trend · 크기 = commerce · 핀 후보 = 우상단 큰 점
+            {tab === 'matrix'
+              ? 'X = competition (오른쪽 = 경쟁 약함) · Y = trend · 크기 = commerce · 핀 후보 = 우상단 큰 점'
+              : '카테고리별 4주 생존율 — "내가 들어가면 자리잡을 수 있는가" 의 답'}
           </p>
         </div>
         <Link href="/admin/trend-radar" className="text-sm text-gray-700 hover:text-black underline">
@@ -75,13 +101,48 @@ export default async function OpportunityPage() {
         </Link>
       </header>
 
-      {rows.length === 0 ? (
-        <div className="rounded border border-dashed border-gray-300 p-12 text-center text-gray-500">
-          아직 데이터 없음. cron 누적 후 다시 방문.
-        </div>
+      <nav className="flex gap-2 border-b border-gray-200">
+        <TabLink href="/admin/trend-radar/opportunity" active={tab === 'matrix'} label="Matrix" />
+        <TabLink
+          href="/admin/trend-radar/opportunity?tab=penetration"
+          active={tab === 'penetration'}
+          label="Penetration Index"
+        />
+      </nav>
+
+      {tab === 'matrix' ? (
+        matrixRows.length === 0 ? (
+          <div className="rounded border border-dashed border-gray-300 p-12 text-center text-gray-500">
+            아직 데이터 없음. cron 누적 후 다시 방문.
+          </div>
+        ) : (
+          <OpportunityScatter rows={matrixRows} />
+        )
       ) : (
-        <OpportunityScatter rows={rows} />
+        <>
+          {penetration.error && (
+            <div className="rounded border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+              RPC 오류 (마이그레이션 미적용일 수 있음): {penetration.error}
+            </div>
+          )}
+          <PenetrationPanel rows={penetration.rows as any} />
+        </>
       )}
     </div>
+  )
+}
+
+function TabLink({ href, active, label }: { href: string; active: boolean; label: string }) {
+  return (
+    <Link
+      href={href}
+      className={`px-3 py-2 text-sm ${
+        active
+          ? 'border-b-2 border-black font-semibold text-black'
+          : 'text-gray-500 hover:text-black'
+      }`}
+    >
+      {label}
+    </Link>
   )
 }
