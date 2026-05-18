@@ -144,4 +144,23 @@ if (!skipClassify) {
   if (classifyExit !== 0) failCount++
 }
 
+// daily-brief: classify 직후 한 번 더 LLM 호출. brief_date PK 로 멱등.
+const skipBrief = args.includes('--no-brief') || !!filter
+if (!skipBrief) {
+  console.log(`[${new Date().toISOString()}] launching daily-brief (claude CLI)`)
+  const briefPath = resolvePath(__dirname, 'daily-brief.mjs')
+  const briefExit = await new Promise((resolve) => {
+    const child = spawn(process.execPath, [briefPath], {
+      stdio: 'inherit',
+      env: process.env,
+    })
+    child.on('exit', (code) => resolve(code ?? 0))
+    child.on('error', (err) => {
+      console.error(`  daily-brief spawn error: ${err.message}`)
+      resolve(1)
+    })
+  })
+  if (briefExit !== 0) failCount++
+}
+
 process.exit(failCount > 0 ? 1 : 0)

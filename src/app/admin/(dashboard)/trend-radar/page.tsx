@@ -1,5 +1,6 @@
 import Link from 'next/link'
 import { createAdminClient } from '@/lib/auth/admin-supabase'
+import DailyBriefCard from './DailyBriefCard'
 
 export const dynamic = 'force-dynamic'
 
@@ -29,6 +30,23 @@ interface ScoreRow {
   final_score: number
   computed_at: string
   score_components?: any
+}
+
+async function fetchLatestBrief() {
+  const sb = createAdminClient()
+  // 새 jimscanner_daily_briefs 테이블 — supabase 타입엔 아직 없음 (`as never` 캐스팅).
+  const { data } = await (sb.from as unknown as (n: string) => any)('jimscanner_daily_briefs')
+    .select('brief_date, summary_md, actions, model, created_at')
+    .order('brief_date', { ascending: false })
+    .limit(1)
+    .maybeSingle()
+  return data as {
+    brief_date: string
+    summary_md: string
+    actions: unknown
+    model: string | null
+    created_at: string
+  } | null
 }
 
 async function fetchTvGgsanMatchSummary() {
@@ -132,10 +150,11 @@ export default async function TrendRadarPage({
   const sp = await searchParams
   const category = (CATEGORIES.includes(sp.cat as Category) ? sp.cat : 'all') as Category
 
-  const [{ products, scores, kpis }, tvPushes, tvGgsan] = await Promise.all([
+  const [{ products, scores, kpis }, tvPushes, tvGgsan, latestBrief] = await Promise.all([
     fetchData(category),
     fetchTvPushes(),
     fetchTvGgsanMatchSummary(),
+    fetchLatestBrief(),
   ])
 
   const sorted = products
@@ -159,6 +178,9 @@ export default async function TrendRadarPage({
           소스 헬스 →
         </Link>
       </header>
+
+      {/* Daily Brief — 오늘 무엇을 먼저 봐야 하는가 */}
+      <DailyBriefCard brief={latestBrief} />
 
       {/* KPI 5종 */}
       <section className="grid grid-cols-2 md:grid-cols-5 gap-4">
