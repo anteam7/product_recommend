@@ -1,25 +1,52 @@
 import Link from 'next/link'
 import { createAdminClient } from '@/lib/auth/admin-supabase'
 import type { Tables } from '@/lib/supabase'
+import { PinPoCard } from './pin-po-card'
 
 export const dynamic = 'force-dynamic'
 
 type PinRow = Tables<'jimscanner_trends_pins'>
 
+type PoRow = {
+  pin_keyword: string
+  pin_source: string
+  demand_p10: number
+  demand_p50: number
+  demand_p90: number
+  return_rate: number
+  unit_cost: number
+  price: number
+  recommended_qty: number
+  expected_profit: number
+  assumptions: Record<string, unknown> | null
+  computed_at: string | null
+}
+
 async function fetchData() {
   const sb = createAdminClient()
 
-  // 기존 jimscanner_trends_pins (Phase A 부터 존재) 사용 — 향후 v4 product 단위 핀 테이블 추가 가능.
   const { data: pins } = await sb
     .from('jimscanner_trends_pins')
     .select('keyword, source, notes, pinned_at')
     .order('pinned_at', { ascending: false })
 
-  return { pins: (pins ?? []) as PinRow[] }
+  // jimscanner_pin_po_recommendations 는 마이그레이션 적용 후에만 존재.
+  // generated types 에 아직 없을 수 있어서 any 캐스팅으로 우회.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const { data: poList } = (await (sb as any)
+    .from('jimscanner_pin_po_recommendations')
+    .select('*')) as { data: PoRow[] | null }
+
+  const poByKey = new Map<string, PoRow>()
+  for (const row of poList ?? []) {
+    poByKey.set(`${row.pin_keyword}::${row.pin_source}`, row)
+  }
+
+  return { pins: (pins ?? []) as PinRow[], poByKey }
 }
 
 export default async function PinsPage() {
-  const { pins } = await fetchData()
+  const { pins, poByKey } = await fetchData()
 
   return (
     <div className="space-y-6 p-6">
@@ -27,7 +54,7 @@ export default async function PinsPage() {
         <div>
           <h1 className="text-2xl font-bold">핀한 상품 후보</h1>
           <p className="text-sm text-gray-500 mt-1">
-            위탁 검토 후보. 메모 + 검토 상태 토글은 다음 버전.
+            위탁 검토 후보. 각 핀에 Newsvendor 기반 권장 발주량 위젯 부착.
           </p>
         </div>
         <Link href="/admin/trend-radar" className="text-sm text-gray-700 hover:text-black underline">
@@ -45,19 +72,14 @@ export default async function PinsPage() {
           </p>
         </div>
       ) : (
-        <div className="rounded border border-gray-200 divide-y divide-gray-100">
-          {pins.map((p) => (
-            <div key={`${p.source}::${p.keyword}`} className="px-4 py-3 grid grid-cols-12 items-center text-sm">
-              <div className="col-span-6">
-                <div className="font-medium">{p.keyword}</div>
-                {p.notes && <div className="text-xs text-gray-500 mt-1">{p.notes}</div>}
-              </div>
-              <div className="col-span-3 text-xs text-gray-500">{p.source}</div>
-              <div className="col-span-3 text-right text-xs text-gray-400 font-mono">
-                {p.pinned_at?.slice(0, 16)}
-              </div>
-            </div>
-          ))}
+        <div className="space-y-4">
+          {pins.map((p) => {
+            const key = `${p.keyword}::${p.source}`
+            const po = poByKey.get(key) ?? null
+            return (
+              <PinPoCard key={key} pin={p} po={po} />
+            )
+          })}
         </div>
       )}
     </div>

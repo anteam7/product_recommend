@@ -43,6 +43,8 @@ const CRONS = [
   '/api/cron/collect-kca-press',
   '/api/cron/collect-gsc-daily',
   '/api/cron/collect-naver-tvtime',
+  // Newsvendor PO 추천 — 핀별 권장 발주량 일배치 재계산.
+  '/api/cron/compute-po-recommendations',
 ]
 
 const SECRET = process.env.CRON_SECRET
