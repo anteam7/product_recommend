@@ -6,6 +6,8 @@ import {
   chunk,
   type DatalabKeywordGroup,
   type DatalabCategoryGroup,
+  type DatalabDevice,
+  type DatalabGender,
 } from './naver-datalab'
 
 /**
@@ -233,4 +235,167 @@ export async function collectNaverShoppingTrends(
   const summary = { fetched, inserted, status, error: lastErr }
   await logRun(admin, source, triggeredBy, startedAt, summary)
   return { ...summary, source, durationMs: Date.now() - startedAt }
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// 인구통계 페르소나 핑거프린트 수집
+//
+// Naver DataLab Shopping Insight 의 ages/gender/device 분기 파라미터를 fan-out 호출하여
+// 카테고리별 인구통계 분포를 얻는다.
+// DataLab 은 절대값이 아니라 그룹간 ratio 만 반환하므로,
+// 각 단일 분기 호출의 가장 최근 ratio 가 곧 분기간 상대 분포가 된다.
+// (예: age=10 호출 ratio + age=20 호출 ratio + ... 를 정규화 → 연령 분포)
+//
+// 핀+상위N 카테고리 시드 한정 일 1회 (쿼터 절약).
+// ──────────────────────────────────────────────────────────────────────────
+
+const DEMO_AGE_BUCKETS: string[] = ['10', '20', '30', '40', '50', '60']
+const DEMO_GENDERS: DatalabGender[] = ['m', 'f']
+const DEMO_DEVICES: DatalabDevice[] = ['pc', 'mo']
+
+export type DemographicRow = {
+  keyword: string
+  cid: string | null
+  source: string
+  age_bucket: string | null
+  gender: string | null
+  device: string | null
+  share: number
+}
+
+export async function collectDemographicProfile(
+  source: 'naver_shopping_insight',
+  category: DatalabCategoryGroup,
+  startDate: string,
+  endDate: string,
+): Promise<DemographicRow[]> {
+  const keyword = category.name
+  const cid = category.param?.[0] ?? null
+  const rows: DemographicRow[] = []
+
+  async function callOne(opts: {
+    ages?: string[]
+    gender?: DatalabGender
+    device?: DatalabDevice
+  }): Promise<number | null> {
+    const resp = await fetchShoppingCategories({
+      startDate,
+      endDate,
+      timeUnit: 'date',
+      category: [category],
+      ages: opts.ages,
+      gender: opts.gender,
+      device: opts.device,
+    })
+    const group = resp.results?.[0]
+    const last = group?.data?.[group.data.length - 1]
+    return typeof last?.ratio === 'number' ? last.ratio : null
+  }
+
+  for (const age of DEMO_AGE_BUCKETS) {
+    try {
+      const ratio = await callOne({ ages: [age] })
+      if (ratio !== null) {
+        rows.push({ keyword, cid, source, age_bucket: age, gender: null, device: null, share: ratio })
+      }
+    } catch {
+      // 단일 분기 실패는 분포 손실로 흡수
+    }
+  }
+
+  for (const g of DEMO_GENDERS) {
+    try {
+      const ratio = await callOne({ gender: g })
+      if (ratio !== null) {
+        rows.push({ keyword, cid, source, age_bucket: null, gender: g, device: null, share: ratio })
+      }
+    } catch {
+      // skip
+    }
+  }
+
+  for (const d of DEMO_DEVICES) {
+    try {
+      const ratio = await callOne({ device: d })
+      if (ratio !== null) {
+        rows.push({ keyword, cid, source, age_bucket: null, gender: null, device: d, share: ratio })
+      }
+    } catch {
+      // skip
+    }
+  }
+
+  return rows
+}
+
+export async function collectDemographicsCron(
+  admin: SupabaseClient,
+  triggeredBy: string,
+  opts: { topN?: number } = {},
+): Promise<CollectSummary> {
+  const startedAt = Date.now()
+  const internalSource = 'naver_demographics'
+  const dlSource = 'naver_shopping_insight' as const
+  const topN = opts.topN ?? 8
+
+  const { data: seeds, error: sErr } = await admin
+    .from('jimscanner_trends_seeds')
+    .select('id, source, kind, label, config')
+    .eq('source', dlSource)
+    .eq('is_active', true)
+    .order('display_order')
+    .limit(topN)
+  if (sErr) {
+    const summary = { fetched: 0, inserted: 0, status: 'error' as const, error: sErr.message }
+    await logRun(admin, internalSource, triggeredBy, startedAt, summary)
+    return { ...summary, source: internalSource, durationMs: Date.now() - startedAt }
+  }
+  const seedList = (seeds ?? []) as Seed[]
+  const categories: DatalabCategoryGroup[] = seedList
+    .filter((s) => !!s.config.cid)
+    .map((s) => ({ name: s.config.name ?? s.label, param: [s.config.cid!] }))
+
+  if (categories.length === 0) {
+    const summary = {
+      fetched: 0,
+      inserted: 0,
+      status: 'partial' as const,
+      error: 'no active category seeds',
+    }
+    await logRun(admin, internalSource, triggeredBy, startedAt, summary)
+    return { ...summary, source: internalSource, durationMs: Date.now() - startedAt }
+  }
+
+  const startDate = dateNDaysAgoKst(30)
+  const endDate = dateNDaysAgoKst(1)
+
+  let fetched = 0
+  let inserted = 0
+  let lastErr: string | undefined
+
+  for (const cat of categories) {
+    try {
+      const rows = await collectDemographicProfile(dlSource, cat, startDate, endDate)
+      fetched++
+      if (rows.length > 0) {
+        // 신규 테이블 — generated types 미반영. as any 캐스팅 필요.
+        const { error: insErr } = await (admin as any)
+          .from('jimscanner_trends_demographics')
+          .insert(rows)
+        if (insErr) lastErr = insErr.message
+        else inserted += rows.length
+      }
+    } catch (e) {
+      lastErr = e instanceof Error ? e.message : String(e)
+    }
+  }
+
+  const status: CollectSummary['status'] = lastErr
+    ? inserted > 0
+      ? 'partial'
+      : 'error'
+    : 'ok'
+  const summary = { fetched, inserted, status, error: lastErr }
+  await logRun(admin, internalSource, triggeredBy, startedAt, summary)
+  return { ...summary, source: internalSource, durationMs: Date.now() - startedAt }
 }
