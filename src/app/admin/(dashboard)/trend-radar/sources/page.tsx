@@ -35,6 +35,10 @@ const TRENDS_RUNS_GROUPS: { label: string; sources: string[] }[] = [
     label: 'LLM 분류',
     sources: ['classify_trends_llm'],
   },
+  {
+    label: 'Spike Attribution',
+    sources: ['spike_attribution'],
+  },
 ]
 
 // market_raw 에 직접 적재되는 수집기 (별도 logging 없음)
