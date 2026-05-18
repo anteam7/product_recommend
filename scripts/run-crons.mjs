@@ -142,6 +142,22 @@ if (!skipClassify) {
     })
   })
   if (classifyExit !== 0) failCount++
+
+  // 감성 극성 분류 — classify 직후 한 번 더 spawn.
+  console.log(`[${new Date().toISOString()}] launching classify-trends-sentiment (claude CLI)`)
+  const sentimentPath = resolvePath(__dirname, 'classify-trends-sentiment.mjs')
+  const sentimentExit = await new Promise((resolve) => {
+    const child = spawn(process.execPath, [sentimentPath], {
+      stdio: 'inherit',
+      env: process.env,
+    })
+    child.on('exit', (code) => resolve(code ?? 0))
+    child.on('error', (err) => {
+      console.error(`  sentiment spawn error: ${err.message}`)
+      resolve(1)
+    })
+  })
+  if (sentimentExit !== 0) failCount++
 }
 
 process.exit(failCount > 0 ? 1 : 0)

@@ -41,11 +41,82 @@ const SIM_OPTIONS = [
   { v: 0.3, label: '0.30 (엄격)' },
 ] as const
 
+interface PolarityGateData {
+  productName: string
+  brand: string | null
+  pos: number
+  neg: number
+  total: number
+}
+
+async function fetchPolarityGate(days: number): Promise<PolarityGateData[]> {
+  const sb = createAdminClient()
+  const since = new Date(Date.now() - days * 86400 * 1000).toISOString().slice(0, 10)
+  const { data, error } = await sb
+    .from('jimscanner_trends_polarity_daily' as never)
+    .select('product_id, pos_count, neg_count, total_count')
+    .gte('day', since)
+    .limit(5000)
+  if (error || !data) return []
+  const agg = new Map<string, { pos: number; neg: number; total: number }>()
+  for (const r of data as unknown as Array<{
+    product_id: string
+    pos_count: number
+    neg_count: number
+    total_count: number
+  }>) {
+    const cur = agg.get(r.product_id) ?? { pos: 0, neg: 0, total: 0 }
+    cur.pos += r.pos_count
+    cur.neg += r.neg_count
+    cur.total += r.total_count
+    agg.set(r.product_id, cur)
+  }
+  const ids = [...agg.keys()]
+  if (ids.length === 0) return []
+  const { data: prods } = await sb
+    .from('jimscanner_trends_products')
+    .select('id, canonical_name, brand')
+    .in('id', ids)
+  return ((prods ?? []) as Array<{ id: string; canonical_name: string; brand: string | null }>).map(
+    (p) => {
+      const a = agg.get(p.id) ?? { pos: 0, neg: 0, total: 0 }
+      return {
+        productName: p.canonical_name,
+        brand: p.brand,
+        pos: a.pos,
+        neg: a.neg,
+        total: a.total,
+      }
+    },
+  )
+}
+
+function polarityGateForTitle(title: string, gates: PolarityGateData[]): number {
+  // 단순 substring 매칭으로 polarity_gate 계산.
+  // gate = 1 + (pos_ratio - neg_ratio); 매칭 없으면 1.0 (no-op).
+  if (gates.length === 0) return 1.0
+  const t = title.toLowerCase()
+  let best: PolarityGateData | null = null
+  for (const g of gates) {
+    if (g.total < 3) continue
+    const name = g.productName.toLowerCase()
+    if (!name) continue
+    if (t.includes(name) || (g.brand && t.includes(g.brand.toLowerCase()))) {
+      if (!best || g.total > best.total) best = g
+    }
+  }
+  if (!best) return 1.0
+  const posRatio = best.pos / best.total
+  const negRatio = best.neg / best.total
+  return Math.max(0.3, Math.min(1.8, 1.0 + (posRatio - negRatio) * 0.6))
+}
+
 async function fetchRecommend(opts: {
   days: number
   minSim: number
   imminentOnly: boolean
   cate: string
+  polarityGate: boolean
 }) {
   const sb = createAdminClient()
   // RPC는 DB(supabase/ggsan_recommend_rpc.sql)에 존재하나 generated 타입 미반영 — `npm run gen:types` 시 캐스팅 제거
@@ -61,6 +132,21 @@ async function fetchRecommend(opts: {
   let rows = (data ?? []) as RecommendRow[]
   if (opts.imminentOnly) rows = rows.filter((r) => r.is_imminent)
   if (opts.cate) rows = rows.filter((r) => r.cate_cd === opts.cate)
+
+  if (opts.polarityGate) {
+    const gates = await fetchPolarityGate(opts.days)
+    rows = rows
+      .map((r) => {
+        const gate = polarityGateForTitle(r.title, gates)
+        return {
+          ...r,
+          final_score: Number(r.final_score) * gate,
+          // breakdown 보존용: imminent_bonus 자리에 gate 저장이 아닌 별도 필드는 만들지 않음
+        } as RecommendRow & { polarity_gate?: number; polarity_gate_applied?: boolean }
+      })
+      .sort((a, b) => Number(b.final_score) - Number(a.final_score))
+  }
+
   return { rows, error: null as string | null }
 }
 
@@ -105,7 +191,7 @@ function sourceLabel(s: string): string {
 export default async function RecommendPage({
   searchParams,
 }: {
-  searchParams: Promise<{ days?: string; sim?: string; imminent?: string; cate?: string }>
+  searchParams: Promise<{ days?: string; sim?: string; imminent?: string; cate?: string; polarity?: string }>
 }) {
   const sp = await searchParams
   const days = parseInt(sp.days ?? '30', 10)
@@ -113,16 +199,18 @@ export default async function RecommendPage({
   const sim = parseFloat(sp.sim ?? '0.2')
   const validSim = SIM_OPTIONS.some((s) => Math.abs(s.v - sim) < 0.001) ? sim : 0.2
   const imminentOnly = sp.imminent === '1'
+  const polarityGate = sp.polarity === '1'
   const cate = sp.cate ?? ''
 
   const current: Record<string, string> = {
     days: String(validDays),
     sim: String(validSim),
     imminent: imminentOnly ? '1' : '',
+    polarity: polarityGate ? '1' : '',
     cate,
   }
 
-  const { rows, error } = await fetchRecommend({ days: validDays, minSim: validSim, imminentOnly, cate })
+  const { rows, error } = await fetchRecommend({ days: validDays, minSim: validSim, imminentOnly, cate, polarityGate })
 
   // KPI
   const total = rows.length
@@ -183,6 +271,13 @@ export default async function RecommendPage({
             className={`px-3 py-1 text-xs rounded ${imminentOnly ? 'bg-red-100 text-red-700 font-semibold' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}
           >
             {imminentOnly ? '✓ ' : ''}임박특가만
+          </Link>
+          <Link
+            href={buildHref(current, { polarity: polarityGate ? null : '1' })}
+            className={`px-3 py-1 text-xs rounded ${polarityGate ? 'bg-emerald-100 text-emerald-700 font-semibold' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}
+            title="감성 극성 게이트 적용 — pos/neg 비율로 final_score 보정"
+          >
+            {polarityGate ? '✓ ' : ''}🎭 극성 게이트
           </Link>
         </div>
         <div className="flex flex-wrap gap-1 border-t border-gray-100 pt-2">
