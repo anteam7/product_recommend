@@ -106,6 +106,12 @@ export default async function ProductDetailPage({
             </p>
           )}
         </div>
+        <Link
+          href={`/admin/trend-radar/niche-down/${product.id}`}
+          className="text-sm px-3 py-1.5 rounded border border-black hover:bg-black hover:text-white transition-colors whitespace-nowrap"
+        >
+          🌿 Niche-Down 탐색 →
+        </Link>
       </header>
 
       {/* 4점수 카드 */}
