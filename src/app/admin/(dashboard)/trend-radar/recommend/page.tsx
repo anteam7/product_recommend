@@ -18,6 +18,7 @@ interface RecommendRow {
   search_score: number
   raw_score: number
   imminent_bonus: number
+  depletion_velocity_score: number
   final_score: number
 
   tv_match_count: number
@@ -306,6 +307,11 @@ export default async function RecommendPage({
                     <div>TV {Number(r.tv_score).toFixed(2)} × 1.5</div>
                     <div>검색 {Number(r.search_score).toFixed(2)} × 1.0</div>
                     {r.is_imminent && <div className="text-red-600">× 1.3 (임박)</div>}
+                    {Number(r.depletion_velocity_score) > 0 && (
+                      <div className="text-emerald-700">
+                        + ⚡ {Number(r.depletion_velocity_score).toFixed(2)} × 2.0
+                      </div>
+                    )}
                   </div>
                 </div>
               </div>
@@ -318,13 +324,15 @@ export default async function RecommendPage({
       <section className="text-xs text-gray-500 border-t border-gray-200 pt-4 space-y-1">
         <div className="font-semibold text-gray-700">📐 ProductScore V0 공식</div>
         <code className="block bg-gray-50 px-3 py-2 rounded font-mono text-[11px] leading-relaxed">
-          final_score = (tv_score × 1.5 + search_score × 1.0) × imminent_bonus
+          final_score = (tv_score × 1.5 + search_score × 1.0) × imminent_bonus + depletion_velocity_score × 2.0
           <br />
           tv_score = Σ (tv_count × similarity(tv_keyword, ggsan_title))
           <br />
           search_score = Σ (occurrences × similarity(search_keyword, ggsan_title))
           <br />
           imminent_bonus = is_imminent ? 1.3 : 1.0
+          <br />
+          depletion_velocity_score = AVG(1/days_to_imminent) over flips in 21d + imminent_streak × 0.05
         </code>
         <div className="pt-2">
           <strong>V1 보강 예정:</strong> ÷ (1 + log(스마트스토어 등록상품수)) saturation_penalty · 커뮤니티 시그널 LLM 정규화 후 추가 · ggsan_price_history 가격 인하 추세 보너스
