@@ -35,6 +35,18 @@ export default async function PinsPage() {
         </Link>
       </header>
 
+      <div className="flex gap-2 border-b border-gray-200">
+        <span className="px-3 py-2 text-sm rounded-t bg-white border-x border-t border-gray-200 -mb-px font-semibold text-black">
+          리스트
+        </span>
+        <Link
+          href="/admin/trend-radar/pins/geo"
+          className="px-3 py-2 text-sm rounded-t text-gray-500 hover:text-black"
+        >
+          Geo 히트맵
+        </Link>
+      </div>
+
       {pins.length === 0 ? (
         <div className="rounded border border-dashed border-gray-300 p-12 text-center text-gray-500">
           <p className="text-base font-medium">핀한 항목 없음</p>

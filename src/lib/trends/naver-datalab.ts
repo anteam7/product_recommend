@@ -107,6 +107,28 @@ export async function fetchShoppingCategories(
   return postDatalab<DatalabResponse>('/v1/datalab/shopping/categories', req)
 }
 
+// ───────── 쇼핑 카테고리 × 지역별 클릭 추이 (지역별 디맨드 편중도용) ─────────
+// Naver DataLab — POST /v1/datalab/shopping/category/keyword/area
+// 입력: 카테고리 cid + 키워드 + area 코드(01~17). 17개 시도별로 호출하여 ratio 비교.
+export type DatalabAreaRequest = {
+  startDate: string
+  endDate: string
+  timeUnit: DatalabTimeUnit
+  category: string // cid
+  keyword: string
+  area: string[] // ['01','02',...]
+}
+
+export async function fetchShoppingCategoryKeywordArea(
+  req: DatalabAreaRequest,
+): Promise<DatalabResponse> {
+  if (!req.category) throw new Error('category(cid) empty')
+  if (!req.keyword) throw new Error('keyword empty')
+  if (req.area.length === 0) throw new Error('area empty')
+  // Naver 응답은 area 별 results 그룹 (title = area 코드)
+  return postDatalab<DatalabResponse>('/v1/datalab/shopping/category/keyword/area', req)
+}
+
 /** 오늘로부터 N일 전 (YYYY-MM-DD, KST) */
 export function dateNDaysAgoKst(daysAgo: number): string {
   const now = new Date()
