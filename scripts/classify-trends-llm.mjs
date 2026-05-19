@@ -274,6 +274,8 @@ async function main() {
       inserted_count: 0,
       duration_ms: Date.now() - t0,
     })
+    // 분류 후보가 없어도 brand_kind 라벨링은 진행 (사전·키워드는 별도 흐름).
+    await classifyKeywordBrandKind()
     return
   }
 
@@ -355,6 +357,115 @@ async function main() {
 
   console.log(
     `[${new Date().toISOString()}] done — ${reqCount} req, ${allResults.length} classified, $${totalCostUsd.toFixed(4)}, ${Date.now() - t0}ms`,
+  )
+
+  // brand_kind 키워드 라벨링 (heuristic, LLM 호출 없음)
+  await classifyKeywordBrandKind()
+}
+
+// ────────────────────────────────────────────────────────────
+// brand_kind 키워드 라벨링
+//
+// jimscanner_trends_products.brand 에 누적된 브랜드명 사전을 만들어
+// jimscanner_trends_keywords 의 keyword 문자열에 브랜드 토큰이 포함되면 'branded',
+// 아니면 'generic' 으로 라벨링. LLM 호출 없음 — 결정적·재실행 가능.
+//
+// commoditization 보드(/admin/trend-radar/commoditization) 가 이 컬럼을 사용.
+// ────────────────────────────────────────────────────────────
+async function classifyKeywordBrandKind() {
+  const t0 = Date.now()
+  console.log(`[brand_kind] start`)
+
+  // 1) 브랜드 사전: products.brand 에서 누적 (최소 2자).
+  const brandSet = new Set()
+  {
+    let from = 0
+    const PAGE = 1000
+    while (true) {
+      const { data, error } = await sb
+        .from('jimscanner_trends_products')
+        .select('brand')
+        .not('brand', 'is', null)
+        .range(from, from + PAGE - 1)
+      if (error) {
+        console.error(`  brand fetch failed: ${error.message}`)
+        return
+      }
+      const rows = data ?? []
+      for (const r of rows) {
+        const b = (r.brand ?? '').trim()
+        if (b.length >= 2) brandSet.add(b.toLowerCase())
+      }
+      if (rows.length < PAGE) break
+      from += PAGE
+    }
+  }
+  console.log(`  brand dictionary: ${brandSet.size} entries`)
+
+  // 2) 라벨링 대상 키워드 (brand_kind IS NULL).
+  const FETCH_LIMIT = 5000
+  const { data: kwRows, error: kwErr } = await sb
+    .from('jimscanner_trends_keywords')
+    .select('id, keyword')
+    .is('brand_kind', null)
+    .order('collected_at', { ascending: false })
+    .limit(FETCH_LIMIT)
+  if (kwErr) {
+    console.error(`  keyword fetch failed: ${kwErr.message}`)
+    return
+  }
+  const targets = kwRows ?? []
+  if (targets.length === 0) {
+    console.log(`  done: no unclassified keywords`)
+    return
+  }
+
+  // 3) 라벨링.
+  let branded = 0
+  let generic = 0
+  const updates = []
+  for (const r of targets) {
+    const kw = (r.keyword ?? '').toLowerCase()
+    if (!kw) continue
+    let isBranded = false
+    for (const b of brandSet) {
+      if (kw.includes(b)) {
+        isBranded = true
+        break
+      }
+    }
+    if (isBranded) branded++
+    else generic++
+    updates.push({ id: r.id, brand_kind: isBranded ? 'branded' : 'generic' })
+  }
+
+  // 4) chunked upsert.
+  const CHUNK = 500
+  const nowIso = new Date().toISOString()
+  for (let i = 0; i < updates.length; i += CHUNK) {
+    const slice = updates.slice(i, i + CHUNK)
+    // 개별 update 가 안전 (id 단일 키, RPC 없음)
+    const ids = slice.map((u) => u.id)
+    const brandedIds = slice.filter((u) => u.brand_kind === 'branded').map((u) => u.id)
+    const genericIds = slice.filter((u) => u.brand_kind === 'generic').map((u) => u.id)
+    if (brandedIds.length) {
+      await sb
+        .from('jimscanner_trends_keywords')
+        .update({ brand_kind: 'branded', brand_kind_at: nowIso })
+        .in('id', brandedIds)
+    }
+    if (genericIds.length) {
+      await sb
+        .from('jimscanner_trends_keywords')
+        .update({ brand_kind: 'generic', brand_kind_at: nowIso })
+        .in('id', genericIds)
+    }
+    // touch
+    void ids
+  }
+
+  console.log(
+    `[brand_kind] done — ${updates.length} labeled (branded=${branded}, generic=${generic}, ${Date.now() - t0}ms)`,
   )
 }
 
