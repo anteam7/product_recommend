@@ -144,4 +144,24 @@ if (!skipClassify) {
   if (classifyExit !== 0) failCount++
 }
 
+// fetch-naver-ads-stats: 핀 키워드의 광고 단가/검색량을 KeyWordsTool API 로 누적.
+//   ad-headroom 보드용. filter 가 걸려도 건너뛰지 않음 (가벼움 + 핀 변경 시 즉시 반영).
+const skipAds = args.includes('--no-ads') || !!filter
+if (!skipAds) {
+  console.log(`[${new Date().toISOString()}] launching fetch-naver-ads-stats`)
+  const scriptPath = resolvePath(__dirname, 'fetch-naver-ads-stats.mjs')
+  const adsExit = await new Promise((resolve) => {
+    const child = spawn(process.execPath, [scriptPath], {
+      stdio: 'inherit',
+      env: process.env,
+    })
+    child.on('exit', (code) => resolve(code ?? 0))
+    child.on('error', (err) => {
+      console.error(`  ads-stats spawn error: ${err.message}`)
+      resolve(1)
+    })
+  })
+  if (adsExit !== 0) failCount++
+}
+
 process.exit(failCount > 0 ? 1 : 0)
