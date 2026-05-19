@@ -144,4 +144,30 @@ if (!skipClassify) {
   if (classifyExit !== 0) failCount++
 }
 
+// 기상 단계: KMA 단기예보 pull → 핀 단위 회귀 fit.
+//   filter 가 걸리면 건너뜀. --no-weather 플래그도 지원.
+const skipWeather = args.includes('--no-weather') || !!filter
+if (!skipWeather) {
+  const weatherSteps = [
+    { label: 'fetch-weather-kma', file: 'fetch-weather-kma.mjs' },
+    { label: 'fit-weather-coupling', file: 'fit-weather-coupling.mjs' },
+  ]
+  for (const step of weatherSteps) {
+    console.log(`[${new Date().toISOString()}] launching ${step.label}`)
+    const scriptPath = resolvePath(__dirname, step.file)
+    const exit = await new Promise((resolve) => {
+      const child = spawn(process.execPath, ['--env-file=.env.local', scriptPath], {
+        stdio: 'inherit',
+        env: process.env,
+      })
+      child.on('exit', (code) => resolve(code ?? 0))
+      child.on('error', (err) => {
+        console.error(`  ${step.label} spawn error: ${err.message}`)
+        resolve(1)
+      })
+    })
+    if (exit !== 0) failCount++
+  }
+}
+
 process.exit(failCount > 0 ? 1 : 0)
