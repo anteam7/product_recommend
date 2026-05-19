@@ -53,9 +53,14 @@ const SYSTEM_PROMPT = `한국 위탁 판매 상품 분류기. 입력 리스트�
 - category_mid: 5-10자 한국어 (예: "오메가3", "수납용품")
 - intent_label: 5-7자 (예: "예방건강", "문제해결", "소모품")
 - description: 15자 이내 1문장 (위탁 판매 의사결정 단서)
+- actual_weight_g: 실무게 추정값 (g, 정수). 모르면 null. 예: 영양제 60캡슐≈150
+- dim_weight_g: 부피무게 추정 (g, 정수). 가로*세로*높이(cm)/5000*1000. 모르면 null. 예: 영양제 600
+- longest_cm: 박스 최장변 (cm, 정수). 모르면 null. 예: 영양제 15, 침구 80
+- fragility: "low" | "med" | "high" 중 하나. 깨지기 쉬움. 유리/도자기/디스플레이=high
+- hazard_class: "none" | "food" | "liquid" | "electronics" | "cosmetics" | "battery"
 
 예시 입력: - id="abc" name="닥터린 초임계 알티지 오메가3 60캡슐" cur_top=health aliases=2 samples=[종근당 오메가3 | 일양 오메가3] sources=[naver_shopping_hot,musinsa_best]
-예시 출력: [{"id":"abc","canonical_name":"오메가3","brand":"닥터린","category_top":"health","category_mid":"오메가3","intent_label":"예방건강","description":"혈행건강 영양제"}]`
+예시 출력: [{"id":"abc","canonical_name":"오메가3","brand":"닥터린","category_top":"health","category_mid":"오메가3","intent_label":"예방건강","description":"혈행건강 영양제","actual_weight_g":150,"dim_weight_g":600,"longest_cm":15,"fragility":"low","hazard_class":"food"}]`
 
 function buildUserPrompt(items) {
   const lines = items.map(
@@ -98,6 +103,13 @@ function normalizeResult(o, fallbackId) {
   const top = ['health', 'living', 'digital', 'other'].includes(o.category_top)
     ? o.category_top
     : 'other'
+  const num = (v, max) => {
+    const n = typeof v === 'number' ? v : Number(v)
+    if (!Number.isFinite(n) || n <= 0) return null
+    return Math.min(Math.round(n), max)
+  }
+  const FRAG = ['low', 'med', 'high']
+  const HAZ = ['none', 'food', 'liquid', 'electronics', 'cosmetics', 'battery']
   return {
     id,
     canonical_name: cn,
@@ -106,6 +118,11 @@ function normalizeResult(o, fallbackId) {
     category_mid: typeof o.category_mid === 'string' ? o.category_mid.trim().slice(0, 30) : '',
     intent_label: typeof o.intent_label === 'string' ? o.intent_label.trim().slice(0, 20) : '',
     description: typeof o.description === 'string' ? o.description.trim().slice(0, 80) : '',
+    actual_weight_g: num(o.actual_weight_g, 100000),
+    dim_weight_g: num(o.dim_weight_g, 200000),
+    longest_cm: num(o.longest_cm, 300),
+    fragility: FRAG.includes(o.fragility) ? o.fragility : null,
+    hazard_class: HAZ.includes(o.hazard_class) ? o.hazard_class : null,
   }
 }
 
@@ -233,6 +250,11 @@ async function applyResults(results) {
           category_mid: r.category_mid,
           intent_label: r.intent_label,
           description: r.description,
+          actual_weight_g: r.actual_weight_g,
+          dim_weight_g: r.dim_weight_g,
+          longest_cm: r.longest_cm,
+          fragility: r.fragility,
+          hazard_class: r.hazard_class,
           llm_classified_at: now,
           llm_model: MODEL,
         })

@@ -19,6 +19,8 @@ interface ProductRow {
   category_top: string
   alias_count: number
   last_seen_at: string
+  cached_burden_ratio?: number | null
+  cached_unit_shipping_krw?: number | null
 }
 interface ScoreRow {
   product_id: string
@@ -99,12 +101,16 @@ async function fetchData(category: Category) {
 
   const prodQuery = sb
     .from('jimscanner_trends_products')
-    .select('id, canonical_name, category_top, alias_count, last_seen_at')
+    .select(
+      'id, canonical_name, category_top, alias_count, last_seen_at, cached_burden_ratio, cached_unit_shipping_krw',
+    )
     .in('id', productIds)
 
   if (category !== 'all') prodQuery.eq('category_top', category)
 
-  const { data: products } = await prodQuery
+  // 마이그레이션(trends_shipping_economics.sql) 후 타입 재생성 전 캐스팅.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const { data: products } = await (prodQuery as any)
 
   // KPI
   const allCount = (await sb.from('jimscanner_trends_products').select('*', { count: 'exact', head: true })).count ?? 0
@@ -273,33 +279,60 @@ export default async function TrendRadarPage({
           <div className="grid gap-3">
             <div className="grid grid-cols-12 text-xs text-gray-500 px-3 py-1">
               <div className="col-span-1">#</div>
-              <div className="col-span-5">상품명</div>
+              <div className="col-span-4">상품명</div>
               <div className="col-span-1 text-right">final</div>
               <div className="col-span-1 text-right">trend</div>
               <div className="col-span-1 text-right">commerce</div>
               <div className="col-span-1 text-right">supplier</div>
-              <div className="col-span-1 text-right">competition</div>
+              <div className="col-span-1 text-right">comp.</div>
               <div className="col-span-1 text-right">aliases</div>
+              <div className="col-span-1 text-right">📦 부담</div>
             </div>
-            {sorted.slice(0, 50).map(({ p, s }, i) => (
-              <Link
-                key={p.id}
-                href={`/admin/trend-radar/products/${p.id}`}
-                className="grid grid-cols-12 px-3 py-2 rounded border border-gray-200 hover:bg-gray-50 transition-colors"
-              >
-                <div className="col-span-1 text-gray-400 font-mono">{i + 1}</div>
-                <div className="col-span-5">
-                  <div className="font-medium">{p.canonical_name}</div>
-                  <div className="text-xs text-gray-500">{p.category_top}</div>
-                </div>
-                <div className="col-span-1 text-right font-mono font-bold">{s!.final_score}</div>
-                <div className="col-span-1 text-right font-mono text-gray-600">{s!.trend_score}</div>
-                <div className="col-span-1 text-right font-mono text-gray-600">{s!.commerce_score}</div>
-                <div className="col-span-1 text-right font-mono text-gray-600">{s!.supplier_score}</div>
-                <div className="col-span-1 text-right font-mono text-gray-600">{s!.competition_score}</div>
-                <div className="col-span-1 text-right text-xs text-gray-500">{p.alias_count}</div>
-              </Link>
-            ))}
+            {sorted.slice(0, 50).map(({ p, s }, i) => {
+              const ratio = p.cached_burden_ratio ?? null
+              let burdenTier: 'green' | 'yellow' | 'red' | null = null
+              if (ratio != null) {
+                if (ratio <= 0.08) burdenTier = 'green'
+                else if (ratio >= 0.15) burdenTier = 'red'
+                else burdenTier = 'yellow'
+              }
+              return (
+                <Link
+                  key={p.id}
+                  href={`/admin/trend-radar/products/${p.id}`}
+                  className={`grid grid-cols-12 px-3 py-2 rounded border transition-colors ${
+                    burdenTier === 'red'
+                      ? 'border-red-200 bg-red-50/40 hover:bg-red-50'
+                      : burdenTier === 'green'
+                        ? 'border-green-200 bg-green-50/30 hover:bg-green-50'
+                        : 'border-gray-200 hover:bg-gray-50'
+                  }`}
+                >
+                  <div className="col-span-1 text-gray-400 font-mono">{i + 1}</div>
+                  <div className="col-span-4">
+                    <div className="font-medium">{p.canonical_name}</div>
+                    <div className="text-xs text-gray-500">{p.category_top}</div>
+                  </div>
+                  <div className="col-span-1 text-right font-mono font-bold">{s!.final_score}</div>
+                  <div className="col-span-1 text-right font-mono text-gray-600">{s!.trend_score}</div>
+                  <div className="col-span-1 text-right font-mono text-gray-600">{s!.commerce_score}</div>
+                  <div className="col-span-1 text-right font-mono text-gray-600">{s!.supplier_score}</div>
+                  <div className="col-span-1 text-right font-mono text-gray-600">{s!.competition_score}</div>
+                  <div className="col-span-1 text-right text-xs text-gray-500">{p.alias_count}</div>
+                  <div className="col-span-1 text-right text-xs font-mono">
+                    {burdenTier === 'red' ? (
+                      <span className="text-red-700 font-bold">🔴 {((ratio ?? 0) * 100).toFixed(0)}%</span>
+                    ) : burdenTier === 'green' ? (
+                      <span className="text-green-700 font-bold">🟢 {((ratio ?? 0) * 100).toFixed(0)}%</span>
+                    ) : burdenTier === 'yellow' ? (
+                      <span className="text-amber-700">🟡 {((ratio ?? 0) * 100).toFixed(0)}%</span>
+                    ) : (
+                      <span className="text-gray-300">-</span>
+                    )}
+                  </div>
+                </Link>
+              )
+            })}
           </div>
         )}
       </section>
