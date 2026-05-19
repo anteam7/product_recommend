@@ -1,5 +1,6 @@
 import Link from 'next/link'
 import { createAdminClient } from '@/lib/auth/admin-supabase'
+import RejectActions from './RejectActions'
 
 export const dynamic = 'force-dynamic'
 
@@ -29,6 +30,7 @@ interface ScoreRow {
   final_score: number
   computed_at: string
   score_components?: any
+  reject_prob?: number | null
 }
 
 async function fetchTvGgsanMatchSummary() {
@@ -79,11 +81,14 @@ async function fetchData(category: Category) {
   const sb = createAdminClient()
 
   // 최신 score 별 product_id 조회 — 같은 product 의 가장 최근 row 만.
-  const { data: latestScores } = await sb
+  // reject_prob 컬럼은 trends_v4_reject_learning.sql 마이그레이션 후 채워짐.
+  const { data: latestScores } = (await sb
     .from('jimscanner_trends_scores')
-    .select('product_id, trend_score, commerce_score, supplier_score, competition_score, final_score, computed_at, score_components')
+    .select(
+      'product_id, trend_score, commerce_score, supplier_score, competition_score, final_score, computed_at, score_components, reject_prob',
+    )
     .order('computed_at', { ascending: false })
-    .limit(2000)
+    .limit(2000)) as { data: ScoreRow[] | null }
 
   // product_id 별 첫 등장 (가장 최근) 만 keep
   const seen = new Set<string>()
@@ -124,13 +129,17 @@ async function fetchData(category: Category) {
   }
 }
 
+const REJECT_THRESHOLD = 0.6
+const REJECT_PENALTY = 0.6 // final_score 곱연산 페널티 (1.0 = 페널티 X, 0 = 완전 차단)
+
 export default async function TrendRadarPage({
   searchParams,
 }: {
-  searchParams: Promise<{ cat?: string }>
+  searchParams: Promise<{ cat?: string; showFiltered?: string }>
 }) {
   const sp = await searchParams
   const category = (CATEGORIES.includes(sp.cat as Category) ? sp.cat : 'all') as Category
+  const showFiltered = sp.showFiltered === '1'
 
   const [{ products, scores, kpis }, tvPushes, tvGgsan] = await Promise.all([
     fetchData(category),
@@ -138,10 +147,21 @@ export default async function TrendRadarPage({
     fetchTvGgsanMatchSummary(),
   ])
 
-  const sorted = products
-    .map((p) => ({ p, s: scores.get(p.id) }))
-    .filter((x) => x.s)
-    .sort((a, b) => (b.s!.final_score - a.s!.final_score))
+  const enriched = products
+    .map((p) => {
+      const s = scores.get(p.id)
+      if (!s) return null
+      const rp = typeof s.reject_prob === 'number' ? s.reject_prob : null
+      const isFiltered = rp != null && rp >= REJECT_THRESHOLD
+      const adjusted = isFiltered ? s.final_score * REJECT_PENALTY : s.final_score
+      return { p, s, rp, isFiltered, adjusted }
+    })
+    .filter((x): x is NonNullable<typeof x> => x !== null)
+
+  const visible = enriched.filter((x) => showFiltered || !x.isFiltered)
+  const hiddenCount = enriched.filter((x) => x.isFiltered).length
+
+  const sorted = visible.sort((a, b) => b.adjusted - a.adjusted)
 
   return (
     <div className="space-y-6 p-6">
@@ -265,6 +285,21 @@ export default async function TrendRadarPage({
         )}
       </section>
 
+      {/* 리젝 학습 필터 토글 */}
+      {hiddenCount > 0 && (
+        <div className="flex items-center justify-between rounded border border-gray-200 bg-gray-50 px-3 py-2 text-xs">
+          <div className="text-gray-600">
+            🧠 리젝 학습 필터가 <strong>{hiddenCount}건</strong>을 숨겼습니다 (reject_prob ≥ {REJECT_THRESHOLD})
+          </div>
+          <Link
+            href={`/admin/trend-radar?cat=${category}${showFiltered ? '' : '&showFiltered=1'}`}
+            className="px-2 py-1 rounded border border-gray-300 bg-white hover:bg-gray-100"
+          >
+            {showFiltered ? '숨기기' : '필터가 숨긴 N건 검토 →'}
+          </Link>
+        </div>
+      )}
+
       {/* Top 카드 */}
       <section>
         {sorted.length === 0 ? (
@@ -273,32 +308,50 @@ export default async function TrendRadarPage({
           <div className="grid gap-3">
             <div className="grid grid-cols-12 text-xs text-gray-500 px-3 py-1">
               <div className="col-span-1">#</div>
-              <div className="col-span-5">상품명</div>
+              <div className="col-span-4">상품명</div>
               <div className="col-span-1 text-right">final</div>
               <div className="col-span-1 text-right">trend</div>
               <div className="col-span-1 text-right">commerce</div>
               <div className="col-span-1 text-right">supplier</div>
               <div className="col-span-1 text-right">competition</div>
-              <div className="col-span-1 text-right">aliases</div>
+              <div className="col-span-2 text-right">학습/액션</div>
             </div>
-            {sorted.slice(0, 50).map(({ p, s }, i) => (
-              <Link
+            {sorted.slice(0, 50).map(({ p, s, rp, isFiltered, adjusted }, i) => (
+              <div
                 key={p.id}
-                href={`/admin/trend-radar/products/${p.id}`}
-                className="grid grid-cols-12 px-3 py-2 rounded border border-gray-200 hover:bg-gray-50 transition-colors"
+                className={`grid grid-cols-12 px-3 py-2 rounded border transition-colors ${
+                  isFiltered
+                    ? 'border-gray-200 bg-gray-50/50 opacity-60 hover:opacity-90'
+                    : 'border-gray-200 hover:bg-gray-50'
+                }`}
               >
-                <div className="col-span-1 text-gray-400 font-mono">{i + 1}</div>
-                <div className="col-span-5">
-                  <div className="font-medium">{p.canonical_name}</div>
-                  <div className="text-xs text-gray-500">{p.category_top}</div>
+                <Link
+                  href={`/admin/trend-radar/products/${p.id}`}
+                  className="col-span-10 grid grid-cols-10"
+                >
+                  <div className="col-span-1 text-gray-400 font-mono">{i + 1}</div>
+                  <div className="col-span-4">
+                    <div className="font-medium">{p.canonical_name}</div>
+                    <div className="text-xs text-gray-500">
+                      {p.category_top}
+                      {isFiltered && <span className="ml-2 text-amber-700">· 학습 필터 디머</span>}
+                    </div>
+                  </div>
+                  <div className="col-span-1 text-right font-mono font-bold">
+                    {Math.round(adjusted)}
+                    {isFiltered && (
+                      <div className="text-[10px] text-gray-400 line-through">{s!.final_score}</div>
+                    )}
+                  </div>
+                  <div className="col-span-1 text-right font-mono text-gray-600">{s!.trend_score}</div>
+                  <div className="col-span-1 text-right font-mono text-gray-600">{s!.commerce_score}</div>
+                  <div className="col-span-1 text-right font-mono text-gray-600">{s!.supplier_score}</div>
+                  <div className="col-span-1 text-right font-mono text-gray-600">{s!.competition_score}</div>
+                </Link>
+                <div className="col-span-2 flex justify-end items-center">
+                  <RejectActions productId={p.id} rejectProb={rp} surface="trend-radar" />
                 </div>
-                <div className="col-span-1 text-right font-mono font-bold">{s!.final_score}</div>
-                <div className="col-span-1 text-right font-mono text-gray-600">{s!.trend_score}</div>
-                <div className="col-span-1 text-right font-mono text-gray-600">{s!.commerce_score}</div>
-                <div className="col-span-1 text-right font-mono text-gray-600">{s!.supplier_score}</div>
-                <div className="col-span-1 text-right font-mono text-gray-600">{s!.competition_score}</div>
-                <div className="col-span-1 text-right text-xs text-gray-500">{p.alias_count}</div>
-              </Link>
+              </div>
             ))}
           </div>
         )}
