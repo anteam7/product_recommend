@@ -152,12 +152,20 @@ export default async function TrendRadarPage({
             위탁 판매 상품 발굴 · 30일 누적 후 4점수 정확도 ↑
           </p>
         </div>
-        <Link
-          href="/admin/trend-radar/sources"
-          className="text-sm text-gray-700 hover:text-black underline"
-        >
-          소스 헬스 →
-        </Link>
+        <div className="flex items-center gap-3">
+          <Link
+            href="/admin/trend-radar/cohort-lift"
+            className="text-sm rounded border border-emerald-300 bg-emerald-50 text-emerald-800 hover:bg-emerald-100 px-3 py-1.5"
+          >
+            📐 Cohort Lift (z-score) →
+          </Link>
+          <Link
+            href="/admin/trend-radar/sources"
+            className="text-sm text-gray-700 hover:text-black underline"
+          >
+            소스 헬스 →
+          </Link>
+        </div>
       </header>
 
       {/* KPI 5종 */}
