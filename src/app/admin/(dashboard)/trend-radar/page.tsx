@@ -47,6 +47,25 @@ async function fetchTvGgsanMatchSummary() {
   return { totalRows: rows.length, uniqueKw, imminentRows, imminentKw }
 }
 
+async function fetchCausalLiftKpi() {
+  const sb = createAdminClient()
+  // 신규 테이블 — types 재생성 전이라 as any 캐스팅.
+  try {
+    const { data, error } = await (sb as any)
+      .from('jimscanner_actions_lift_cache')
+      .select('is_significant')
+      .limit(2000)
+    if (error) return { total: 0, sig: 0 }
+    const rows = (data ?? []) as Array<{ is_significant: boolean | null }>
+    return {
+      total: rows.length,
+      sig: rows.filter((r) => r.is_significant).length,
+    }
+  } catch {
+    return { total: 0, sig: 0 }
+  }
+}
+
 async function fetchTvPushes() {
   const sb = createAdminClient()
   const since = new Date(Date.now() - 30 * 86400_000).toISOString()
@@ -132,10 +151,11 @@ export default async function TrendRadarPage({
   const sp = await searchParams
   const category = (CATEGORIES.includes(sp.cat as Category) ? sp.cat : 'all') as Category
 
-  const [{ products, scores, kpis }, tvPushes, tvGgsan] = await Promise.all([
+  const [{ products, scores, kpis }, tvPushes, tvGgsan, causalLift] = await Promise.all([
     fetchData(category),
     fetchTvPushes(),
     fetchTvGgsanMatchSummary(),
+    fetchCausalLiftKpi(),
   ])
 
   const sorted = products
@@ -160,13 +180,20 @@ export default async function TrendRadarPage({
         </Link>
       </header>
 
-      {/* KPI 5종 */}
-      <section className="grid grid-cols-2 md:grid-cols-5 gap-4">
+      {/* KPI 6종 */}
+      <section className="grid grid-cols-2 md:grid-cols-6 gap-4">
         <KpiCard label="canonical 상품" value={kpis.products} hint="누적 매핑" />
         <KpiCard label="LLM 분류" value={kpis.llmClassified} hint={`${kpis.products > 0 ? Math.round((kpis.llmClassified / kpis.products) * 100) : 0}% 진척`} />
         <KpiCard label="고득점 (≥50)" value={kpis.top} hint="final_score 기준" />
         <KpiCard label="supplier 매칭" value={kpis.supplier} hint="도매꾹·알리 검출" />
         <KpiCard label="TV push" value={kpis.tv} hint="홈쇼핑 편성 검출" />
+        <Link href="/admin/trend-radar/causal-lift" className="block group">
+          <KpiCard
+            label="유의한 lift 액션"
+            value={causalLift.sig}
+            hint={`/ ${causalLift.total} 액션 · 인과 보드 →`}
+          />
+        </Link>
       </section>
 
       {/* 카테고리 탭 */}
