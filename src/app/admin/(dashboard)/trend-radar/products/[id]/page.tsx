@@ -1,6 +1,7 @@
 import Link from 'next/link'
 import { notFound } from 'next/navigation'
 import { createAdminClient } from '@/lib/auth/admin-supabase'
+import { computeImitationDecay, type ImitationObservation } from '@/lib/scoring/imitation-decay'
 
 export const dynamic = 'force-dynamic'
 
@@ -36,9 +37,15 @@ interface ScoreRow {
   computed_at: string
 }
 
+interface ImitationTrackRow {
+  observed_at: string
+  serp_listing_count: number
+  new_listings_24h: number
+}
+
 async function fetchProduct(id: string) {
   const sb = createAdminClient()
-  const [prodRes, aliasRes, scoreRes] = await Promise.all([
+  const [prodRes, aliasRes, scoreRes, imitRes] = await Promise.all([
     sb.from('jimscanner_trends_products').select('*').eq('id', id).single(),
     sb
       .from('jimscanner_trends_aliases')
@@ -51,6 +58,12 @@ async function fetchProduct(id: string) {
       .eq('product_id', id)
       .order('computed_at', { ascending: false })
       .limit(30),
+    sb
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      .from('jimscanner_trends_imitation_track' as any)
+      .select('observed_at, serp_listing_count, new_listings_24h')
+      .eq('product_id', id)
+      .order('observed_at', { ascending: true }),
   ])
 
   if (prodRes.error || !prodRes.data) return null
@@ -59,6 +72,7 @@ async function fetchProduct(id: string) {
     product: prodRes.data as ProductRow,
     aliases: (aliasRes.data ?? []) as AliasRow[],
     scoreHistory: (scoreRes.data ?? []) as ScoreRow[],
+    imitationRows: ((imitRes.data ?? []) as unknown as ImitationTrackRow[]) ?? [],
   }
 }
 
@@ -70,8 +84,13 @@ export default async function ProductDetailPage({
   const { id } = await params
   const data = await fetchProduct(id)
   if (!data) notFound()
-  const { product, aliases, scoreHistory } = data
+  const { product, aliases, scoreHistory, imitationRows } = data
   const latest = scoreHistory[0]
+  const imitObs: ImitationObservation[] = imitationRows.map((r) => ({
+    observed_at: r.observed_at,
+    serp_listing_count: r.serp_listing_count,
+  }))
+  const imitDecay = computeImitationDecay(imitObs)
 
   return (
     <div className="space-y-6 p-6">
@@ -118,6 +137,54 @@ export default async function ProductDetailPage({
           <ScoreCard label="competition" value={latest.competition_score} />
         </section>
       )}
+
+      {/* 모방 클리프 미니 차트 */}
+      <section>
+        <div className="flex items-baseline justify-between mb-2">
+          <h2 className="text-sm font-semibold">모방 클리프 (카피캣 SERP 증가)</h2>
+          <Link
+            href="/admin/trend-radar/imitation"
+            className="text-xs text-gray-500 hover:text-black underline"
+          >
+            전체 추적기 →
+          </Link>
+        </div>
+        {imitationRows.length === 0 ? (
+          <div className="rounded border border-dashed border-gray-200 p-4 text-xs text-gray-500">
+            추적 데이터 없음. /api/cron/track-imitation 가동 후 표시.
+          </div>
+        ) : (
+          <div className="rounded border border-gray-200 p-3 grid grid-cols-1 md:grid-cols-4 gap-3 items-center">
+            <ImitationMiniChart rows={imitationRows} />
+            <div className="text-xs">
+              <div className="text-gray-500 uppercase">최근 SERP</div>
+              <div className="text-xl font-bold">{imitDecay.latest_count}</div>
+            </div>
+            <div className="text-xs">
+              <div className="text-gray-500 uppercase">반감기</div>
+              <div className="text-xl font-bold">
+                {imitDecay.imitation_half_life_days
+                  ? `${imitDecay.imitation_half_life_days.toFixed(1)}일`
+                  : '—'}
+              </div>
+            </div>
+            <div className="text-xs">
+              <div className="text-gray-500 uppercase">진입 윈도우</div>
+              <div
+                className={`text-xl font-bold ${
+                  imitDecay.severity === 'closing'
+                    ? 'text-red-700'
+                    : imitDecay.severity === 'narrow'
+                      ? 'text-amber-700'
+                      : ''
+                }`}
+              >
+                {imitDecay.dday_label}
+              </div>
+            </div>
+          </div>
+        )}
+      </section>
 
       {/* score 시계열 (최근 30 row) */}
       {scoreHistory.length > 1 && (
@@ -183,6 +250,34 @@ export default async function ProductDetailPage({
         first_seen: {product.first_seen_at} · last_seen: {product.last_seen_at}
       </section>
     </div>
+  )
+}
+
+function ImitationMiniChart({ rows }: { rows: ImitationTrackRow[] }) {
+  if (rows.length < 2) {
+    return <span className="text-xs text-gray-400">데이터 1점 — 추이 미정</span>
+  }
+  const counts = rows.map((r) => r.serp_listing_count)
+  const max = Math.max(...counts, 1)
+  const min = Math.min(...counts, 0)
+  const w = 200
+  const h = 60
+  const span = Math.max(1, max - min)
+  const pts = counts.map((c, i) => {
+    const x = (i / (counts.length - 1)) * w
+    const y = h - ((c - min) / span) * h
+    return `${x.toFixed(1)},${y.toFixed(1)}`
+  })
+  return (
+    <svg width={w} height={h} className="inline-block">
+      <polyline
+        fill="none"
+        stroke="currentColor"
+        strokeWidth={2}
+        points={pts.join(' ')}
+        className="text-amber-600"
+      />
+    </svg>
   )
 }
 
