@@ -1,6 +1,10 @@
 import Link from 'next/link'
 import { notFound } from 'next/navigation'
 import { createAdminClient } from '@/lib/auth/admin-supabase'
+import {
+  computeRetentionFactor,
+  classifyRetention,
+} from '@/app/admin/(dashboard)/trend-radar/resale/_logic'
 
 export const dynamic = 'force-dynamic'
 
@@ -38,7 +42,7 @@ interface ScoreRow {
 
 async function fetchProduct(id: string) {
   const sb = createAdminClient()
-  const [prodRes, aliasRes, scoreRes] = await Promise.all([
+  const [prodRes, aliasRes, scoreRes, resaleRes] = await Promise.all([
     sb.from('jimscanner_trends_products').select('*').eq('id', id).single(),
     sb
       .from('jimscanner_trends_aliases')
@@ -51,6 +55,11 @@ async function fetchProduct(id: string) {
       .eq('product_id', id)
       .order('computed_at', { ascending: false })
       .limit(30),
+    sb
+      .from('jimscanner_trends_resale_latest' as never)
+      .select('*')
+      .eq('product_id', id)
+      .maybeSingle(),
   ])
 
   if (prodRes.error || !prodRes.data) return null
@@ -59,6 +68,7 @@ async function fetchProduct(id: string) {
     product: prodRes.data as ProductRow,
     aliases: (aliasRes.data ?? []) as AliasRow[],
     scoreHistory: (scoreRes.data ?? []) as ScoreRow[],
+    resale: (resaleRes.data ?? null) as any,
   }
 }
 
@@ -70,13 +80,23 @@ export default async function ProductDetailPage({
   const { id } = await params
   const data = await fetchProduct(id)
   if (!data) notFound()
-  const { product, aliases, scoreHistory } = data
+  const { product, aliases, scoreHistory, resale } = data
   const latest = scoreHistory[0]
+  const retention = resale ? computeRetentionFactor(resale) : null
+  const retentionCls = resale ? classifyRetention(resale, retention) : null
 
   return (
     <div className="space-y-6 p-6">
-      <header className="flex items-baseline justify-between">
-        <div>
+      <header className="flex items-start justify-between gap-4">
+        {retentionCls && retention != null && (
+          <RetentionBadge
+            tone={retentionCls.tone}
+            label={retentionCls.label}
+            retention={retention}
+            resale={resale}
+          />
+        )}
+        <div className="flex-1 order-first">
           <Link href="/admin/trend-radar" className="text-sm text-gray-500 hover:text-black">
             ← 대시보드
           </Link>
@@ -183,6 +203,61 @@ export default async function ProductDetailPage({
         first_seen: {product.first_seen_at} · last_seen: {product.last_seen_at}
       </section>
     </div>
+  )
+}
+
+function RetentionBadge({
+  tone,
+  label,
+  retention,
+  resale,
+}: {
+  tone: 'red' | 'green' | 'gray'
+  label: string
+  retention: number
+  resale: any
+}) {
+  const cls =
+    tone === 'red'
+      ? 'border-red-300 bg-red-50 text-red-900'
+      : tone === 'green'
+        ? 'border-emerald-300 bg-emerald-50 text-emerald-900'
+        : 'border-gray-200 bg-gray-50 text-gray-700'
+  const fmtPct = (v: number | null | undefined) =>
+    v == null || !Number.isFinite(v) ? '—' : `${(v * 100).toFixed(0)}%`
+  return (
+    <Link
+      href="/admin/trend-radar/resale"
+      className={`shrink-0 w-44 rounded border p-3 text-xs ${cls} hover:opacity-90`}
+      title="중고시장 보드로 이동"
+    >
+      <div className="flex items-baseline justify-between">
+        <span className="font-semibold text-[11px] uppercase">중고 시장</span>
+        <span className="text-[10px] px-1.5 py-0.5 rounded bg-white/60 font-semibold">
+          {label}
+        </span>
+      </div>
+      <div className="text-2xl font-bold mt-1 font-mono">{retention.toFixed(2)}</div>
+      <div className="text-[10px] text-gray-600 mt-1">
+        retention_factor (0~1)
+      </div>
+      <div className="mt-2 grid grid-cols-3 gap-1 text-[10px]">
+        <div className="text-center">
+          <div className="text-gray-500">잔존</div>
+          <div className="font-mono">{fmtPct(resale.price_ratio_avg)}</div>
+        </div>
+        <div className="text-center">
+          <div className="text-gray-500">회전</div>
+          <div className="font-mono">
+            {resale.days_to_sold_avg != null ? `${Math.round(resale.days_to_sold_avg)}d` : '—'}
+          </div>
+        </div>
+        <div className="text-center">
+          <div className="text-gray-500">매물</div>
+          <div className="font-mono">{resale.listings_active_total ?? '—'}</div>
+        </div>
+      </div>
+    </Link>
   )
 }
 
