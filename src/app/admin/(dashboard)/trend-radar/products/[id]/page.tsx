@@ -36,9 +36,19 @@ interface ScoreRow {
   computed_at: string
 }
 
+interface ElasticityRow {
+  epsilon: number | null
+  std_err: number | null
+  r2: number | null
+  sample_n: number
+  price_min: number | null
+  price_max: number | null
+  computed_at: string
+}
+
 async function fetchProduct(id: string) {
   const sb = createAdminClient()
-  const [prodRes, aliasRes, scoreRes] = await Promise.all([
+  const [prodRes, aliasRes, scoreRes, elasticityRes] = await Promise.all([
     sb.from('jimscanner_trends_products').select('*').eq('id', id).single(),
     sb
       .from('jimscanner_trends_aliases')
@@ -51,6 +61,11 @@ async function fetchProduct(id: string) {
       .eq('product_id', id)
       .order('computed_at', { ascending: false })
       .limit(30),
+    (sb as any)
+      .from('jimscanner_trends_elasticity')
+      .select('epsilon, std_err, r2, sample_n, price_min, price_max, computed_at')
+      .eq('product_id', id)
+      .maybeSingle(),
   ])
 
   if (prodRes.error || !prodRes.data) return null
@@ -59,7 +74,15 @@ async function fetchProduct(id: string) {
     product: prodRes.data as ProductRow,
     aliases: (aliasRes.data ?? []) as AliasRow[],
     scoreHistory: (scoreRes.data ?? []) as ScoreRow[],
+    elasticity: (elasticityRes?.data ?? null) as ElasticityRow | null,
   }
+}
+
+function elasticityBand(eps: number | null): { label: string; cls: string } {
+  if (eps === null || !Number.isFinite(eps)) return { label: 'N/A', cls: 'bg-gray-100 text-gray-600' }
+  if (eps < -1) return { label: '가격민감 (ε<-1)', cls: 'bg-red-100 text-red-700' }
+  if (eps <= -0.3) return { label: '중간 (-1≤ε≤-0.3)', cls: 'bg-amber-100 text-amber-700' }
+  return { label: '무감 (ε>-0.3)', cls: 'bg-emerald-100 text-emerald-700' }
 }
 
 export default async function ProductDetailPage({
@@ -70,8 +93,9 @@ export default async function ProductDetailPage({
   const { id } = await params
   const data = await fetchProduct(id)
   if (!data) notFound()
-  const { product, aliases, scoreHistory } = data
+  const { product, aliases, scoreHistory, elasticity } = data
   const latest = scoreHistory[0]
+  const epsBand = elasticityBand(elasticity?.epsilon ?? null)
 
   return (
     <div className="space-y-6 p-6">
@@ -107,6 +131,45 @@ export default async function ProductDetailPage({
           )}
         </div>
       </header>
+
+      {/* 가격탄력성 ε 배지 */}
+      {elasticity && (
+        <section className="rounded border border-gray-200 p-4">
+          <div className="flex items-baseline justify-between flex-wrap gap-2">
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="text-sm font-semibold">가격탄력성</span>
+              <span className={`text-xs px-2 py-0.5 rounded font-medium ${epsBand.cls}`}>
+                {epsBand.label}
+              </span>
+              <span className="font-mono text-2xl font-bold">
+                ε = {elasticity.epsilon === null ? '—' : elasticity.epsilon.toFixed(2)}
+              </span>
+              {elasticity.std_err !== null && (
+                <span className="text-xs text-gray-500 font-mono">
+                  ± {elasticity.std_err.toFixed(2)}
+                </span>
+              )}
+            </div>
+            <Link
+              href="/admin/trend-radar/elasticity"
+              className="text-xs text-gray-500 hover:text-black underline"
+            >
+              보드 →
+            </Link>
+          </div>
+          <div className="text-xs text-gray-500 mt-2 font-mono">
+            R²={elasticity.r2 === null ? '—' : elasticity.r2.toFixed(2)} · n={elasticity.sample_n}
+            {elasticity.price_min && elasticity.price_max && (
+              <>
+                {' · P ∈ ['}
+                {Math.round(elasticity.price_min).toLocaleString()}–
+                {Math.round(elasticity.price_max).toLocaleString()}
+                {'] KRW'}
+              </>
+            )}
+          </div>
+        </section>
+      )}
 
       {/* 4점수 카드 */}
       {latest && (
