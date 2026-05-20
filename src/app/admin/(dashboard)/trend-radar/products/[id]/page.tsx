@@ -1,6 +1,10 @@
 import Link from 'next/link'
 import { notFound } from 'next/navigation'
 import { createAdminClient } from '@/lib/auth/admin-supabase'
+import {
+  type CompetitorListingRow,
+  summarize as summarizeEdge,
+} from '@/lib/competitor-edge'
 
 export const dynamic = 'force-dynamic'
 
@@ -38,7 +42,7 @@ interface ScoreRow {
 
 async function fetchProduct(id: string) {
   const sb = createAdminClient()
-  const [prodRes, aliasRes, scoreRes] = await Promise.all([
+  const [prodRes, aliasRes, scoreRes, listingRes] = await Promise.all([
     sb.from('jimscanner_trends_products').select('*').eq('id', id).single(),
     sb
       .from('jimscanner_trends_aliases')
@@ -51,6 +55,11 @@ async function fetchProduct(id: string) {
       .eq('product_id', id)
       .order('computed_at', { ascending: false })
       .limit(30),
+    (sb as any)
+      .from('jimscanner_serp_competitor_latest')
+      .select('*')
+      .eq('product_id', id)
+      .order('rank', { ascending: true }),
   ])
 
   if (prodRes.error || !prodRes.data) return null
@@ -59,6 +68,7 @@ async function fetchProduct(id: string) {
     product: prodRes.data as ProductRow,
     aliases: (aliasRes.data ?? []) as AliasRow[],
     scoreHistory: (scoreRes.data ?? []) as ScoreRow[],
+    competitorListings: (listingRes.data ?? []) as CompetitorListingRow[],
   }
 }
 
@@ -70,8 +80,9 @@ export default async function ProductDetailPage({
   const { id } = await params
   const data = await fetchProduct(id)
   if (!data) notFound()
-  const { product, aliases, scoreHistory } = data
+  const { product, aliases, scoreHistory, competitorListings } = data
   const latest = scoreHistory[0]
+  const edge = summarizeEdge(competitorListings)
 
   return (
     <div className="space-y-6 p-6">
@@ -118,6 +129,79 @@ export default async function ProductDetailPage({
           <ScoreCard label="competition" value={latest.competition_score} />
         </section>
       )}
+
+      {/* Beat-Them-On-X 카드 */}
+      <section>
+        <h2 className="text-sm font-semibold mb-2">
+          Beat-Them-On-X — 1위 대비 실행 레버
+          {edge.hasData && (
+            <span className="ml-2 text-xs font-mono text-gray-500">
+              edge gap {edge.gap}/100
+            </span>
+          )}
+        </h2>
+        {!edge.hasData ? (
+          <div className="rounded border border-dashed border-gray-200 p-4 text-xs text-gray-400">
+            SERP 스냅샷 없음 — <code>scripts/scout-serp-competitors.mjs</code> 실행 필요.
+          </div>
+        ) : (
+          <div className="rounded border border-gray-200 p-4 space-y-3">
+            <div className="text-xs text-gray-500">
+              1위 판매자:{' '}
+              <span className="text-black font-medium">
+                {edge.leader?.seller ?? '—'}
+              </span>
+              {edge.leader?.channel && (
+                <span className="ml-2 text-gray-400">({edge.leader.channel})</span>
+              )}
+              {edge.leader?.listing_url && (
+                <a
+                  href={edge.leader.listing_url}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="ml-2 text-blue-600 hover:underline"
+                >
+                  원본 ↗
+                </a>
+              )}
+            </div>
+            {edge.levers.length === 0 ? (
+              <p className="text-xs text-gray-400">
+                1위가 모든 레버에서 강함 — 동일 상품 진입은 비추천.
+              </p>
+            ) : (
+              <ul className="divide-y divide-gray-100">
+                {edge.levers.map((l) => (
+                  <li key={l.key} className="py-2 grid grid-cols-12 gap-2 items-center">
+                    <div className="col-span-3 text-sm font-medium">{l.label}</div>
+                    <div className="col-span-3 text-xs text-gray-500">
+                      1위: <span className="text-black">{l.topValue}</span>
+                    </div>
+                    <div className="col-span-5 text-sm text-gray-800">{l.action}</div>
+                    <div className="col-span-1 text-right text-xs font-mono">
+                      <span
+                        className={
+                          l.priority >= 60
+                            ? 'text-emerald-600 font-bold'
+                            : l.priority >= 40
+                            ? 'text-amber-600'
+                            : 'text-gray-400'
+                        }
+                      >
+                        {l.priority}
+                      </span>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            )}
+            <p className="text-[10px] text-gray-400">
+              edge gap 은 약한 레버 top 3 priority 평균(0~100). score_components.competitor_edge_gap
+              으로 final_score 에도 합산.
+            </p>
+          </div>
+        )}
+      </section>
 
       {/* score 시계열 (최근 30 row) */}
       {scoreHistory.length > 1 && (
