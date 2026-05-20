@@ -123,6 +123,26 @@ console.log(
   `[${new Date().toISOString()}] HTTP crons done — ${okCount} ok, ${failCount} fail in ${totalMs}ms`,
 )
 
+// sample-review-curves: 로컬에서 Supabase 직접 적재 (HTTP cron 없음).
+//   filter 가 걸리면 건너뜀.
+const skipReviewCurves = !!filter || args.includes('--no-review-curves')
+if (!skipReviewCurves) {
+  console.log(`[${new Date().toISOString()}] launching sample-review-curves`)
+  const scriptPath = resolvePath(__dirname, 'sample-review-curves.mjs')
+  const exit = await new Promise((resolve) => {
+    const child = spawn(process.execPath, ['--env-file=.env.local', scriptPath], {
+      stdio: 'inherit',
+      env: process.env,
+    })
+    child.on('exit', (code) => resolve(code ?? 0))
+    child.on('error', (err) => {
+      console.error(`  sample-review-curves spawn error: ${err.message}`)
+      resolve(1)
+    })
+  })
+  if (exit !== 0) failCount++
+}
+
 // classify-trends-llm: 로컬 Claude CLI 단계.
 //   filter 가 걸리면 (특정 cron 만 돌리는 경우) 건너뜀.
 //   --no-classify 플래그도 지원.
