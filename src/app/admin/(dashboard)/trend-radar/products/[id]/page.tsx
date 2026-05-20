@@ -75,7 +75,7 @@ export default async function ProductDetailPage({
 
   return (
     <div className="space-y-6 p-6">
-      <header className="flex items-baseline justify-between">
+      <header className="flex items-baseline justify-between gap-4">
         <div>
           <Link href="/admin/trend-radar" className="text-sm text-gray-500 hover:text-black">
             ← 대시보드
@@ -105,6 +105,14 @@ export default async function ProductDetailPage({
               {product.llm_model ? ` · ${product.llm_model}` : ''}
             </p>
           )}
+        </div>
+        <div className="shrink-0">
+          <Link
+            href={`/admin/trend-radar/products/${product.id}/title`}
+            className="inline-flex items-center px-3 py-2 rounded bg-black text-white text-sm font-medium hover:bg-gray-800"
+          >
+            리스팅 제목 옵티마이저 →
+          </Link>
         </div>
       </header>
 
