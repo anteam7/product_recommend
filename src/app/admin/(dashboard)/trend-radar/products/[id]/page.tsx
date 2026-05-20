@@ -36,9 +36,16 @@ interface ScoreRow {
   computed_at: string
 }
 
+interface IntentRow {
+  intent_bucket: string
+  share: number
+  query_count: number
+  computed_at: string
+}
+
 async function fetchProduct(id: string) {
   const sb = createAdminClient()
-  const [prodRes, aliasRes, scoreRes] = await Promise.all([
+  const [prodRes, aliasRes, scoreRes, intentRes] = await Promise.all([
     sb.from('jimscanner_trends_products').select('*').eq('id', id).single(),
     sb
       .from('jimscanner_trends_aliases')
@@ -51,6 +58,10 @@ async function fetchProduct(id: string) {
       .eq('product_id', id)
       .order('computed_at', { ascending: false })
       .limit(30),
+    (sb as any)
+      .from('jimscanner_trends_query_intent_latest')
+      .select('intent_bucket, share, query_count, computed_at')
+      .eq('product_id', id),
   ])
 
   if (prodRes.error || !prodRes.data) return null
@@ -59,6 +70,7 @@ async function fetchProduct(id: string) {
     product: prodRes.data as ProductRow,
     aliases: (aliasRes.data ?? []) as AliasRow[],
     scoreHistory: (scoreRes.data ?? []) as ScoreRow[],
+    intents: ((intentRes as any)?.data ?? []) as IntentRow[],
   }
 }
 
@@ -70,7 +82,7 @@ export default async function ProductDetailPage({
   const { id } = await params
   const data = await fetchProduct(id)
   if (!data) notFound()
-  const { product, aliases, scoreHistory } = data
+  const { product, aliases, scoreHistory, intents } = data
   const latest = scoreHistory[0]
 
   return (
@@ -152,6 +164,9 @@ export default async function ProductDetailPage({
         </section>
       )}
 
+      {/* 인텐트 믹스 도넛 */}
+      {intents.length > 0 && <IntentDonut intents={intents} />}
+
       {/* score breakdown */}
       {latest?.score_components && (
         <section>
@@ -183,6 +198,94 @@ export default async function ProductDetailPage({
         first_seen: {product.first_seen_at} · last_seen: {product.last_seen_at}
       </section>
     </div>
+  )
+}
+
+const INTENT_BUCKETS = ['price', 'compare', 'howto', 'trouble', 'buy_source'] as const
+const INTENT_LABEL: Record<string, string> = {
+  price: '가격탐색',
+  compare: '비교선택',
+  howto: '사용법/품질',
+  trouble: '트러블슈팅',
+  buy_source: '구매처/정품',
+}
+const INTENT_COLOR: Record<string, string> = {
+  price: '#3b82f6',
+  compare: '#a855f7',
+  howto: '#10b981',
+  trouble: '#f59e0b',
+  buy_source: '#f43f5e',
+}
+
+function IntentDonut({ intents }: { intents: IntentRow[] }) {
+  const byBucket = new Map(intents.map((i) => [i.intent_bucket, i]))
+  const totalQ = intents.reduce((n, i) => n + Number(i.query_count ?? 0), 0)
+  const buy = byBucket.get('buy_source')
+  const buyShare = Number(buy?.share ?? 0)
+
+  // SVG conic-style ring via stroke-dasharray on a circle
+  const R = 52
+  const C = 2 * Math.PI * R
+  let acc = 0
+  const segments = INTENT_BUCKETS.map((b) => {
+    const share = Number(byBucket.get(b)?.share ?? 0)
+    if (share <= 0) return null
+    const dash = share * C
+    const offset = -acc
+    acc += dash
+    return { bucket: b, share, dash, offset }
+  }).filter(Boolean) as { bucket: string; share: number; dash: number; offset: number }[]
+
+  return (
+    <section>
+      <h2 className="text-sm font-semibold mb-2">
+        쿼리 인텐트 믹스{' '}
+        <span className="text-xs font-normal text-gray-500 ml-1">총 {totalQ} 분류건</span>
+        {buyShare >= 0.3 && (
+          <span className="ml-2 text-xs px-2 py-0.5 rounded bg-rose-100 text-rose-700 font-semibold">
+            🚀 구매처 우세 ({Math.round(buyShare * 100)}%) — 핀 큐 우선
+          </span>
+        )}
+      </h2>
+      <div className="flex items-center gap-6 rounded border border-gray-200 p-4">
+        <svg width="140" height="140" viewBox="0 0 140 140">
+          <circle cx="70" cy="70" r={R} fill="none" stroke="#e5e7eb" strokeWidth="20" />
+          {segments.map((s) => (
+            <circle
+              key={s.bucket}
+              cx="70"
+              cy="70"
+              r={R}
+              fill="none"
+              stroke={INTENT_COLOR[s.bucket]}
+              strokeWidth="20"
+              strokeDasharray={`${s.dash} ${C - s.dash}`}
+              strokeDashoffset={s.offset}
+              transform="rotate(-90 70 70)"
+            />
+          ))}
+        </svg>
+        <div className="grid grid-cols-1 gap-1 text-sm">
+          {INTENT_BUCKETS.map((b) => {
+            const r = byBucket.get(b)
+            const share = Number(r?.share ?? 0)
+            return (
+              <div key={b} className="flex items-center gap-2">
+                <span
+                  className="inline-block w-3 h-3 rounded"
+                  style={{ background: INTENT_COLOR[b] }}
+                />
+                <span className="text-gray-700 w-24">{INTENT_LABEL[b]}</span>
+                <span className="font-mono text-gray-600 w-12 text-right">
+                  {Math.round(share * 100)}%
+                </span>
+                <span className="text-xs text-gray-400">({r?.query_count ?? 0})</span>
+              </div>
+            )
+          })}
+        </div>
+      </div>
+    </section>
   )
 }
 
