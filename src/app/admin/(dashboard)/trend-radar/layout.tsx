@@ -12,6 +12,7 @@ const NAV = [
   { href: '/admin/trend-radar/ggsan', label: 'ggsan 카탈로그' },
   { href: '/admin/trend-radar/opportunity', label: 'Opportunity' },
   { href: '/admin/trend-radar/pins', label: '핀' },
+  { href: '/admin/trend-radar/portfolio-cannibal', label: '카니발 맵' },
   { href: '/admin/trend-radar/sources', label: '소스 헬스' },
 ]
 
