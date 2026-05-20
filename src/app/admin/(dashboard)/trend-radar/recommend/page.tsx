@@ -92,6 +92,54 @@ function buildHref(current: Record<string, string>, override: Record<string, str
   return '/admin/trend-radar/recommend' + (qs ? `?${qs}` : '')
 }
 
+async function fetchQualityMap(
+  goodsNos: string[],
+): Promise<Map<string, { gate: string; overall_score: number; issue_count: number }>> {
+  const map = new Map<string, { gate: string; overall_score: number; issue_count: number }>()
+  if (!goodsNos.length) return map
+  const sb = createAdminClient()
+  // 테이블은 generated types 미반영 — `as any` 캐스팅. sku_listing_quality.sql 적용 전제.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const { data, error } = await (sb as any)
+    .from('jimscanner_ggsan_listing_quality')
+    .select('goods_no, gate, overall_score, issues')
+    .in('goods_no', goodsNos)
+  if (error || !data) return map
+  for (const row of data as Array<{
+    goods_no: string
+    gate: string
+    overall_score: number
+    issues: unknown[] | null
+  }>) {
+    map.set(row.goods_no, {
+      gate: row.gate,
+      overall_score: Number(row.overall_score ?? 0),
+      issue_count: Array.isArray(row.issues) ? row.issues.length : 0,
+    })
+  }
+  return map
+}
+
+function qualityGateChip(q: { gate: string; overall_score: number; issue_count: number } | undefined) {
+  if (!q) {
+    return (
+      <span className="bg-gray-100 text-gray-500 text-[10px] px-1.5 py-0.5 rounded font-mono">⚪ unscored</span>
+    )
+  }
+  const cls =
+    q.gate === 'go'
+      ? 'bg-emerald-100 text-emerald-800'
+      : q.gate === 'fix'
+        ? 'bg-amber-100 text-amber-800'
+        : 'bg-red-100 text-red-800'
+  const icon = q.gate === 'go' ? '🟢' : q.gate === 'fix' ? '🟡' : '🔴'
+  return (
+    <span className={`${cls} text-[10px] px-1.5 py-0.5 rounded font-mono`}>
+      {icon} {q.gate} · {q.overall_score.toFixed(1)} ({q.issue_count}이슈)
+    </span>
+  )
+}
+
 function sourceLabel(s: string): string {
   switch (s) {
     case 'naver_shopping_hot': return '🛍 쇼핑hot'
@@ -123,6 +171,9 @@ export default async function RecommendPage({
   }
 
   const { rows, error } = await fetchRecommend({ days: validDays, minSim: validSim, imminentOnly, cate })
+
+  // quality_gate 조인 (jimscanner_ggsan_listing_quality) — 낮은 점수 SKU 자동 보류 표시.
+  const qualityMap = await fetchQualityMap(rows.map((r) => r.goods_no))
 
   // KPI
   const total = rows.length
@@ -235,16 +286,21 @@ export default async function RecommendPage({
         </div>
       ) : (
         <div className="space-y-2">
-          {rows.map((r, i) => (
+          {rows.map((r, i) => {
+            const q = qualityMap.get(r.goods_no)
+            const held = q?.gate === 'reshoot'
+            return (
             <a
               key={r.goods_no}
               href={r.detail_url ?? '#'}
               target="_blank"
               rel="noopener"
               className={`block rounded border overflow-hidden hover:shadow-sm transition-all ${
-                r.is_imminent
-                  ? 'border-red-200 bg-red-50/40 hover:bg-red-50'
-                  : 'border-gray-200 hover:bg-gray-50'
+                held
+                  ? 'border-red-300 bg-red-50/70 hover:bg-red-50 opacity-70'
+                  : r.is_imminent
+                    ? 'border-red-200 bg-red-50/40 hover:bg-red-50'
+                    : 'border-gray-200 hover:bg-gray-50'
               }`}
             >
               <div className="flex items-start gap-3 p-3">
@@ -271,8 +327,14 @@ export default async function RecommendPage({
                   <div className="text-sm font-medium leading-snug" title={r.title}>
                     {r.title}
                   </div>
-                  <div className="text-xs text-gray-500">
-                    {r.cate_label ?? r.cate_cd} · {r.goods_no}
+                  <div className="text-xs text-gray-500 flex items-center gap-2 flex-wrap">
+                    <span>{r.cate_label ?? r.cate_cd} · {r.goods_no}</span>
+                    {qualityGateChip(q)}
+                    {held && (
+                      <span className="bg-red-600 text-white text-[10px] px-1.5 py-0.5 rounded">
+                        ⚠ 자동 보류 (재촬영 필요)
+                      </span>
+                    )}
                   </div>
                   {/* 매칭 근거 */}
                   <div className="flex flex-wrap gap-2 text-xs pt-1">
@@ -310,7 +372,8 @@ export default async function RecommendPage({
                 </div>
               </div>
             </a>
-          ))}
+            )
+          })}
         </div>
       )}
 
