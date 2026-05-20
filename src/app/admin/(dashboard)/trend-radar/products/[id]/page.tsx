@@ -1,8 +1,20 @@
 import Link from 'next/link'
 import { notFound } from 'next/navigation'
 import { createAdminClient } from '@/lib/auth/admin-supabase'
+import { recommendedCacCeiling } from '@/lib/trends/repurchase-cadence'
 
 export const dynamic = 'force-dynamic'
+
+interface CadenceCardRow {
+  cadence_days_p25: number | null
+  cadence_days_p50: number
+  cadence_days_p75: number | null
+  ltv_proxy_krw: number | null
+  sample_size: number
+  confidence_score: number | null
+  category_top: string
+  category_mid: string | null
+}
 
 interface ProductRow {
   id: string
@@ -55,10 +67,32 @@ async function fetchProduct(id: string) {
 
   if (prodRes.error || !prodRes.data) return null
 
+  const product = prodRes.data as ProductRow
+
+  // 같은 category_top + (category_mid match 우선) 의 cadence row 1개 조회.
+  // 신규 테이블 — generated 타입 미반영. `as any` 캐스팅.
+  let cadence: CadenceCardRow | null = null
+  try {
+    const { data: cadenceList } = await (sb as any)
+      .from('jimscanner_trends_repurchase_cadence')
+      .select('cadence_days_p25, cadence_days_p50, cadence_days_p75, ltv_proxy_krw, sample_size, confidence_score, category_top, category_mid')
+      .eq('category_top', product.category_top)
+      .is('brand', null)
+    const list = (cadenceList ?? []) as CadenceCardRow[]
+    cadence =
+      list.find((r) => r.category_mid === product.category_mid) ??
+      list.find((r) => r.category_mid === null) ??
+      list[0] ??
+      null
+  } catch {
+    cadence = null
+  }
+
   return {
-    product: prodRes.data as ProductRow,
+    product,
     aliases: (aliasRes.data ?? []) as AliasRow[],
     scoreHistory: (scoreRes.data ?? []) as ScoreRow[],
+    cadence,
   }
 }
 
@@ -70,7 +104,7 @@ export default async function ProductDetailPage({
   const { id } = await params
   const data = await fetchProduct(id)
   if (!data) notFound()
-  const { product, aliases, scoreHistory } = data
+  const { product, aliases, scoreHistory, cadence } = data
   const latest = scoreHistory[0]
 
   return (
@@ -116,6 +150,59 @@ export default async function ProductDetailPage({
           <ScoreCard label="commerce" value={latest.commerce_score} />
           <ScoreCard label="supplier" value={latest.supplier_score} />
           <ScoreCard label="competition" value={latest.competition_score} />
+        </section>
+      )}
+
+      {/* Repurchase Cadence 카드 */}
+      {cadence && (
+        <section className="rounded border border-indigo-200 bg-indigo-50/50 p-4">
+          <div className="flex items-baseline justify-between mb-3 flex-wrap gap-2">
+            <h2 className="text-sm font-semibold text-indigo-900">🔁 Repurchase Cadence</h2>
+            <Link
+              href="/admin/trend-radar/ltv-cadence"
+              className="text-[11px] text-indigo-700 hover:underline"
+            >
+              매트릭스로 →
+            </Link>
+          </div>
+          <div className="grid grid-cols-2 md:grid-cols-5 gap-3 text-sm">
+            <div className="rounded bg-white border border-indigo-100 p-2 text-center">
+              <div className="text-[10px] text-gray-500">재구매 주기 p50</div>
+              <div className="text-xl font-bold font-mono text-indigo-900">{cadence.cadence_days_p50}일</div>
+              <div className="text-[10px] text-gray-400">
+                ({cadence.cadence_days_p25 ?? '—'} ~ {cadence.cadence_days_p75 ?? '—'})
+              </div>
+            </div>
+            <div className="rounded bg-white border border-indigo-100 p-2 text-center">
+              <div className="text-[10px] text-gray-500">LTV proxy</div>
+              <div className="text-xl font-bold font-mono text-indigo-900">
+                {cadence.ltv_proxy_krw ? `${cadence.ltv_proxy_krw.toLocaleString()}원` : '—'}
+              </div>
+              <div className="text-[10px] text-gray-400">연 환산 · retention 60%</div>
+            </div>
+            <div className="rounded bg-white border border-amber-300 p-2 text-center">
+              <div className="text-[10px] text-amber-700">권장 CAC 상한 (마진 30% · 회수 50%)</div>
+              <div className="text-xl font-bold font-mono text-amber-800">
+                {recommendedCacCeiling(cadence.ltv_proxy_krw, 0.3, 0.5)?.toLocaleString() ?? '—'}원
+              </div>
+            </div>
+            <div className="rounded bg-white border border-amber-300 p-2 text-center">
+              <div className="text-[10px] text-amber-700">공격형 (마진 50% · 회수 100%)</div>
+              <div className="text-xl font-bold font-mono text-amber-800">
+                {recommendedCacCeiling(cadence.ltv_proxy_krw, 0.5, 1.0)?.toLocaleString() ?? '—'}원
+              </div>
+            </div>
+            <div className="rounded bg-white border border-indigo-100 p-2 text-center">
+              <div className="text-[10px] text-gray-500">confidence</div>
+              <div className="text-xl font-bold font-mono text-indigo-900">
+                {cadence.confidence_score?.toFixed(2) ?? '—'}
+              </div>
+              <div className="text-[10px] text-gray-400">sample {cadence.sample_size}</div>
+            </div>
+          </div>
+          <p className="text-[11px] text-indigo-800 mt-2">
+            카테고리 평균 기반 추정. 브랜드 cohort 가 누적되면 자동 정밀화.
+          </p>
         </section>
       )}
 

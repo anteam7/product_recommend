@@ -43,6 +43,7 @@ const CRONS = [
   '/api/cron/collect-kca-press',
   '/api/cron/collect-gsc-daily',
   '/api/cron/collect-naver-tvtime',
+  '/api/cron/recompute-cadence',
 ]
 
 const SECRET = process.env.CRON_SECRET
