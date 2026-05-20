@@ -1,5 +1,6 @@
 import Link from 'next/link'
 import { createAdminClient } from '@/lib/auth/admin-supabase'
+import { fetchReturnRiskBatch, riskBadge, type ReturnRiskRow } from '@/lib/trend-radar/return-risk'
 
 export const dynamic = 'force-dynamic'
 
@@ -124,6 +125,11 @@ export default async function RecommendPage({
 
   const { rows, error } = await fetchRecommend({ days: validDays, minSim: validSim, imminentOnly, cate })
 
+  // 반품위험 일괄 조회 (RPC 미반영 시 빈 Map → graceful degrade)
+  const sb = createAdminClient()
+  const riskMap = await fetchReturnRiskBatch(sb, rows.map((r) => r.goods_no))
+  const highRiskCount = Array.from(riskMap.values()).filter((r) => r.risk_tier === 'high').length
+
   // KPI
   const total = rows.length
   const imminentCount = rows.filter((r) => r.is_imminent).length
@@ -205,12 +211,13 @@ export default async function RecommendPage({
       </div>
 
       {/* KPI */}
-      <section className="grid grid-cols-2 md:grid-cols-5 gap-3">
+      <section className="grid grid-cols-2 md:grid-cols-6 gap-3">
         <Kpi label="후보 상품" value={total} />
         <Kpi label="🔥 임박특가" value={imminentCount} highlight={imminentCount > 0} />
         <Kpi label="TV 매칭" value={tvHitCount} />
         <Kpi label="검색 매칭" value={searchHitCount} />
         <Kpi label="평균 final_score" value={avgFinal.toFixed(2)} />
+        <Kpi label="⚠ 반품위험 高" value={highRiskCount} highlight={highRiskCount > 0} />
       </section>
 
       {/* 에러 */}
@@ -235,14 +242,19 @@ export default async function RecommendPage({
         </div>
       ) : (
         <div className="space-y-2">
-          {rows.map((r, i) => (
+          {rows.map((r, i) => {
+            const risk: ReturnRiskRow | undefined = riskMap.get(r.goods_no)
+            const badge = risk ? riskBadge(risk.risk_tier) : null
+            return (
             <a
               key={r.goods_no}
               href={r.detail_url ?? '#'}
               target="_blank"
               rel="noopener"
               className={`block rounded border overflow-hidden hover:shadow-sm transition-all ${
-                r.is_imminent
+                risk?.risk_tier === 'high'
+                  ? 'border-red-300 bg-red-50/60 hover:bg-red-50'
+                  : r.is_imminent
                   ? 'border-red-200 bg-red-50/40 hover:bg-red-50'
                   : 'border-gray-200 hover:bg-gray-50'
               }`}
@@ -276,6 +288,14 @@ export default async function RecommendPage({
                   </div>
                   {/* 매칭 근거 */}
                   <div className="flex flex-wrap gap-2 text-xs pt-1">
+                    {badge && risk && risk.risk_tier !== 'low' && (
+                      <span
+                        className={`px-2 py-0.5 rounded border font-semibold ${badge.className}`}
+                        title={`baseline ${Number(risk.baseline_rate).toFixed(1)}% · ${risk.signals.join(', ')}`}
+                      >
+                        {badge.label} {risk.risk_score}
+                      </span>
+                    )}
                     {r.tv_match_count > 0 && (
                       <span className="bg-amber-100 text-amber-800 px-2 py-0.5 rounded">
                         📺 TV {r.tv_match_count}건 · &quot;{r.tv_top_keyword}&quot; ({r.tv_total_pushes}회 편성)
@@ -310,7 +330,8 @@ export default async function RecommendPage({
                 </div>
               </div>
             </a>
-          ))}
+            )
+          })}
         </div>
       )}
 
