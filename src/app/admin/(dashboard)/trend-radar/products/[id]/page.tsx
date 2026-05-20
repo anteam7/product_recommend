@@ -36,6 +36,12 @@ interface ScoreRow {
   computed_at: string
 }
 
+interface HaloEdge {
+  partner: string
+  source: string
+  weight: number
+}
+
 async function fetchProduct(id: string) {
   const sb = createAdminClient()
   const [prodRes, aliasRes, scoreRes] = await Promise.all([
@@ -55,10 +61,61 @@ async function fetchProduct(id: string) {
 
   if (prodRes.error || !prodRes.data) return null
 
+  const aliases = (aliasRes.data ?? []) as AliasRow[]
+  const haloEdges = await fetchHaloEdges(sb, aliases.map((a) => a.alias))
+
   return {
     product: prodRes.data as ProductRow,
-    aliases: (aliasRes.data ?? []) as AliasRow[],
+    aliases,
     scoreHistory: (scoreRes.data ?? []) as ScoreRow[],
+    haloEdges,
+  }
+}
+
+async function fetchHaloEdges(
+  sb: ReturnType<typeof createAdminClient>,
+  aliases: string[],
+): Promise<HaloEdge[]> {
+  if (aliases.length === 0) return []
+  // 'as any' — trends_v5_query_edges 마이그레이션 적용 전까지 타입 미생성
+  try {
+    const [aRes, bRes] = await Promise.all([
+      (sb as any)
+        .from('jimscanner_trends_query_edges')
+        .select('keyword_a, keyword_b, source, weight')
+        .in('keyword_a', aliases)
+        .order('weight', { ascending: false })
+        .limit(200),
+      (sb as any)
+        .from('jimscanner_trends_query_edges')
+        .select('keyword_a, keyword_b, source, weight')
+        .in('keyword_b', aliases)
+        .order('weight', { ascending: false })
+        .limit(200),
+    ])
+    if (aRes.error || bRes.error) return []
+    const seen = new Set(aliases.map((a) => a.toLowerCase()))
+    const acc = new Map<string, HaloEdge>()
+    type EdgeRaw = { keyword_a: string; keyword_b: string; source: string; weight: number }
+    for (const row of (aRes.data ?? []) as EdgeRaw[]) {
+      const partner = row.keyword_b
+      if (seen.has(partner.toLowerCase())) continue
+      const k = `${partner}|${row.source}`
+      const existing = acc.get(k)
+      if (existing) existing.weight += Number(row.weight ?? 0)
+      else acc.set(k, { partner, source: row.source, weight: Number(row.weight ?? 0) })
+    }
+    for (const row of (bRes.data ?? []) as EdgeRaw[]) {
+      const partner = row.keyword_a
+      if (seen.has(partner.toLowerCase())) continue
+      const k = `${partner}|${row.source}`
+      const existing = acc.get(k)
+      if (existing) existing.weight += Number(row.weight ?? 0)
+      else acc.set(k, { partner, source: row.source, weight: Number(row.weight ?? 0) })
+    }
+    return [...acc.values()].sort((a, b) => b.weight - a.weight).slice(0, 10)
+  } catch {
+    return []
   }
 }
 
@@ -70,7 +127,7 @@ export default async function ProductDetailPage({
   const { id } = await params
   const data = await fetchProduct(id)
   if (!data) notFound()
-  const { product, aliases, scoreHistory } = data
+  const { product, aliases, scoreHistory, haloEdges } = data
   const latest = scoreHistory[0]
 
   return (
@@ -161,6 +218,48 @@ export default async function ProductDetailPage({
           </pre>
         </section>
       )}
+
+      {/* SEO halo 묶음 — co-search graph */}
+      <section>
+        <h2 className="text-sm font-semibold mb-2">
+          🪢 SEO halo 묶음{' '}
+          <span className="text-xs font-normal text-gray-500 ml-1">
+            이 핀과 함께 검색되는 상위 쿼리 (co-search weight 기준 · 묶음 진입 권장)
+          </span>
+        </h2>
+        {haloEdges.length === 0 ? (
+          <div className="rounded border border-dashed border-gray-300 p-4 text-xs text-gray-500">
+            아직 co-search 엣지 없음. 마이그레이션 적용 + KST 03:40 cron 누적 후 표시.
+            <Link
+              href="/admin/trend-radar/co-search"
+              className="ml-2 underline hover:text-black"
+            >
+              그래프 보기 →
+            </Link>
+          </div>
+        ) : (
+          <div className="rounded border border-gray-200 divide-y divide-gray-100">
+            {haloEdges.map((h, i) => (
+              <div
+                key={i}
+                className="grid grid-cols-12 px-3 py-2 text-sm items-center hover:bg-emerald-50/30"
+              >
+                <div className="col-span-1 text-gray-400 font-mono text-xs">{i + 1}</div>
+                <div className="col-span-7">
+                  <span className="font-medium">{h.partner}</span>
+                </div>
+                <div className="col-span-2 text-xs text-gray-500">{h.source}</div>
+                <div className="col-span-2 text-right font-mono text-xs text-emerald-700">
+                  {h.weight.toFixed(1)}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+        <div className="text-xs text-gray-400 mt-2">
+          💡 commerce_score.halo_bundle 컴포넌트는 이 묶음 사이즈를 기반으로 가산됩니다 (recompute 적용 후).
+        </div>
+      </section>
 
       {/* aliases */}
       <section>
