@@ -16,6 +16,7 @@ interface RecommendRow {
 
   tv_score: number
   search_score: number
+  ingredient_score?: number
   raw_score: number
   imminent_bonus: number
   final_score: number
@@ -26,6 +27,8 @@ interface RecommendRow {
   search_match_count: number
   search_top_keyword: string
   search_sources: string[]
+  ingredient_match_count?: number
+  matched_ingredients?: string[]
 }
 
 const DAYS_OPTIONS = [
@@ -286,6 +289,12 @@ export default async function RecommendPage({
                         🔍 검색 {r.search_match_count}건 · &quot;{r.search_top_keyword}&quot;
                       </span>
                     )}
+                    {(r.ingredient_match_count ?? 0) > 0 && (
+                      <span className="bg-emerald-100 text-emerald-800 px-2 py-0.5 rounded">
+                        🧪 원료 {r.ingredient_match_count}: {(r.matched_ingredients ?? []).slice(0, 3).join(', ')}
+                        {(r.matched_ingredients ?? []).length > 3 ? '…' : ''}
+                      </span>
+                    )}
                     {r.search_sources.length > 0 && (
                       <span className="text-gray-500">
                         from {r.search_sources.map(sourceLabel).join(', ')}
@@ -305,6 +314,9 @@ export default async function RecommendPage({
                   <div className="text-[10px] text-gray-500 font-mono space-y-0.5">
                     <div>TV {Number(r.tv_score).toFixed(2)} × 1.5</div>
                     <div>검색 {Number(r.search_score).toFixed(2)} × 1.0</div>
+                    {(r.ingredient_score ?? 0) > 0 && (
+                      <div className="text-emerald-700">원료 {Number(r.ingredient_score).toFixed(2)} × 0.2</div>
+                    )}
                     {r.is_imminent && <div className="text-red-600">× 1.3 (임박)</div>}
                   </div>
                 </div>
@@ -318,11 +330,13 @@ export default async function RecommendPage({
       <section className="text-xs text-gray-500 border-t border-gray-200 pt-4 space-y-1">
         <div className="font-semibold text-gray-700">📐 ProductScore V0 공식</div>
         <code className="block bg-gray-50 px-3 py-2 rounded font-mono text-[11px] leading-relaxed">
-          final_score = (tv_score × 1.5 + search_score × 1.0) × imminent_bonus
+          final_score = (tv_score × 1.5 + search_score × 1.0 + ingredient_score × 0.2) × imminent_bonus
           <br />
           tv_score = Σ (tv_count × similarity(tv_keyword, ggsan_title))
           <br />
           search_score = Σ (occurrences × similarity(search_keyword, ggsan_title))
+          <br />
+          ingredient_score = avg(matched_ingredient.velocity / 2) — clip[0..1]  (자세히: 🧪 원료 브릿지)
           <br />
           imminent_bonus = is_imminent ? 1.3 : 1.0
         </code>
