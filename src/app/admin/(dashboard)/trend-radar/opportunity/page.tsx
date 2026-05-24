@@ -41,18 +41,31 @@ async function fetchData() {
     .in('id', ids)
   const byId = new Map((prods ?? []).map((p: any) => [p.id, p]))
 
+  // gift_share: 키워드(=canonical_name) 별 최신만 매칭
+  const { data: gift } = await (sb as any)
+    .from('jimscanner_gift_intent_scores')
+    .select('keyword, gift_share, computed_at')
+    .order('computed_at', { ascending: false })
+    .limit(2000)
+  const giftByKw = new Map<string, number>()
+  for (const g of ((gift ?? []) as Array<{ keyword: string; gift_share: number }>)) {
+    if (!giftByKw.has(g.keyword)) giftByKw.set(g.keyword, g.gift_share)
+  }
+
   return {
     rows: latest.map((s) => {
       const p = byId.get(s.product_id) ?? {}
+      const name = (p as any).canonical_name ?? '?'
       return {
         id: s.product_id,
-        name: (p as any).canonical_name ?? '?',
+        name,
         category: (p as any).category_top ?? 'all',
         x: s.competition_score,        // 경쟁 약함 → 점수 높음 → 오른쪽
         y: s.trend_score,              // 트렌드 강함 → 위
         size: Math.max(50, s.commerce_score * 4),
         final: s.final_score,
         supplier: s.supplier_score,
+        gift_share: giftByKw.get(name) ?? 0,
       }
     }),
   }
