@@ -36,9 +36,58 @@ interface ScoreRow {
   computed_at: string
 }
 
+interface AliasShareRow {
+  alias: string
+  volume: number
+  share: number
+}
+interface SpreadRow {
+  product_id: string
+  alias_n: number
+  total_volume: number
+  top1_alias: string | null
+  top1_share: number
+  top3_share: number
+  effective_alias_count: number
+  capture_uplift: number
+  gini: number
+}
+
+async function fetchAliasShares(id: string, aliasList: string[]): Promise<AliasShareRow[]> {
+  if (aliasList.length === 0) return []
+  const sb = createAdminClient()
+  const since = new Date(Date.now() - 30 * 86400_000).toISOString()
+  const { data } = await sb
+    .from('jimscanner_trends_keywords')
+    .select('keyword, volume_relative, collected_at')
+    .in('keyword', aliasList)
+    .gte('collected_at', since)
+    .not('volume_relative', 'is', null)
+    .order('collected_at', { ascending: false })
+    .limit(5000)
+
+  type Row = { keyword: string; volume_relative: number | null; collected_at: string }
+  const seen = new Map<string, number>()
+  for (const r of (data ?? []) as Row[]) {
+    if (seen.has(r.keyword)) continue
+    seen.set(r.keyword, Number(r.volume_relative ?? 0))
+  }
+  const volumes: AliasShareRow[] = aliasList.map((a) => ({
+    alias: a,
+    volume: seen.get(a) ?? 0,
+    share: 0,
+  }))
+  const total = volumes.reduce((acc, v) => acc + v.volume, 0)
+  if (total > 0) {
+    for (const v of volumes) v.share = v.volume / total
+  }
+  volumes.sort((a, b) => b.volume - a.volume)
+  return volumes
+}
+
 async function fetchProduct(id: string) {
   const sb = createAdminClient()
-  const [prodRes, aliasRes, scoreRes] = await Promise.all([
+  const [prodRes, aliasRes, scoreRes, spreadRes] = await Promise.all([
     sb.from('jimscanner_trends_products').select('*').eq('id', id).single(),
     sb
       .from('jimscanner_trends_aliases')
@@ -51,14 +100,25 @@ async function fetchProduct(id: string) {
       .eq('product_id', id)
       .order('computed_at', { ascending: false })
       .limit(30),
+    (sb as any)
+      .from('jimscanner_alias_spread')
+      .select('*')
+      .eq('product_id', id)
+      .maybeSingle(),
   ])
 
   if (prodRes.error || !prodRes.data) return null
 
+  const aliases = (aliasRes.data ?? []) as AliasRow[]
+  const aliasShares = await fetchAliasShares(id, aliases.map((a) => a.alias))
+  const spread = (spreadRes?.data ?? null) as SpreadRow | null
+
   return {
     product: prodRes.data as ProductRow,
-    aliases: (aliasRes.data ?? []) as AliasRow[],
+    aliases,
     scoreHistory: (scoreRes.data ?? []) as ScoreRow[],
+    aliasShares,
+    spread,
   }
 }
 
@@ -70,8 +130,10 @@ export default async function ProductDetailPage({
   const { id } = await params
   const data = await fetchProduct(id)
   if (!data) notFound()
-  const { product, aliases, scoreHistory } = data
+  const { product, aliases, scoreHistory, aliasShares, spread } = data
   const latest = scoreHistory[0]
+  const topShares = aliasShares.slice(0, 8)
+  const maxShare = topShares.length > 0 ? Math.max(...topShares.map((a) => a.share), 0.0001) : 0.0001
 
   return (
     <div className="space-y-6 p-6">
@@ -162,6 +224,69 @@ export default async function ProductDetailPage({
         </section>
       )}
 
+      {/* alias 분포 막대 */}
+      {topShares.length > 0 && topShares.some((a) => a.volume > 0) && (
+        <section>
+          <div className="flex items-baseline justify-between mb-2">
+            <h2 className="text-sm font-semibold">Alias 검색량 분포 (최근 30일)</h2>
+            <Link
+              href="/admin/trend-radar/alias-spread"
+              className="text-xs text-gray-500 hover:text-black underline"
+            >
+              alias 분산 보드 →
+            </Link>
+          </div>
+          {spread && (
+            <div className="grid grid-cols-2 md:grid-cols-5 gap-2 mb-3 text-xs">
+              <SpreadStat label="alias N" value={String(spread.alias_n)} />
+              <SpreadStat label="top1 점유" value={`${(Number(spread.top1_share) * 100).toFixed(0)}%`} />
+              <SpreadStat label="top3 점유" value={`${(Number(spread.top3_share) * 100).toFixed(0)}%`} />
+              <SpreadStat label="effective alias" value={Number(spread.effective_alias_count).toFixed(2)} />
+              <SpreadStat
+                label="capture uplift"
+                value={`${Number(spread.capture_uplift).toFixed(2)}×`}
+                emphasize
+              />
+            </div>
+          )}
+          <div className="rounded border border-gray-200 p-3 space-y-1.5">
+            {topShares.map((a) => {
+              const widthPct = (a.share / maxShare) * 100
+              return (
+                <div key={a.alias} className="grid grid-cols-12 items-center text-xs gap-2">
+                  <div className="col-span-4 truncate text-gray-700">{a.alias}</div>
+                  <div className="col-span-6">
+                    <div className="h-3 bg-gray-100 rounded overflow-hidden">
+                      <div
+                        className="h-3 bg-indigo-500"
+                        style={{ width: `${Math.max(2, widthPct)}%` }}
+                      />
+                    </div>
+                  </div>
+                  <div className="col-span-1 text-right font-mono text-gray-600">
+                    {(a.share * 100).toFixed(1)}%
+                  </div>
+                  <div className="col-span-1 text-right font-mono text-gray-400">
+                    {a.volume > 0 ? a.volume.toFixed(1) : '—'}
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+          {spread && (
+            <div className="text-xs text-gray-500 mt-2">
+              {Number(spread.top1_share) >= 0.7
+                ? '✅ top1 점유율이 높아 단일 표준 리스팅 1개로 검색량 대부분을 흡수할 수 있습니다.'
+                : Number(spread.top1_share) < 0.4 && Number(spread.capture_uplift) >= 3
+                ? '🔥 검색량이 alias 전반에 분산 — 동의어 통합 표준 리스팅을 만들면 top1 단독 대비 ' +
+                  Number(spread.capture_uplift).toFixed(2) +
+                  '× 검색량 흡수 가능.'
+                : 'ℹ︎ 주력 + 보조 alias 1~2 개의 분산 리스팅 전략을 검토하세요.'}
+            </div>
+          )}
+        </section>
+      )}
+
       {/* aliases */}
       <section>
         <h2 className="text-sm font-semibold mb-2">매핑된 alias ({aliases.length})</h2>
@@ -182,6 +307,17 @@ export default async function ProductDetailPage({
       <section className="text-xs text-gray-500">
         first_seen: {product.first_seen_at} · last_seen: {product.last_seen_at}
       </section>
+    </div>
+  )
+}
+
+function SpreadStat({ label, value, emphasize }: { label: string; value: string; emphasize?: boolean }) {
+  return (
+    <div className={`rounded border px-2 py-1.5 ${emphasize ? 'border-indigo-300 bg-indigo-50' : 'border-gray-200'}`}>
+      <div className="text-[10px] text-gray-500 uppercase tracking-wide">{label}</div>
+      <div className={`font-mono ${emphasize ? 'text-indigo-700 font-bold' : 'text-gray-700'}`}>
+        {value}
+      </div>
     </div>
   )
 }
