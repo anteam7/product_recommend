@@ -36,9 +36,22 @@ interface ScoreRow {
   computed_at: string
 }
 
+interface MoqRow {
+  supplier_id: string
+  supplier_source: string
+  supplier_url: string | null
+  moq: number
+  price_krw: number | null
+  capital_locked_krw: number
+  weekly_sales_estimate: number
+  weeks_of_supply: number
+  days_to_clear: number
+  gate: 'green' | 'yellow' | 'red'
+}
+
 async function fetchProduct(id: string) {
   const sb = createAdminClient()
-  const [prodRes, aliasRes, scoreRes] = await Promise.all([
+  const [prodRes, aliasRes, scoreRes, moqRes] = await Promise.all([
     sb.from('jimscanner_trends_products').select('*').eq('id', id).single(),
     sb
       .from('jimscanner_trends_aliases')
@@ -51,6 +64,12 @@ async function fetchProduct(id: string) {
       .eq('product_id', id)
       .order('computed_at', { ascending: false })
       .limit(30),
+    sb.rpc('jimscanner_moq_absorption_window' as never, {
+      p_product_id: id,
+      p_supplier_id: null,
+      p_min_moq: 1,
+      p_result_limit: 20,
+    } as never),
   ])
 
   if (prodRes.error || !prodRes.data) return null
@@ -59,6 +78,7 @@ async function fetchProduct(id: string) {
     product: prodRes.data as ProductRow,
     aliases: (aliasRes.data ?? []) as AliasRow[],
     scoreHistory: (scoreRes.data ?? []) as ScoreRow[],
+    moq: (moqRes.data ?? []) as MoqRow[],
   }
 }
 
@@ -70,8 +90,9 @@ export default async function ProductDetailPage({
   const { id } = await params
   const data = await fetchProduct(id)
   if (!data) notFound()
-  const { product, aliases, scoreHistory } = data
+  const { product, aliases, scoreHistory, moq } = data
   const latest = scoreHistory[0]
+  const bestMoq = moq.length > 0 ? moq[0] : null
 
   return (
     <div className="space-y-6 p-6">
@@ -87,13 +108,14 @@ export default async function ProductDetailPage({
             카테고리: {product.category_top}
             {product.category_mid ? ` / ${product.category_mid}` : ''} · alias {product.alias_count}건
           </p>
-          {(product.intent_label || product.description) && (
+          {(product.intent_label || product.description || bestMoq) && (
             <div className="mt-2 flex items-center gap-2 flex-wrap">
               {product.intent_label && (
                 <span className="text-xs px-2 py-0.5 rounded bg-amber-100 text-amber-700 font-medium">
                   🏷 {product.intent_label}
                 </span>
               )}
+              {bestMoq && <MoqBadge row={bestMoq} />}
               {product.description && (
                 <span className="text-sm text-gray-700">{product.description}</span>
               )}
@@ -179,10 +201,80 @@ export default async function ProductDetailPage({
         </div>
       </section>
 
+      {/* MOQ 흡수 보드 */}
+      {moq.length > 0 && (
+        <section>
+          <div className="flex items-baseline justify-between mb-2">
+            <h2 className="text-sm font-semibold">MOQ 흡수 (supplier {moq.length}건)</h2>
+            <Link href="/admin/trend-radar/moq-window" className="text-xs text-gray-500 hover:text-black underline">
+              보드 전체 →
+            </Link>
+          </div>
+          <div className="rounded border border-gray-200 overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead className="bg-gray-50 text-gray-500">
+                <tr>
+                  <th className="px-3 py-2 text-left">supplier</th>
+                  <th className="px-3 py-2 text-right">MOQ</th>
+                  <th className="px-3 py-2 text-right">단가</th>
+                  <th className="px-3 py-2 text-right">자본 잠김</th>
+                  <th className="px-3 py-2 text-right">주간 추정</th>
+                  <th className="px-3 py-2 text-right">소진(주)</th>
+                  <th className="px-3 py-2 text-left">게이트</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-100">
+                {moq.map((m) => (
+                  <tr key={m.supplier_id}>
+                    <td className="px-3 py-1">
+                      {m.supplier_url ? (
+                        <a href={m.supplier_url} target="_blank" rel="noreferrer" className="underline">
+                          {m.supplier_source}
+                        </a>
+                      ) : (
+                        m.supplier_source
+                      )}
+                    </td>
+                    <td className="px-3 py-1 text-right font-mono">{m.moq}</td>
+                    <td className="px-3 py-1 text-right font-mono">{m.price_krw ?? '-'}</td>
+                    <td className="px-3 py-1 text-right font-mono">
+                      {Math.round((m.capital_locked_krw ?? 0) / 10000).toLocaleString()}만
+                    </td>
+                    <td className="px-3 py-1 text-right font-mono">{m.weekly_sales_estimate.toFixed(1)}</td>
+                    <td className="px-3 py-1 text-right font-mono">{m.weeks_of_supply.toFixed(1)}</td>
+                    <td className="px-3 py-1">
+                      <MoqBadge row={m} compact />
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      )}
+
       <section className="text-xs text-gray-500">
         first_seen: {product.first_seen_at} · last_seen: {product.last_seen_at}
       </section>
     </div>
+  )
+}
+
+function MoqBadge({ row, compact }: { row: MoqRow; compact?: boolean }) {
+  const tone =
+    row.gate === 'green'
+      ? 'bg-emerald-100 text-emerald-700'
+      : row.gate === 'yellow'
+        ? 'bg-amber-100 text-amber-700'
+        : 'bg-red-100 text-red-700'
+  const icon = row.gate === 'green' ? '🟢' : row.gate === 'yellow' ? '🟡' : '🔴'
+  const weeks = row.weeks_of_supply
+  const label = weeks >= 100 ? '100+주' : `${weeks.toFixed(1)}주`
+  return (
+    <span className={`text-xs px-2 py-0.5 rounded font-medium ${tone}`}>
+      {icon} MOQ 흡수 {label}
+      {compact ? null : ` · ${row.supplier_source}`}
+    </span>
   )
 }
 
