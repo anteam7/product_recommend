@@ -31,6 +31,25 @@ interface ScoreRow {
   score_components?: any
 }
 
+async function fetchWadizOnsetSummary() {
+  const sb = createAdminClient()
+  const { data, count } = await (sb as any)
+    .from('jimscanner_wadiz_supply_onset')
+    .select('matched_keyword, days_since_end, ggsan_title, detected_at', { count: 'exact' })
+    .eq('acknowledged', false)
+    .order('detected_at', { ascending: false })
+    .limit(5)
+  return {
+    unack: count ?? 0,
+    recent: (data ?? []) as Array<{
+      matched_keyword: string
+      days_since_end: number | null
+      ggsan_title: string | null
+      detected_at: string
+    }>,
+  }
+}
+
 async function fetchTvGgsanMatchSummary() {
   const sb = createAdminClient()
   const { data } = await sb.rpc('jimscanner_tv_ggsan_match', {
@@ -132,10 +151,11 @@ export default async function TrendRadarPage({
   const sp = await searchParams
   const category = (CATEGORIES.includes(sp.cat as Category) ? sp.cat : 'all') as Category
 
-  const [{ products, scores, kpis }, tvPushes, tvGgsan] = await Promise.all([
+  const [{ products, scores, kpis }, tvPushes, tvGgsan, wadizOnset] = await Promise.all([
     fetchData(category),
     fetchTvPushes(),
     fetchTvGgsanMatchSummary(),
+    fetchWadizOnsetSummary(),
   ])
 
   const sorted = products
@@ -185,6 +205,31 @@ export default async function TrendRadarPage({
           </Link>
         ))}
       </nav>
+
+      {/* 🎓 와디즈 졸업 supply_onset callout */}
+      {wadizOnset.unack > 0 && (
+        <Link
+          href="/admin/trend-radar/wadiz"
+          className="block rounded border border-red-300 bg-red-50 hover:bg-red-100 px-4 py-3 transition-colors"
+        >
+          <div className="flex items-center justify-between flex-wrap gap-2">
+            <div>
+              <div className="text-sm font-semibold text-red-800">
+                🎓 와디즈 졸업 → ggsan supply onset {wadizOnset.unack}건
+                <span className="text-xs font-normal text-red-700 ml-2">
+                  펀딩 졸업 키워드가 도매에 처음 등장
+                </span>
+              </div>
+              <div className="text-xs text-red-700 mt-0.5 truncate">
+                {wadizOnset.recent
+                  .map((r) => `${r.matched_keyword} (D+${r.days_since_end ?? '?'})`)
+                  .join(' · ')}
+              </div>
+            </div>
+            <span className="text-xs text-red-700">졸업 보드 →</span>
+          </div>
+        </Link>
+      )}
 
       {/* 🔥 TV ↔ ggsan 매칭 callout */}
       <Link

@@ -123,6 +123,26 @@ console.log(
   `[${new Date().toISOString()}] HTTP crons done — ${okCount} ok, ${failCount} fail in ${totalMs}ms`,
 )
 
+// wadiz-scout: 와디즈/텀블벅 종료 펀딩 프로젝트 수집기 (로컬 step — Vercel 에 endpoint 없음).
+//   filter 미지정일 때만 자동 실행. --no-wadiz 로 생략 가능.
+const skipWadiz = args.includes('--no-wadiz') || !!filter
+if (!skipWadiz) {
+  console.log(`[${new Date().toISOString()}] launching wadiz-scout`)
+  const wadizPath = resolvePath(__dirname, 'wadiz-scout.mjs')
+  const wadizExit = await new Promise((resolve) => {
+    const child = spawn(process.execPath, [wadizPath], {
+      stdio: 'inherit',
+      env: process.env,
+    })
+    child.on('exit', (code) => resolve(code ?? 0))
+    child.on('error', (err) => {
+      console.error(`  wadiz-scout spawn error: ${err.message}`)
+      resolve(1)
+    })
+  })
+  if (wadizExit !== 0) failCount++
+}
+
 // classify-trends-llm: 로컬 Claude CLI 단계.
 //   filter 가 걸리면 (특정 cron 만 돌리는 경우) 건너뜀.
 //   --no-classify 플래그도 지원.
