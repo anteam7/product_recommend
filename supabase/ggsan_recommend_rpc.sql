@@ -38,7 +38,12 @@ RETURNS TABLE (
   tv_total_pushes int,
   search_match_count int,
   search_top_keyword text,
-  search_sources text[]
+  search_sources text[],
+  -- SERP 광고밀도 게이트 (2026-05-25 추가)
+  -- 매칭된 키워드 중 SERP 광고 점유율이 가장 높은 값. 0.6+ 면 organic 진입 불가로 디스카운트
+  serp_ad_density real,
+  serp_gate_keyword text,
+  serp_gate_blocked boolean
 )
 LANGUAGE sql
 STABLE
@@ -140,7 +145,26 @@ AS $$
       COALESCE(tv.tv_total_pushes, 0) AS tv_total_pushes,
       COALESCE(s.search_match_count, 0) AS search_match_count,
       COALESCE(s.search_top_keyword, '') AS search_top_keyword,
-      COALESCE(s.search_sources, ARRAY[]::text[]) AS search_sources
+      COALESCE(s.search_sources, ARRAY[]::text[]) AS search_sources,
+      -- SERP 광고밀도 게이트: 매칭된 TV/search 키워드 중 ad_density 가장 높은 값
+      (
+        SELECT COALESCE(MAX(d.ad_density), 0)::real
+        FROM jimscanner_serp_density_latest d
+        WHERE d.keyword IN (
+          COALESCE(tv.tv_top_keyword, ''),
+          COALESCE(s.search_top_keyword, '')
+        )
+      ) AS serp_ad_density,
+      (
+        SELECT d.keyword
+        FROM jimscanner_serp_density_latest d
+        WHERE d.keyword IN (
+          COALESCE(tv.tv_top_keyword, ''),
+          COALESCE(s.search_top_keyword, '')
+        )
+        ORDER BY d.ad_density DESC NULLS LAST
+        LIMIT 1
+      ) AS serp_gate_keyword
     FROM jimscanner_ggsan_products gp
     LEFT JOIN tv_agg tv ON tv.goods_no = gp.goods_no
     LEFT JOIN search_agg s ON s.goods_no = gp.goods_no
@@ -168,11 +192,16 @@ AS $$
     s.tv_total_pushes,
     s.search_match_count,
     s.search_top_keyword,
-    s.search_sources
+    s.search_sources,
+    s.serp_ad_density,
+    s.serp_gate_keyword,
+    (s.serp_ad_density >= 0.6) AS serp_gate_blocked
   FROM scored s
   WHERE ((s.tv_score * 1.5 + s.search_score * 1.0)
            * (CASE WHEN s.is_imminent THEN 1.3 ELSE 1.0 END)) >= min_score
   ORDER BY
+    -- SERP 광고로 도배된 키워드는 뒤로
+    (CASE WHEN s.serp_ad_density >= 0.6 THEN 1 ELSE 0 END) ASC,
     -- 임박특가 우선
     (CASE WHEN s.is_imminent THEN 1 ELSE 0 END) DESC,
     -- final_score
