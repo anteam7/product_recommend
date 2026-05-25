@@ -35,10 +35,30 @@ interface ScoreRow {
   score_components: any
   computed_at: string
 }
+interface CertRow {
+  cert_type: string
+  mandatory: boolean
+  est_cost_krw: number | null
+  est_lead_weeks: number | null
+  rule_source: string | null
+  rule_keyword: string | null
+  confidence: number
+}
+
+const CERT_LABEL: Record<string, string> = {
+  kc_safety: 'KC 안전',
+  kc_emi: 'KC 전자파',
+  kc_kids: 'KC 어린이',
+  mfds_food: '식약처 식품',
+  mfds_cosmetic: '책임판매업자',
+  mfds_med: '의료기기',
+  rra_radio: '전파인증',
+  kats_efficiency: '에너지효율',
+}
 
 async function fetchProduct(id: string) {
   const sb = createAdminClient()
-  const [prodRes, aliasRes, scoreRes] = await Promise.all([
+  const [prodRes, aliasRes, scoreRes, certRes] = await Promise.all([
     sb.from('jimscanner_trends_products').select('*').eq('id', id).single(),
     sb
       .from('jimscanner_trends_aliases')
@@ -51,6 +71,11 @@ async function fetchProduct(id: string) {
       .eq('product_id', id)
       .order('computed_at', { ascending: false })
       .limit(30),
+    (sb as any)
+      .from('jimscanner_trends_certifications')
+      .select('cert_type, mandatory, est_cost_krw, est_lead_weeks, rule_source, rule_keyword, confidence')
+      .eq('product_id', id)
+      .order('mandatory', { ascending: false }),
   ])
 
   if (prodRes.error || !prodRes.data) return null
@@ -59,6 +84,7 @@ async function fetchProduct(id: string) {
     product: prodRes.data as ProductRow,
     aliases: (aliasRes.data ?? []) as AliasRow[],
     scoreHistory: (scoreRes.data ?? []) as ScoreRow[],
+    certs: ((certRes as any)?.data ?? []) as CertRow[],
   }
 }
 
@@ -70,8 +96,17 @@ export default async function ProductDetailPage({
   const { id } = await params
   const data = await fetchProduct(id)
   if (!data) notFound()
-  const { product, aliases, scoreHistory } = data
+  const { product, aliases, scoreHistory, certs } = data
   const latest = scoreHistory[0]
+  const mandatoryCerts = certs.filter((c) => c.mandatory)
+  const certCostTotal = mandatoryCerts.reduce((sum, c) => sum + (c.est_cost_krw ?? 0), 0)
+  const certLeadMax = mandatoryCerts.reduce((m, c) => Math.max(m, c.est_lead_weeks ?? 0), 0)
+  const entryClass =
+    mandatoryCerts.length === 0
+      ? 'clear'
+      : certCostTotal < 2_000_000 && certLeadMax < 6
+        ? 'low_cost'
+        : 'high_cost'
 
   return (
     <div className="space-y-6 p-6">
@@ -107,6 +142,61 @@ export default async function ProductDetailPage({
           )}
         </div>
       </header>
+
+      {/* 🚪 인허가 강제 게이트 */}
+      <section
+        className={`rounded border px-4 py-3 ${
+          entryClass === 'clear'
+            ? 'border-green-200 bg-green-50'
+            : entryClass === 'low_cost'
+              ? 'border-amber-300 bg-amber-50'
+              : 'border-red-300 bg-red-50'
+        }`}
+      >
+        <div className="flex items-baseline justify-between mb-2 flex-wrap gap-2">
+          <div className="text-sm font-semibold">
+            {entryClass === 'clear'
+              ? '🟢 진입가능 — 강제 인증 0건'
+              : entryClass === 'low_cost'
+                ? '🟡 진입제한 (저비용)'
+                : '🔴 진입불가 (고비용·장기)'}
+          </div>
+          {mandatoryCerts.length > 0 && (
+            <div className="text-xs text-gray-700">
+              예상비용{' '}
+              <span className="font-bold">{(certCostTotal / 10_000).toLocaleString()}만원</span>
+              {' · '}
+              lead <span className="font-bold">{certLeadMax}주</span>
+            </div>
+          )}
+        </div>
+        {certs.length === 0 ? (
+          <div className="text-xs text-gray-600">
+            룰북에서 강제 인증 키워드가 감지되지 않았습니다. 그러나 도매 진입 전 KATS·MFDS 가이드 직접 확인 권장.
+          </div>
+        ) : (
+          <div className="flex flex-wrap gap-2">
+            {certs.map((c) => (
+              <span
+                key={c.cert_type}
+                className={`inline-flex items-center gap-1 px-2 py-1 rounded text-xs ${
+                  c.mandatory
+                    ? 'bg-red-100 text-red-800 border border-red-200'
+                    : 'bg-gray-100 text-gray-700 border border-gray-200'
+                }`}
+                title={c.rule_keyword ? `매칭 키워드: ${c.rule_keyword}` : undefined}
+              >
+                <span className="font-semibold">{CERT_LABEL[c.cert_type] ?? c.cert_type}</span>
+                {c.est_cost_krw != null && (
+                  <span className="opacity-70">
+                    · {Math.round(c.est_cost_krw / 10_000)}만 · {c.est_lead_weeks ?? '?'}주
+                  </span>
+                )}
+              </span>
+            ))}
+          </div>
+        )}
+      </section>
 
       {/* 4점수 카드 */}
       {latest && (

@@ -17,6 +17,46 @@
 import { createClient } from '@supabase/supabase-js'
 import { spawn } from 'node:child_process'
 
+// ─── 인허가 강제 게이트 룰북 (한국 KC·식약처·전파·에너지효율) ───
+// 위탁 셀러가 도매 진입 직전 마지막으로 체크해야 할 cert.
+// canonical_name + alias 텍스트 부분일치로 매칭. LLM 보조 없이도 명확한
+// 키워드는 rule_engine 으로 자동 분류된다. (전체 cron 은 classify-trends-certs.mjs)
+const CERT_META = {
+  kc_safety: { cost: 800_000, lead: 3 },
+  kc_emi: { cost: 800_000, lead: 3 },
+  kc_kids: { cost: 1_500_000, lead: 4 },
+  mfds_food: { cost: 5_000_000, lead: 4 },
+  mfds_cosmetic: { cost: 3_000_000, lead: 6 },
+  mfds_med: { cost: 10_000_000, lead: 12 },
+  rra_radio: { cost: 800_000, lead: 4 },
+  kats_efficiency: { cost: 600_000, lead: 2 },
+}
+const CERT_RULES = [
+  { cert: 'mfds_food', kws: ['캡슐', '정제', '드링크', '액상', '분말', '영양제', '비타민', '오메가', '프로바이오틱', '유산균', '콜라겐', '멜라토닌', '루테인', '쏘팔메토', '밀크씨슬', '홍삼', '글루코사민', '코큐텐', 'coq10', '프로틴 파우더'] },
+  { cert: 'mfds_cosmetic', kws: ['화장품', '미스트', '토너', '세럼', '크림', '로션', '에센스', '마스크팩', '클렌징', '선크림', '쿠션', '파운데이션', '립스틱', '립밤', '바디로션', '바디오일', '향수', '퍼퓸', '샴푸', '컨디셔너', '트리트먼트'] },
+  { cert: 'mfds_med', kws: ['의료기기', '진단', '혈압계', '혈당계', '체온계', '저주파 치료', '온열 치료'] },
+  { cert: 'kc_kids', kws: ['어린이', '유아', '아동', '키즈', '완구', '장난감', '학용품', '아기 장난감', '베이비', 'baby', 'kids', '인형'] },
+  { cert: 'rra_radio', kws: ['블루투스', 'bluetooth', '무선', 'wireless', '와이파이', 'wifi', 'wi-fi', '리모컨', '무선 이어폰', '무선 충전', '무선청소기'] },
+  { cert: 'kc_safety', kws: ['220v', '110v', '콘센트', '멀티탭', '어댑터', '충전기', '전원', '전기', '히터', '온풍기', '전기장판', '인덕션', '전동', '플러그'] },
+  { cert: 'kc_emi', kws: ['모니터', '셋톱', '컴퓨터', '노트북', '태블릿', '스피커', '앰프', '믹서기', '전자레인지', '공기청정기'] },
+  { cert: 'kats_efficiency', kws: ['냉장고', '에어컨', '세탁기', '제습기', '가습기', '식기세척기', '김치냉장고', '의류건조기', '전기레인지'] },
+]
+
+function classifyCerts(text) {
+  const t = (text ?? '').toLowerCase()
+  if (!t) return []
+  const hits = []
+  for (const rule of CERT_RULES) {
+    for (const kw of rule.kws) {
+      if (t.includes(kw.toLowerCase())) {
+        hits.push({ cert: rule.cert, keyword: kw })
+        break
+      }
+    }
+  }
+  return hits
+}
+
 const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL
 const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY
 if (!SUPABASE_URL || !SUPABASE_KEY) {
@@ -239,6 +279,34 @@ async function applyResults(results) {
         .eq('id', r.id),
     ),
   )
+
+  // 인허가 게이트 — LLM 정제된 canonical_name + category_mid + description 으로 cert 매칭.
+  // 같은 product 에 다시 돌아도 onConflict (product_id, cert_type) 으로 idempotent.
+  const certRows = []
+  for (const r of results) {
+    const text = [r.canonical_name, r.category_mid, r.description].filter(Boolean).join(' | ')
+    const hits = classifyCerts(text)
+    for (const h of hits) {
+      const meta = CERT_META[h.cert]
+      certRows.push({
+        product_id: r.id,
+        cert_type: h.cert,
+        mandatory: true,
+        est_cost_krw: meta.cost,
+        est_lead_weeks: meta.lead,
+        rule_source: 'rule_engine_llm',
+        rule_keyword: h.keyword,
+        confidence: 0.8,
+      })
+    }
+  }
+  if (certRows.length > 0) {
+    const { error } = await sb
+      .from('jimscanner_trends_certifications')
+      .upsert(certRows, { onConflict: 'product_id,cert_type' })
+    if (error) console.error(`  cert upsert failed: ${error.message}`)
+    else console.log(`  cert upsert: ${certRows.length} rows`)
+  }
 }
 
 async function logRun(payload) {

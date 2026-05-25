@@ -75,6 +75,28 @@ async function fetchTvPushes() {
   return { ranked, totalKeywords: map.size, totalRows: rows.length }
 }
 
+async function fetchEntryGate() {
+  const sb = createAdminClient()
+  // 마이그레이션 미적용 환경에서도 빌드/런타임 죽지 않게 try-catch.
+  try {
+    const { data } = await (sb as any)
+      .from('jimscanner_trends_entry_gate')
+      .select('entry_class')
+    const rows = (data ?? []) as Array<{ entry_class: 'clear' | 'low_cost' | 'high_cost' }>
+    let clear = 0,
+      low = 0,
+      high = 0
+    for (const r of rows) {
+      if (r.entry_class === 'clear') clear++
+      else if (r.entry_class === 'low_cost') low++
+      else if (r.entry_class === 'high_cost') high++
+    }
+    return { clear, low, high, total: rows.length }
+  } catch {
+    return { clear: 0, low: 0, high: 0, total: 0 }
+  }
+}
+
 async function fetchData(category: Category) {
   const sb = createAdminClient()
 
@@ -132,10 +154,11 @@ export default async function TrendRadarPage({
   const sp = await searchParams
   const category = (CATEGORIES.includes(sp.cat as Category) ? sp.cat : 'all') as Category
 
-  const [{ products, scores, kpis }, tvPushes, tvGgsan] = await Promise.all([
+  const [{ products, scores, kpis }, tvPushes, tvGgsan, entryGate] = await Promise.all([
     fetchData(category),
     fetchTvPushes(),
     fetchTvGgsanMatchSummary(),
+    fetchEntryGate(),
   ])
 
   const sorted = products
@@ -167,6 +190,41 @@ export default async function TrendRadarPage({
         <KpiCard label="고득점 (≥50)" value={kpis.top} hint="final_score 기준" />
         <KpiCard label="supplier 매칭" value={kpis.supplier} hint="도매꾹·알리 검출" />
         <KpiCard label="TV push" value={kpis.tv} hint="홈쇼핑 편성 검출" />
+      </section>
+
+      {/* 🚪 한국 인허가 강제 게이트 — 진입 가능성 3분류 */}
+      <section className="rounded border border-gray-200 p-4 bg-gray-50/40">
+        <div className="flex items-baseline justify-between mb-3">
+          <h2 className="text-sm font-semibold text-gray-700">
+            🚪 인허가 강제 게이트{' '}
+            <span className="text-xs font-normal text-gray-500 ml-2">
+              KC·식약처·전파·에너지효율 — 위탁 셀러 진입 가능성
+            </span>
+          </h2>
+          <span className="text-xs text-gray-500">
+            총 {entryGate.total.toLocaleString()}개 product 분석
+          </span>
+        </div>
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+          <GateCard
+            tone="green"
+            label="진입가능 (인허가 0)"
+            value={entryGate.clear}
+            hint="강제 인증 없음 — 즉시 위탁 가능"
+          />
+          <GateCard
+            tone="amber"
+            label="진입제한 (저비용)"
+            value={entryGate.low}
+            hint="누계 < 200만 · lead < 6주"
+          />
+          <GateCard
+            tone="red"
+            label="진입불가 (고비용·장기)"
+            value={entryGate.high}
+            hint="식약처·의료기기·KC 어린이 등"
+          />
+        </div>
       </section>
 
       {/* 카테고리 탭 */}
@@ -303,6 +361,32 @@ export default async function TrendRadarPage({
           </div>
         )}
       </section>
+    </div>
+  )
+}
+
+function GateCard({
+  tone,
+  label,
+  value,
+  hint,
+}: {
+  tone: 'green' | 'amber' | 'red'
+  label: string
+  value: number
+  hint: string
+}) {
+  const palette =
+    tone === 'green'
+      ? 'border-green-200 bg-green-50 text-green-900'
+      : tone === 'amber'
+        ? 'border-amber-300 bg-amber-50 text-amber-900'
+        : 'border-red-300 bg-red-50 text-red-900'
+  return (
+    <div className={`rounded border p-4 ${palette}`}>
+      <div className="text-xs font-medium opacity-80">{label}</div>
+      <div className="text-3xl font-bold mt-1">{value.toLocaleString()}</div>
+      <div className="text-xs opacity-70 mt-1">{hint}</div>
     </div>
   )
 }
