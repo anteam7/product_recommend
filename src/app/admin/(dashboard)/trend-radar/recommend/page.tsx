@@ -18,6 +18,10 @@ interface RecommendRow {
   search_score: number
   raw_score: number
   imminent_bonus: number
+  event_proximity_score?: number
+  event_top_key?: string
+  event_top_window?: string
+  event_top_days_to_anchor?: number
   final_score: number
 
   tv_match_count: number
@@ -291,6 +295,20 @@ export default async function RecommendPage({
                         from {r.search_sources.map(sourceLabel).join(', ')}
                       </span>
                     )}
+                    {r.event_top_key && r.event_proximity_score != null && Math.abs(r.event_proximity_score) > 0.01 && (
+                      <span className={`px-2 py-0.5 rounded ${
+                        r.event_top_window === 'exit'
+                          ? 'bg-rose-100 text-rose-800'
+                          : r.event_top_window === 'peak'
+                          ? 'bg-red-100 text-red-800'
+                          : r.event_top_window === 'tail'
+                          ? 'bg-emerald-100 text-emerald-800'
+                          : 'bg-amber-100 text-amber-800'
+                      }`}>
+                        📅 {r.event_top_key} · D{(r.event_top_days_to_anchor ?? 0) >= 0 ? '−' : '+'}
+                        {Math.abs(r.event_top_days_to_anchor ?? 0)} ({r.event_top_window})
+                      </span>
+                    )}
                   </div>
                 </div>
 
@@ -305,6 +323,11 @@ export default async function RecommendPage({
                   <div className="text-[10px] text-gray-500 font-mono space-y-0.5">
                     <div>TV {Number(r.tv_score).toFixed(2)} × 1.5</div>
                     <div>검색 {Number(r.search_score).toFixed(2)} × 1.0</div>
+                    {r.event_proximity_score != null && Math.abs(r.event_proximity_score) > 0.01 && (
+                      <div className={r.event_proximity_score < 0 ? 'text-rose-600' : 'text-amber-700'}>
+                        + 이벤트 {Number(r.event_proximity_score).toFixed(2)}
+                      </div>
+                    )}
                     {r.is_imminent && <div className="text-red-600">× 1.3 (임박)</div>}
                   </div>
                 </div>
