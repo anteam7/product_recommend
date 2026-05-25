@@ -47,6 +47,32 @@ async function fetchTvGgsanMatchSummary() {
   return { totalRows: rows.length, uniqueKw, imminentRows, imminentKw }
 }
 
+interface BrandRiskHit {
+  product_id: string | null
+  risk_level: 'block' | 'warn' | 'caution'
+  is_whitelisted: boolean
+}
+
+async function fetchBrandRisk() {
+  const sb = createAdminClient()
+  const { data } = await (sb as any)
+    .from('jimscanner_trends_brand_risk_hits')
+    .select('product_id, risk_level, is_whitelisted')
+    .eq('is_whitelisted', false)
+    .limit(5000)
+  const rows = (data ?? []) as BrandRiskHit[]
+  const perProduct = new Map<string, 'block' | 'warn' | 'caution'>()
+  const rank: Record<'block' | 'warn' | 'caution', number> = { block: 3, warn: 2, caution: 1 }
+  let totalHits = 0
+  for (const r of rows) {
+    if (!r.product_id) continue
+    totalHits++
+    const prev = perProduct.get(r.product_id)
+    if (!prev || rank[r.risk_level] > rank[prev]) perProduct.set(r.product_id, r.risk_level)
+  }
+  return { perProduct, totalHits, productsAtRisk: perProduct.size }
+}
+
 async function fetchTvPushes() {
   const sb = createAdminClient()
   const since = new Date(Date.now() - 30 * 86400_000).toISOString()
@@ -132,10 +158,11 @@ export default async function TrendRadarPage({
   const sp = await searchParams
   const category = (CATEGORIES.includes(sp.cat as Category) ? sp.cat : 'all') as Category
 
-  const [{ products, scores, kpis }, tvPushes, tvGgsan] = await Promise.all([
+  const [{ products, scores, kpis }, tvPushes, tvGgsan, brandRisk] = await Promise.all([
     fetchData(category),
     fetchTvPushes(),
     fetchTvGgsanMatchSummary(),
+    fetchBrandRisk(),
   ])
 
   const sorted = products
@@ -160,13 +187,20 @@ export default async function TrendRadarPage({
         </Link>
       </header>
 
-      {/* KPI 5종 */}
-      <section className="grid grid-cols-2 md:grid-cols-5 gap-4">
+      {/* KPI 6종 */}
+      <section className="grid grid-cols-2 md:grid-cols-6 gap-4">
         <KpiCard label="canonical 상품" value={kpis.products} hint="누적 매핑" />
         <KpiCard label="LLM 분류" value={kpis.llmClassified} hint={`${kpis.products > 0 ? Math.round((kpis.llmClassified / kpis.products) * 100) : 0}% 진척`} />
         <KpiCard label="고득점 (≥50)" value={kpis.top} hint="final_score 기준" />
         <KpiCard label="supplier 매칭" value={kpis.supplier} hint="도매꾹·알리 검출" />
         <KpiCard label="TV push" value={kpis.tv} hint="홈쇼핑 편성 검출" />
+        <Link href="/admin/trend-radar/brand-safety" className="block">
+          <div className={`rounded border p-4 ${brandRisk.productsAtRisk > 0 ? 'border-red-300 bg-red-50 hover:bg-red-100' : 'border-gray-200 hover:bg-gray-50'} transition-colors h-full`}>
+            <div className="text-xs text-gray-500">🚨 IP 리스크</div>
+            <div className={`text-3xl font-bold mt-1 ${brandRisk.productsAtRisk > 0 ? 'text-red-700' : ''}`}>{brandRisk.productsAtRisk.toLocaleString()}건</div>
+            <div className="text-xs text-gray-400 mt-1">총 {brandRisk.totalHits} hit · 게이트 →</div>
+          </div>
+        </Link>
       </section>
 
       {/* 카테고리 탭 */}
@@ -281,15 +315,36 @@ export default async function TrendRadarPage({
               <div className="col-span-1 text-right">competition</div>
               <div className="col-span-1 text-right">aliases</div>
             </div>
-            {sorted.slice(0, 50).map(({ p, s }, i) => (
+            {sorted.slice(0, 50).map(({ p, s }, i) => {
+              const risk = brandRisk.perProduct.get(p.id)
+              const rowCls = risk === 'block'
+                ? 'border-red-300 bg-red-50/40 hover:bg-red-50'
+                : risk === 'warn'
+                  ? 'border-orange-300 bg-orange-50/40 hover:bg-orange-50'
+                  : 'border-gray-200 hover:bg-gray-50'
+              return (
               <Link
                 key={p.id}
                 href={`/admin/trend-radar/products/${p.id}`}
-                className="grid grid-cols-12 px-3 py-2 rounded border border-gray-200 hover:bg-gray-50 transition-colors"
+                className={`grid grid-cols-12 px-3 py-2 rounded border transition-colors ${rowCls}`}
               >
                 <div className="col-span-1 text-gray-400 font-mono">{i + 1}</div>
                 <div className="col-span-5">
-                  <div className="font-medium">{p.canonical_name}</div>
+                  <div className="font-medium flex items-center gap-2">
+                    {risk && (
+                      <span
+                        title={`IP ${risk}`}
+                        className={`text-[10px] px-1.5 py-0.5 rounded font-bold ${
+                          risk === 'block' ? 'bg-red-600 text-white'
+                          : risk === 'warn' ? 'bg-orange-500 text-white'
+                          : 'bg-yellow-400 text-black'
+                        }`}
+                      >
+                        🚨 {risk.toUpperCase()}
+                      </span>
+                    )}
+                    <span>{p.canonical_name}</span>
+                  </div>
                   <div className="text-xs text-gray-500">{p.category_top}</div>
                 </div>
                 <div className="col-span-1 text-right font-mono font-bold">{s!.final_score}</div>
@@ -299,7 +354,8 @@ export default async function TrendRadarPage({
                 <div className="col-span-1 text-right font-mono text-gray-600">{s!.competition_score}</div>
                 <div className="col-span-1 text-right text-xs text-gray-500">{p.alias_count}</div>
               </Link>
-            ))}
+              )
+            })}
           </div>
         )}
       </section>
