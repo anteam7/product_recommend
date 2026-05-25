@@ -142,6 +142,22 @@ if (!skipClassify) {
     })
   })
   if (classifyExit !== 0) failCount++
+
+  // 카테고리 HHI 재계산 — classify 직후 brand 가 보강된 상태에서 돈다.
+  console.log(`[${new Date().toISOString()}] launching compute-category-hhi`)
+  const hhiPath = resolvePath(__dirname, 'compute-category-hhi.mjs')
+  const hhiExit = await new Promise((resolve) => {
+    const child = spawn(process.execPath, [hhiPath], {
+      stdio: 'inherit',
+      env: process.env,
+    })
+    child.on('exit', (code) => resolve(code ?? 0))
+    child.on('error', (err) => {
+      console.error(`  hhi spawn error: ${err.message}`)
+      resolve(1)
+    })
+  })
+  if (hhiExit !== 0) failCount++
 }
 
 process.exit(failCount > 0 ? 1 : 0)

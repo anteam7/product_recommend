@@ -31,6 +31,15 @@ interface ScoreRow {
   score_components?: any
 }
 
+async function fetchFragmentedCount(): Promise<number> {
+  const sb = createAdminClient()
+  const { data } = await (sb as any)
+    .from('jimscanner_trends_category_concentration')
+    .select('hhi')
+  const rows = (data ?? []) as { hhi: number | string }[]
+  return rows.filter((r) => Number(r.hhi) < 1500).length
+}
+
 async function fetchTvGgsanMatchSummary() {
   const sb = createAdminClient()
   const { data } = await sb.rpc('jimscanner_tv_ggsan_match', {
@@ -132,10 +141,11 @@ export default async function TrendRadarPage({
   const sp = await searchParams
   const category = (CATEGORIES.includes(sp.cat as Category) ? sp.cat : 'all') as Category
 
-  const [{ products, scores, kpis }, tvPushes, tvGgsan] = await Promise.all([
+  const [{ products, scores, kpis }, tvPushes, tvGgsan, fragmentedCount] = await Promise.all([
     fetchData(category),
     fetchTvPushes(),
     fetchTvGgsanMatchSummary(),
+    fetchFragmentedCount(),
   ])
 
   const sorted = products
@@ -160,13 +170,21 @@ export default async function TrendRadarPage({
         </Link>
       </header>
 
-      {/* KPI 5종 */}
-      <section className="grid grid-cols-2 md:grid-cols-5 gap-4">
+      {/* KPI 6종 */}
+      <section className="grid grid-cols-2 md:grid-cols-6 gap-4">
         <KpiCard label="canonical 상품" value={kpis.products} hint="누적 매핑" />
         <KpiCard label="LLM 분류" value={kpis.llmClassified} hint={`${kpis.products > 0 ? Math.round((kpis.llmClassified / kpis.products) * 100) : 0}% 진척`} />
         <KpiCard label="고득점 (≥50)" value={kpis.top} hint="final_score 기준" />
         <KpiCard label="supplier 매칭" value={kpis.supplier} hint="도매꾹·알리 검출" />
         <KpiCard label="TV push" value={kpis.tv} hint="홈쇼핑 편성 검출" />
+        <Link
+          href="/admin/trend-radar/concentration"
+          className="rounded border border-gray-200 p-4 hover:bg-gray-50 transition-colors block"
+        >
+          <div className="text-xs text-gray-500">fragmented 카테고리</div>
+          <div className="text-3xl font-bold mt-1 text-emerald-600">{fragmentedCount.toLocaleString()}</div>
+          <div className="text-xs text-gray-400 mt-1">HHI &lt; 1500 → 위탁 진입 추천</div>
+        </Link>
       </section>
 
       {/* 카테고리 탭 */}

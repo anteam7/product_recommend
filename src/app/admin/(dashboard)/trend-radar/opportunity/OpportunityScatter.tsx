@@ -11,6 +11,7 @@ interface Row {
   size: number
   final: number
   supplier: number
+  hhi?: number | null
 }
 
 const CATEGORY_COLORS: Record<string, string> = {
@@ -20,6 +21,14 @@ const CATEGORY_COLORS: Record<string, string> = {
   community: '#a78bfa',
   shopping_tv: '#ef4444',
   all: '#6b7280',
+}
+
+// HHI 0~10000 → 색상 (초록 fragmented · 황 경합 · 빨강 독과점)
+function hhiColor(hhi: number | null | undefined): string | null {
+  if (hhi == null) return null
+  if (hhi < 1500) return '#10b981'
+  if (hhi <= 2500) return '#f59e0b'
+  return '#ef4444'
 }
 
 export default function OpportunityScatter({ rows }: { rows: Row[] }) {
@@ -71,23 +80,28 @@ export default function OpportunityScatter({ rows }: { rows: Row[] }) {
             🎯 핀 후보 (트렌드↑·경쟁↓)
           </text>
 
-          {/* 점들 */}
-          {rows.map((r) => (
-            <a key={r.id} href={`/admin/trend-radar/products/${r.id}`}>
-              <circle
-                cx={xScale(r.x)}
-                cy={yScale(r.y)}
-                r={rScale(r.size)}
-                fill={CATEGORY_COLORS[r.category] ?? '#6b7280'}
-                fillOpacity={0.55}
-                stroke={CATEGORY_COLORS[r.category] ?? '#6b7280'}
-                strokeOpacity={0.9}
-                onMouseEnter={() => setHover(r)}
-                onMouseLeave={() => setHover(null)}
-                style={{ cursor: 'pointer' }}
-              />
-            </a>
-          ))}
+          {/* 점들 — fill 은 카테고리 HHI 기준, stroke 는 카테고리 색 */}
+          {rows.map((r) => {
+            const catColor = CATEGORY_COLORS[r.category] ?? '#6b7280'
+            const fill = hhiColor(r.hhi) ?? catColor
+            return (
+              <a key={r.id} href={`/admin/trend-radar/products/${r.id}`}>
+                <circle
+                  cx={xScale(r.x)}
+                  cy={yScale(r.y)}
+                  r={rScale(r.size)}
+                  fill={fill}
+                  fillOpacity={0.55}
+                  stroke={catColor}
+                  strokeOpacity={0.9}
+                  strokeWidth={1.5}
+                  onMouseEnter={() => setHover(r)}
+                  onMouseLeave={() => setHover(null)}
+                  style={{ cursor: 'pointer' }}
+                />
+              </a>
+            )
+          })}
         </svg>
 
         {/* hover tooltip */}
@@ -96,18 +110,40 @@ export default function OpportunityScatter({ rows }: { rows: Row[] }) {
             <div className="font-semibold">{hover.name}</div>
             <div>category: {hover.category}</div>
             <div>final: {hover.final} · trend: {hover.y} · competition: {hover.x} · supplier: {hover.supplier}</div>
+            <div>HHI: {hover.hhi != null ? Math.round(hover.hhi) : '-'} {hover.hhi != null ? (hover.hhi < 1500 ? '(fragmented)' : hover.hhi <= 2500 ? '(경합)' : '(독과점)') : ''}</div>
           </div>
         )}
       </div>
 
       {/* 범례 */}
-      <div className="mt-4 flex flex-wrap gap-3 text-xs">
-        {Object.entries(CATEGORY_COLORS).map(([cat, color]) => (
-          <span key={cat} className="flex items-center gap-1">
-            <span className="inline-block w-3 h-3 rounded-full" style={{ background: color, opacity: 0.6 }} />
-            {cat}
+      <div className="mt-4 flex flex-wrap gap-4 text-xs">
+        <div className="flex flex-wrap gap-3">
+          <span className="text-gray-500 font-semibold">테두리 = 카테고리</span>
+          {Object.entries(CATEGORY_COLORS).map(([cat, color]) => (
+            <span key={cat} className="flex items-center gap-1">
+              <span
+                className="inline-block w-3 h-3 rounded-full border-2"
+                style={{ borderColor: color, background: 'transparent' }}
+              />
+              {cat}
+            </span>
+          ))}
+        </div>
+        <div className="flex flex-wrap gap-3">
+          <span className="text-gray-500 font-semibold">채움 = HHI</span>
+          <span className="flex items-center gap-1">
+            <span className="inline-block w-3 h-3 rounded-full" style={{ background: '#10b981', opacity: 0.6 }} />
+            fragmented (&lt;1500)
           </span>
-        ))}
+          <span className="flex items-center gap-1">
+            <span className="inline-block w-3 h-3 rounded-full" style={{ background: '#f59e0b', opacity: 0.6 }} />
+            경합
+          </span>
+          <span className="flex items-center gap-1">
+            <span className="inline-block w-3 h-3 rounded-full" style={{ background: '#ef4444', opacity: 0.6 }} />
+            독과점 (&gt;2500)
+          </span>
+        </div>
       </div>
 
       {/* 우상단 sub-list */}
