@@ -16,6 +16,7 @@ interface RecommendRow {
 
   tv_score: number
   search_score: number
+  velocity_score: number
   raw_score: number
   imminent_bonus: number
   final_score: number
@@ -26,6 +27,10 @@ interface RecommendRow {
   search_match_count: number
   search_top_keyword: string
   search_sources: string[]
+
+  restock_count_30d: number
+  avg_stockout_days: number | null
+  days_since_last_restock: number | null
 }
 
 const DAYS_OPTIONS = [
@@ -129,6 +134,7 @@ export default async function RecommendPage({
   const imminentCount = rows.filter((r) => r.is_imminent).length
   const tvHitCount = rows.filter((r) => r.tv_score > 0).length
   const searchHitCount = rows.filter((r) => r.search_score > 0).length
+  const velocityHitCount = rows.filter((r) => Number(r.velocity_score) > 0).length
   const avgFinal = rows.length > 0 ? rows.reduce((s, r) => s + Number(r.final_score), 0) / rows.length : 0
 
   return (
@@ -205,11 +211,12 @@ export default async function RecommendPage({
       </div>
 
       {/* KPI */}
-      <section className="grid grid-cols-2 md:grid-cols-5 gap-3">
+      <section className="grid grid-cols-2 md:grid-cols-6 gap-3">
         <Kpi label="후보 상품" value={total} />
         <Kpi label="🔥 임박특가" value={imminentCount} highlight={imminentCount > 0} />
         <Kpi label="TV 매칭" value={tvHitCount} />
         <Kpi label="검색 매칭" value={searchHitCount} />
+        <Kpi label="🔁 회전" value={velocityHitCount} />
         <Kpi label="평균 final_score" value={avgFinal.toFixed(2)} />
       </section>
 
@@ -286,6 +293,17 @@ export default async function RecommendPage({
                         🔍 검색 {r.search_match_count}건 · &quot;{r.search_top_keyword}&quot;
                       </span>
                     )}
+                    {r.restock_count_30d > 0 && (
+                      <span
+                        className="bg-emerald-100 text-emerald-800 px-2 py-0.5 rounded"
+                        title="ggsan 도매처 자체 재입고 사이클 (외부 트렌드 독립)"
+                      >
+                        🔁 ggsan 회전 {r.restock_count_30d}회/30일
+                        {r.avg_stockout_days != null
+                          ? ` · stockout 평균 ${r.avg_stockout_days.toFixed(1)}일`
+                          : ''}
+                      </span>
+                    )}
                     {r.search_sources.length > 0 && (
                       <span className="text-gray-500">
                         from {r.search_sources.map(sourceLabel).join(', ')}
@@ -305,6 +323,7 @@ export default async function RecommendPage({
                   <div className="text-[10px] text-gray-500 font-mono space-y-0.5">
                     <div>TV {Number(r.tv_score).toFixed(2)} × 1.5</div>
                     <div>검색 {Number(r.search_score).toFixed(2)} × 1.0</div>
+                    <div>회전 {Number(r.velocity_score).toFixed(2)} × 0.8</div>
                     {r.is_imminent && <div className="text-red-600">× 1.3 (임박)</div>}
                   </div>
                 </div>
@@ -318,16 +337,22 @@ export default async function RecommendPage({
       <section className="text-xs text-gray-500 border-t border-gray-200 pt-4 space-y-1">
         <div className="font-semibold text-gray-700">📐 ProductScore V0 공식</div>
         <code className="block bg-gray-50 px-3 py-2 rounded font-mono text-[11px] leading-relaxed">
-          final_score = (tv_score × 1.5 + search_score × 1.0) × imminent_bonus
+          final_score = (tv_score × 1.5 + search_score × 1.0 + velocity_score × 0.8) × imminent_bonus
           <br />
           tv_score = Σ (tv_count × similarity(tv_keyword, ggsan_title))
           <br />
           search_score = Σ (occurrences × similarity(search_keyword, ggsan_title))
           <br />
+          velocity_score = restock_count_30d × (30 / max(avg_stockout_days, 1))
+          <br />
           imminent_bonus = is_imminent ? 1.3 : 1.0
         </code>
         <div className="pt-2">
-          <strong>V1 보강 예정:</strong> ÷ (1 + log(스마트스토어 등록상품수)) saturation_penalty · 커뮤니티 시그널 LLM 정규화 후 추가 · ggsan_price_history 가격 인하 추세 보너스
+          <strong>회전 점수 (V1, 2026-05-25):</strong> ggsan 자체 status 전이 시계열에서 산출.
+          외부 demand 와 독립적인 도매처 sell-through 신호 — 잦은 재입고 = 다른 셀러들이 이미 검증한 SKU.
+        </div>
+        <div className="pt-1">
+          <strong>V2 보강 예정:</strong> ÷ (1 + log(스마트스토어 등록상품수)) saturation_penalty · 커뮤니티 시그널 LLM 정규화 · ggsan_price_history 가격 인하 추세 보너스
         </div>
       </section>
     </div>

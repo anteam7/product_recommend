@@ -98,6 +98,38 @@ async function fetchMeta() {
   return { totalProducts: totalProducts ?? 0, lastRun, queueRow }
 }
 
+interface VelocityRow {
+  goods_no: string
+  title: string
+  cate_label: string | null
+  cate_cd: string | null
+  price_krw: number | null
+  image_url: string | null
+  detail_url: string | null
+  current_status: string | null
+  is_imminent: boolean
+  restock_count_30d: number
+  avg_stockout_days: number | null
+  last_restock_at: string | null
+  last_stockout_at: string | null
+  days_since_last_restock: number | null
+  velocity_score: number
+}
+
+async function fetchVelocityTop(limit = 30): Promise<VelocityRow[]> {
+  const sb = createAdminClient()
+  // View 는 generated 타입 미반영 → as any 캐스팅 (DB 적용 후 npm run gen:types 시 제거)
+  const { data } = await sb
+    .from('jimscanner_ggsan_velocity' as never)
+    .select(
+      'goods_no, title, cate_cd, cate_label, price_krw, image_url, detail_url, current_status, is_imminent, restock_count_30d, avg_stockout_days, last_restock_at, last_stockout_at, days_since_last_restock, velocity_score'
+    )
+    .gt('restock_count_30d', 0)
+    .order('velocity_score', { ascending: false })
+    .limit(limit)
+  return ((data ?? []) as unknown) as VelocityRow[]
+}
+
 function buildHref(current: Record<string, string>, override: Record<string, string | null>): string {
   const params = new URLSearchParams()
   for (const [k, v] of Object.entries(current)) if (v) params.set(k, v)
@@ -123,9 +155,10 @@ export default async function GgsanPage({
 
   const current: Record<string, string> = { cat, imminent: imminent ? '1' : '', q, sort, page: String(page) }
 
-  const [{ products, total }, meta] = await Promise.all([
+  const [{ products, total }, meta, velocityTop] = await Promise.all([
     fetchData({ cat, imminent, q, sort, page }),
     fetchMeta(),
+    fetchVelocityTop(30),
   ])
 
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE))
@@ -158,6 +191,103 @@ export default async function GgsanPage({
           <span className="text-gray-400">매일 KST 02:00 자동 + 버튼으로 즉시 갱신</span>
         </div>
       )}
+
+      {/* 회전 Top 30 — 도매처 자체 sell-through 시그널 */}
+      <section className="rounded border border-emerald-200 bg-emerald-50/40 overflow-hidden">
+        <div className="px-4 py-2 border-b border-emerald-200 bg-emerald-50 flex items-baseline justify-between">
+          <h2 className="text-sm font-semibold text-emerald-900">
+            🔁 회전 Top {velocityTop.length}{' '}
+            <span className="text-xs font-normal text-emerald-700">
+              · 30일 내 품절↔재입고 사이클 빈도
+            </span>
+          </h2>
+          <span className="text-[11px] text-emerald-700">
+            외부 트렌드와 독립 · 셀러들이 이미 검증한 SKU
+          </span>
+        </div>
+        {velocityTop.length === 0 ? (
+          <div className="p-4 text-xs text-gray-500">
+            아직 완전한 stockout→restock 사이클이 관찰된 SKU 없음. 데이터 누적 대기.
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead className="bg-emerald-100/60 text-emerald-900">
+                <tr>
+                  <th className="px-2 py-2 text-left w-8">#</th>
+                  <th className="px-2 py-2 text-left">상품</th>
+                  <th className="px-2 py-2 text-right">재입고 횟수</th>
+                  <th className="px-2 py-2 text-right">평균 stockout</th>
+                  <th className="px-2 py-2 text-right">최근 사이클</th>
+                  <th className="px-2 py-2 text-right">현재 상태</th>
+                  <th className="px-2 py-2 text-right">velocity</th>
+                </tr>
+              </thead>
+              <tbody>
+                {velocityTop.map((v, i) => {
+                  const daysSince = v.days_since_last_restock
+                  const ddayLabel =
+                    daysSince == null
+                      ? '—'
+                      : daysSince < 1
+                        ? '오늘'
+                        : `${Math.floor(daysSince)}일 전`
+                  const statusBadge =
+                    v.current_status === 'sold_out'
+                      ? 'bg-red-100 text-red-700'
+                      : v.current_status === 'imminent'
+                        ? 'bg-orange-100 text-orange-700'
+                        : 'bg-emerald-100 text-emerald-700'
+                  return (
+                    <tr key={v.goods_no} className="border-t border-emerald-100 hover:bg-emerald-50">
+                      <td className="px-2 py-1.5 text-gray-400 font-mono">{i + 1}</td>
+                      <td className="px-2 py-1.5">
+                        <a
+                          href={v.detail_url ?? '#'}
+                          target="_blank"
+                          rel="noopener"
+                          className="flex items-center gap-2 hover:text-emerald-700"
+                        >
+                          {v.image_url && (
+                            // eslint-disable-next-line @next/next/no-img-element
+                            <img
+                              src={v.image_url}
+                              alt=""
+                              loading="lazy"
+                              className="w-8 h-8 rounded object-cover bg-gray-100"
+                            />
+                          )}
+                          <span className="line-clamp-1" title={v.title}>
+                            <span className="text-gray-400 mr-1">{v.cate_label ?? v.cate_cd}</span>
+                            {v.title}
+                          </span>
+                        </a>
+                      </td>
+                      <td className="px-2 py-1.5 text-right font-mono font-semibold">
+                        {v.restock_count_30d}회
+                      </td>
+                      <td className="px-2 py-1.5 text-right font-mono text-gray-600">
+                        {v.avg_stockout_days != null ? `${v.avg_stockout_days.toFixed(1)}일` : '—'}
+                      </td>
+                      <td className="px-2 py-1.5 text-right font-mono text-gray-600">
+                        {ddayLabel}
+                      </td>
+                      <td className="px-2 py-1.5 text-right">
+                        <span className={`inline-block px-1.5 py-0.5 rounded ${statusBadge}`}>
+                          {v.current_status ?? '—'}
+                        </span>
+                      </td>
+                      <td className="px-2 py-1.5 text-right font-mono font-bold text-emerald-700">
+                        {Number(v.velocity_score).toFixed(1)}
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
 
       {/* 필터: 카테고리 탭 */}
       <nav className="flex flex-wrap gap-1 border-b border-gray-200">

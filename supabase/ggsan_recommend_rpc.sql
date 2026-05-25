@@ -1,13 +1,14 @@
 -- ────────────────────────────────────────────────────────────
--- ggsan 위탁 후보 추천 RPC (V0, 2026-05-11)
+-- ggsan 위탁 후보 추천 RPC (V1, 2026-05-25)
 -- ────────────────────────────────────────────────────────────
 -- 사용처: /admin/trend-radar/recommend
 -- 입력 신호:
 --   1) TV 편성 (jimscanner_trends_keywords, source='naver_tvtime')
 --   2) 검색·쇼핑 (source IN naver_shopping_hot, naver_search_trend, aliex_best, musinsa_best)
 --   3) 임박특가 플래그 (jimscanner_ggsan_products.is_imminent)
+--   4) ggsan 자체 회전 속도 (jimscanner_ggsan_velocity, 2026-05-25 추가)
+--      - 도매처 sell-through 신호. 외부 demand 와 독립적으로 '이미 팔리는 SKU' 검증
 -- 출력: ggsan 상품 단위, 각 점수와 매칭 근거 펼침
--- V1 보강 예정: 스마트스토어 등록상품수(saturation_penalty), 커뮤니티 시그널, 가격 인하 추세
 -- ────────────────────────────────────────────────────────────
 
 CREATE OR REPLACE FUNCTION jimscanner_ggsan_recommend(
@@ -29,6 +30,7 @@ RETURNS TABLE (
   -- 점수 분해
   tv_score real,
   search_score real,
+  velocity_score real,
   raw_score real,
   imminent_bonus real,
   final_score real,
@@ -38,7 +40,11 @@ RETURNS TABLE (
   tv_total_pushes int,
   search_match_count int,
   search_top_keyword text,
-  search_sources text[]
+  search_sources text[],
+  -- velocity 근거
+  restock_count_30d int,
+  avg_stockout_days real,
+  days_since_last_restock real
 )
 LANGUAGE sql
 STABLE
@@ -128,23 +134,41 @@ AS $$
     GROUP BY goods_no
   ),
 
-  -- 5) ggsan 상품에 점수 매핑 (시그널 1개 이상 있는 것만)
+  -- 5) ggsan 자체 회전 속도 (도매처 sell-through 신호)
+  velocity AS (
+    SELECT
+      v.goods_no,
+      COALESCE(v.velocity_score, 0)::real AS velocity_score,
+      COALESCE(v.restock_count_30d, 0) AS restock_count_30d,
+      v.avg_stockout_days,
+      v.days_since_last_restock
+    FROM jimscanner_ggsan_velocity v
+  ),
+
+  -- 6) ggsan 상품에 점수 매핑 (시그널 1개 이상 있는 것만)
   scored AS (
     SELECT
       gp.goods_no, gp.title, gp.cate_cd, gp.cate_label, gp.price_krw,
       gp.is_imminent, gp.image_url, gp.detail_url, gp.last_seen_at,
       COALESCE(tv.tv_score, 0)::real AS tv_score,
       COALESCE(s.search_score, 0)::real AS search_score,
+      COALESCE(v.velocity_score, 0)::real AS velocity_score,
       COALESCE(tv.tv_match_count, 0) AS tv_match_count,
       COALESCE(tv.tv_top_keyword, '') AS tv_top_keyword,
       COALESCE(tv.tv_total_pushes, 0) AS tv_total_pushes,
       COALESCE(s.search_match_count, 0) AS search_match_count,
       COALESCE(s.search_top_keyword, '') AS search_top_keyword,
-      COALESCE(s.search_sources, ARRAY[]::text[]) AS search_sources
+      COALESCE(s.search_sources, ARRAY[]::text[]) AS search_sources,
+      COALESCE(v.restock_count_30d, 0) AS restock_count_30d,
+      v.avg_stockout_days,
+      v.days_since_last_restock
     FROM jimscanner_ggsan_products gp
     LEFT JOIN tv_agg tv ON tv.goods_no = gp.goods_no
     LEFT JOIN search_agg s ON s.goods_no = gp.goods_no
-    WHERE tv.tv_score IS NOT NULL OR s.search_score IS NOT NULL
+    LEFT JOIN velocity v ON v.goods_no = gp.goods_no
+    WHERE tv.tv_score IS NOT NULL
+       OR s.search_score IS NOT NULL
+       OR (v.velocity_score IS NOT NULL AND v.velocity_score > 0)
   )
 
   SELECT
@@ -159,24 +183,28 @@ AS $$
     s.last_seen_at AS ggsan_last_seen,
     s.tv_score,
     s.search_score,
-    (s.tv_score * 1.5 + s.search_score * 1.0)::real AS raw_score,
+    s.velocity_score,
+    (s.tv_score * 1.5 + s.search_score * 1.0 + s.velocity_score * 0.8)::real AS raw_score,
     (CASE WHEN s.is_imminent THEN 1.3 ELSE 1.0 END)::real AS imminent_bonus,
-    ((s.tv_score * 1.5 + s.search_score * 1.0)
+    ((s.tv_score * 1.5 + s.search_score * 1.0 + s.velocity_score * 0.8)
        * (CASE WHEN s.is_imminent THEN 1.3 ELSE 1.0 END))::real AS final_score,
     s.tv_match_count,
     s.tv_top_keyword,
     s.tv_total_pushes,
     s.search_match_count,
     s.search_top_keyword,
-    s.search_sources
+    s.search_sources,
+    s.restock_count_30d,
+    s.avg_stockout_days,
+    s.days_since_last_restock
   FROM scored s
-  WHERE ((s.tv_score * 1.5 + s.search_score * 1.0)
+  WHERE ((s.tv_score * 1.5 + s.search_score * 1.0 + s.velocity_score * 0.8)
            * (CASE WHEN s.is_imminent THEN 1.3 ELSE 1.0 END)) >= min_score
   ORDER BY
     -- 임박특가 우선
     (CASE WHEN s.is_imminent THEN 1 ELSE 0 END) DESC,
     -- final_score
-    ((s.tv_score * 1.5 + s.search_score * 1.0)
+    ((s.tv_score * 1.5 + s.search_score * 1.0 + s.velocity_score * 0.8)
        * (CASE WHEN s.is_imminent THEN 1.3 ELSE 1.0 END)) DESC
   LIMIT result_limit;
 $$;
