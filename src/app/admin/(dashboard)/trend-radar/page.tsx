@@ -58,20 +58,70 @@ async function fetchTvPushes() {
   type Row = { keyword: string; category: string | null; collected_at: string }
   const rows = (data ?? []) as Row[]
 
-  // 같은 keyword 의 편성 횟수 + 시간대 + 마지막 등장
-  const map = new Map<string, { keyword: string; count: number; slots: Set<string>; last: string }>()
+  // 같은 keyword 의 편성 횟수 + 시간대 + 마지막 등장 + peak slot
+  const map = new Map<
+    string,
+    {
+      keyword: string
+      count: number
+      slots: Set<string>
+      last: string
+      // (dow, hour) → count 분포
+      cellHist: Map<string, number>
+    }
+  >()
   for (const r of rows) {
     const k = r.keyword
     let v = map.get(k)
-    if (!v) { v = { keyword: k, count: 0, slots: new Set(), last: r.collected_at }; map.set(k, v) }
+    if (!v) {
+      v = {
+        keyword: k,
+        count: 0,
+        slots: new Set(),
+        last: r.collected_at,
+        cellHist: new Map(),
+      }
+      map.set(k, v)
+    }
     v.count++
     if (r.category) v.slots.add(r.category)
     if (r.collected_at > v.last) v.last = r.collected_at
+
+    // hour: category 가 HH:MM 이면 거기서, 아니면 collected_at 의 KST hour
+    let hour: number | null = null
+    if (r.category && /^\d{1,2}:[0-5]\d$/.test(r.category)) {
+      hour = Number(r.category.split(':')[0])
+    }
+    const d = new Date(r.collected_at)
+    // KST = UTC+9
+    const kstMs = d.getTime() + 9 * 3600_000
+    const kst = new Date(kstMs)
+    if (hour === null) hour = kst.getUTCHours()
+    const dow = kst.getUTCDay()
+    const cellKey = `${dow}|${hour}`
+    v.cellHist.set(cellKey, (v.cellHist.get(cellKey) ?? 0) + 1)
   }
+
+  const DOW = ['일', '월', '화', '수', '목', '금', '토']
   const ranked = [...map.values()]
-    .sort((a, b) => b.count - a.count || (b.last.localeCompare(a.last)))
+    .sort((a, b) => b.count - a.count || b.last.localeCompare(a.last))
     .slice(0, 20)
-    .map((v) => ({ ...v, slots: [...v.slots].sort() }))
+    .map((v) => {
+      let peakKey = ''
+      let peakCnt = 0
+      for (const [k, c] of v.cellHist) {
+        if (c > peakCnt) {
+          peakCnt = c
+          peakKey = k
+        }
+      }
+      let peakLabel = ''
+      if (peakKey) {
+        const [dow, hour] = peakKey.split('|').map(Number)
+        peakLabel = `${DOW[dow]} ${String(hour).padStart(2, '0')}시`
+      }
+      return { ...v, slots: [...v.slots].sort(), peakLabel, peakCnt }
+    })
   return { ranked, totalKeywords: map.size, totalRows: rows.length }
 }
 
@@ -240,23 +290,37 @@ export default async function TrendRadarPage({
           <div className="space-y-1">
             <div className="grid grid-cols-12 text-xs text-gray-500 px-2 py-1">
               <div className="col-span-1">#</div>
-              <div className="col-span-7">상품명</div>
+              <div className="col-span-5">상품명</div>
               <div className="col-span-1 text-right">편성</div>
               <div className="col-span-2 text-right">시간대</div>
+              <div className="col-span-2 text-right">peak slot</div>
               <div className="col-span-1 text-right">최근</div>
             </div>
             {tvPushes.ranked.map((r, i) => (
-              <div key={r.keyword} className="grid grid-cols-12 px-2 py-1 text-sm rounded hover:bg-white">
+              <Link
+                key={r.keyword}
+                href={`/admin/trend-radar/heatmap?src=naver_tvtime&kw=${encodeURIComponent(r.keyword)}`}
+                className="grid grid-cols-12 px-2 py-1 text-sm rounded hover:bg-white"
+              >
                 <div className="col-span-1 font-mono text-gray-400">{i + 1}</div>
-                <div className="col-span-7 truncate">{r.keyword}</div>
+                <div className="col-span-5 truncate">{r.keyword}</div>
                 <div className="col-span-1 text-right font-mono font-bold">{r.count}</div>
                 <div className="col-span-2 text-right text-xs text-gray-500">
                   {r.slots.length === 1 ? r.slots[0] : `${r.slots.length} 슬롯`}
                 </div>
+                <div className="col-span-2 text-right">
+                  {r.peakLabel ? (
+                    <span className="inline-block px-1.5 py-0.5 rounded bg-red-100 text-red-700 text-[11px] font-mono">
+                      {r.peakLabel}{r.peakCnt > 1 ? ` ×${r.peakCnt}` : ''}
+                    </span>
+                  ) : (
+                    <span className="text-gray-300 text-xs">—</span>
+                  )}
+                </div>
                 <div className="col-span-1 text-right text-xs text-gray-400">
                   {r.last.slice(5, 10)}
                 </div>
-              </div>
+              </Link>
             ))}
             <div className="text-xs text-gray-500 mt-3 pt-2 border-t border-amber-200">
               총 {tvPushes.totalKeywords}개 unique 상품 · {tvPushes.totalRows}회 편성 누적 (30일)
