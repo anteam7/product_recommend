@@ -28,6 +28,41 @@ interface RecommendRow {
   search_sources: string[]
 }
 
+// ─── Charm price cliff (mirrors supabase/charm_price_anchor.sql) ───
+const CLIFFS = [9900, 19900, 29900, 49900, 99900] as const
+type Cliff = (typeof CLIFFS)[number]
+type AnchorStatus = 'safe' | 'thin' | 'underwater' | 'unknown'
+const COST_KEEP_RATIO = 1 - (5.85 + 3.0 + 10.0) / 100 // platform + PG + VAT
+const SHIPPING_BORNE = 3000
+
+interface CliffAnchor {
+  cliff: Cliff
+  net_margin: number
+  headroom_pct: number
+  status: AnchorStatus
+}
+
+function computeAnchors(wholesale: number | null): CliffAnchor[] {
+  return CLIFFS.map((cliff) => {
+    if (wholesale == null) {
+      return { cliff, net_margin: 0, headroom_pct: 0, status: 'unknown' as const }
+    }
+    const net = cliff * COST_KEEP_RATIO - SHIPPING_BORNE - wholesale
+    const pct = (net / cliff) * 100
+    const status: AnchorStatus = pct >= 20 ? 'safe' : pct >= 5 ? 'thin' : 'underwater'
+    return { cliff, net_margin: Math.round(net), headroom_pct: Math.round(pct * 10) / 10, status }
+  })
+}
+
+function bestAnchor(anchors: CliffAnchor[]): CliffAnchor | null {
+  // 가장 낮은 cliff 중 safe → 없으면 가장 낮은 thin → 없으면 마지막(underwater)
+  const safe = anchors.find((a) => a.status === 'safe')
+  if (safe) return safe
+  const thin = anchors.find((a) => a.status === 'thin')
+  if (thin) return thin
+  return anchors[anchors.length - 1] ?? null
+}
+
 const DAYS_OPTIONS = [
   { v: 7, label: '7일' },
   { v: 14, label: '14일' },
@@ -92,6 +127,23 @@ function buildHref(current: Record<string, string>, override: Record<string, str
   return '/admin/trend-radar/recommend' + (qs ? `?${qs}` : '')
 }
 
+function parseCliffSet(raw: string): Set<number> {
+  if (!raw) return new Set()
+  const set = new Set<number>()
+  for (const tok of raw.split(',')) {
+    const n = parseInt(tok, 10)
+    if (CLIFFS.includes(n as Cliff)) set.add(n)
+  }
+  return set
+}
+
+function toggleCliffParam(current: Set<number>, cliff: number): string {
+  const next = new Set(current)
+  if (next.has(cliff)) next.delete(cliff)
+  else next.add(cliff)
+  return [...next].sort((a, b) => a - b).join(',')
+}
+
 function sourceLabel(s: string): string {
   switch (s) {
     case 'naver_shopping_hot': return '🛍 쇼핑hot'
@@ -102,10 +154,37 @@ function sourceLabel(s: string): string {
   }
 }
 
+function statusBadgeClass(status: AnchorStatus): string {
+  switch (status) {
+    case 'safe': return 'bg-emerald-100 text-emerald-800 border-emerald-300'
+    case 'thin': return 'bg-amber-100 text-amber-800 border-amber-300'
+    case 'underwater': return 'bg-rose-100 text-rose-800 border-rose-300'
+    default: return 'bg-gray-100 text-gray-600 border-gray-300'
+  }
+}
+
+function statusLabel(status: AnchorStatus): string {
+  switch (status) {
+    case 'safe': return 'SAFE'
+    case 'thin': return 'THIN'
+    case 'underwater': return 'UNDER'
+    default: return '—'
+  }
+}
+
+function barColor(status: AnchorStatus): string {
+  switch (status) {
+    case 'safe': return 'bg-emerald-500'
+    case 'thin': return 'bg-amber-500'
+    case 'underwater': return 'bg-rose-400'
+    default: return 'bg-gray-300'
+  }
+}
+
 export default async function RecommendPage({
   searchParams,
 }: {
-  searchParams: Promise<{ days?: string; sim?: string; imminent?: string; cate?: string }>
+  searchParams: Promise<{ days?: string; sim?: string; imminent?: string; cate?: string; cliffs?: string }>
 }) {
   const sp = await searchParams
   const days = parseInt(sp.days ?? '30', 10)
@@ -114,22 +193,38 @@ export default async function RecommendPage({
   const validSim = SIM_OPTIONS.some((s) => Math.abs(s.v - sim) < 0.001) ? sim : 0.2
   const imminentOnly = sp.imminent === '1'
   const cate = sp.cate ?? ''
+  const cliffsParam = sp.cliffs ?? ''
+  const cliffFilter = parseCliffSet(cliffsParam)
 
   const current: Record<string, string> = {
     days: String(validDays),
     sim: String(validSim),
     imminent: imminentOnly ? '1' : '',
     cate,
+    cliffs: cliffsParam,
   }
 
-  const { rows, error } = await fetchRecommend({ days: validDays, minSim: validSim, imminentOnly, cate })
+  const { rows: rawRows, error } = await fetchRecommend({ days: validDays, minSim: validSim, imminentOnly, cate })
+
+  // anchors 계산
+  const rowsWithAnchors = rawRows.map((r) => {
+    const anchors = computeAnchors(r.price_krw)
+    return { row: r, anchors, best: bestAnchor(anchors) }
+  })
+
+  // cliff 필터: 선택된 cliff 중 최소 하나가 safe/thin 인 SKU 만 통과
+  const rows = cliffFilter.size === 0
+    ? rowsWithAnchors
+    : rowsWithAnchors.filter((x) =>
+        x.anchors.some((a) => cliffFilter.has(a.cliff) && (a.status === 'safe' || a.status === 'thin'))
+      )
 
   // KPI
   const total = rows.length
-  const imminentCount = rows.filter((r) => r.is_imminent).length
-  const tvHitCount = rows.filter((r) => r.tv_score > 0).length
-  const searchHitCount = rows.filter((r) => r.search_score > 0).length
-  const avgFinal = rows.length > 0 ? rows.reduce((s, r) => s + Number(r.final_score), 0) / rows.length : 0
+  const imminentCount = rows.filter((x) => x.row.is_imminent).length
+  const safeCount = rows.filter((x) => x.best?.status === 'safe').length
+  const underwaterCount = rows.filter((x) => x.best?.status === 'underwater').length
+  const avgFinal = rows.length > 0 ? rows.reduce((s, x) => s + Number(x.row.final_score), 0) / rows.length : 0
 
   return (
     <div className="space-y-6 p-6">
@@ -137,7 +232,7 @@ export default async function RecommendPage({
         <div>
           <h1 className="text-2xl font-bold">⭐ 위탁 후보 추천 (V0)</h1>
           <p className="text-sm text-gray-500 mt-1">
-            ggsan 도매 카탈로그 × TV 편성 시그널 × 검색·쇼핑 시그널 — 임박특가 보너스 적용
+            ggsan 도매 카탈로그 × TV 편성 시그널 × 검색·쇼핑 시그널 — 임박특가 보너스 적용 · <strong>가격절벽 헤드룸 매핑</strong>
           </p>
         </div>
         <Link href="/admin/trend-radar" className="text-sm text-gray-700 hover:text-black underline">
@@ -149,6 +244,7 @@ export default async function RecommendPage({
       <div className="rounded border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-900">
         <strong>V0 한계</strong> · 스마트스토어·쿠팡 경쟁 데이터 부재로 saturation_penalty 미적용.
         커뮤니티 시그널은 LLM 정규화 후 V1에 포함 예정. 현재 점수는 <strong>수요 강도만</strong> 반영.
+        Cliff 헤드룸은 네이버 스마트스토어 가정 (플랫폼 5.85%+PG 3%+VAT 10%, 배송비 부담 ₩3,000).
       </div>
 
       {/* 필터 */}
@@ -185,6 +281,37 @@ export default async function RecommendPage({
             {imminentOnly ? '✓ ' : ''}임박특가만
           </Link>
         </div>
+
+        {/* Cliff 필터 (다중 선택) */}
+        <div className="flex flex-wrap items-center gap-2 border-t border-gray-100 pt-2">
+          <span className="text-xs text-gray-500">절벽 안착 가능</span>
+          {CLIFFS.map((c) => {
+            const active = cliffFilter.has(c)
+            const next = toggleCliffParam(cliffFilter, c)
+            return (
+              <Link
+                key={c}
+                href={buildHref(current, { cliffs: next || null })}
+                className={`px-2 py-1 text-xs rounded border ${
+                  active
+                    ? 'bg-emerald-100 text-emerald-800 border-emerald-300 font-semibold'
+                    : 'bg-white text-gray-600 border-gray-200 hover:border-gray-400'
+                }`}
+              >
+                {active ? '✓ ' : ''}₩{c.toLocaleString()}
+              </Link>
+            )
+          })}
+          {cliffFilter.size > 0 && (
+            <Link
+              href={buildHref(current, { cliffs: null })}
+              className="px-2 py-1 text-xs rounded text-gray-500 hover:text-black underline"
+            >
+              초기화
+            </Link>
+          )}
+        </div>
+
         <div className="flex flex-wrap gap-1 border-t border-gray-100 pt-2">
           <Link
             href={buildHref(current, { cate: null })}
@@ -208,8 +335,8 @@ export default async function RecommendPage({
       <section className="grid grid-cols-2 md:grid-cols-5 gap-3">
         <Kpi label="후보 상품" value={total} />
         <Kpi label="🔥 임박특가" value={imminentCount} highlight={imminentCount > 0} />
-        <Kpi label="TV 매칭" value={tvHitCount} />
-        <Kpi label="검색 매칭" value={searchHitCount} />
+        <Kpi label="🟢 SAFE 안착" value={safeCount} />
+        <Kpi label="🔴 UNDER (전 절벽 손실)" value={underwaterCount} />
         <Kpi label="평균 final_score" value={avgFinal.toFixed(2)} />
       </section>
 
@@ -230,12 +357,12 @@ export default async function RecommendPage({
           <div className="text-xs text-gray-400">
             데이터 부족 가능성: 1) WSL cron 죽음 (sources 페이지 확인) · 2) trends_keywords 가 1일치 미만 누적
             <br />
-            min_sim 을 0.15 로 낮추거나 days 60 으로 늘려보기. 누적 후엔 자동 풍부해짐.
+            min_sim 을 0.15 로 낮추거나 days 60 으로 늘려보기. cliff 필터를 풀어도 됨.
           </div>
         </div>
       ) : (
         <div className="space-y-2">
-          {rows.map((r, i) => (
+          {rows.map(({ row: r, anchors, best }, i) => (
             <a
               key={r.goods_no}
               href={r.detail_url ?? '#'}
@@ -292,13 +419,24 @@ export default async function RecommendPage({
                       </span>
                     )}
                   </div>
+
+                  {/* Cliff 헤드룸 미니차트 */}
+                  <CliffStrip anchors={anchors} wholesale={r.price_krw} />
                 </div>
 
-                {/* 점수 + 가격 */}
-                <div className="text-right flex-shrink-0 space-y-1">
+                {/* 점수 + 가격 + best cliff */}
+                <div className="text-right flex-shrink-0 space-y-1 w-40">
                   <div className="text-base font-bold">
                     {r.price_krw ? `${r.price_krw.toLocaleString()}원` : <span className="text-gray-400 text-xs">가격 X</span>}
                   </div>
+                  {best && (
+                    <div className={`inline-block text-[10px] font-mono px-2 py-0.5 rounded border ${statusBadgeClass(best.status)}`}>
+                      ₩{best.cliff.toLocaleString()} · {statusLabel(best.status)}
+                      {best.status !== 'unknown' && (
+                        <span className="ml-1 opacity-70">({best.headroom_pct > 0 ? '+' : ''}{best.headroom_pct}%)</span>
+                      )}
+                    </div>
+                  )}
                   <div className="text-2xl font-bold font-mono text-amber-700">
                     {Number(r.final_score).toFixed(1)}
                   </div>
@@ -315,7 +453,7 @@ export default async function RecommendPage({
       )}
 
       {/* 공식 설명 */}
-      <section className="text-xs text-gray-500 border-t border-gray-200 pt-4 space-y-1">
+      <section className="text-xs text-gray-500 border-t border-gray-200 pt-4 space-y-2">
         <div className="font-semibold text-gray-700">📐 ProductScore V0 공식</div>
         <code className="block bg-gray-50 px-3 py-2 rounded font-mono text-[11px] leading-relaxed">
           final_score = (tv_score × 1.5 + search_score × 1.0) × imminent_bonus
@@ -326,10 +464,55 @@ export default async function RecommendPage({
           <br />
           imminent_bonus = is_imminent ? 1.3 : 1.0
         </code>
+
+        <div className="font-semibold text-gray-700 pt-2">💸 Charm Price Cliff 헤드룸 공식</div>
+        <code className="block bg-gray-50 px-3 py-2 rounded font-mono text-[11px] leading-relaxed">
+          net = cliff × (1 − 5.85% − 3% − 10%) − ₩3,000 배송 − 도매가
+          <br />
+          headroom_pct = net / cliff × 100
+          <br />
+          status = headroom_pct ≥ 20 ? &apos;safe&apos; : ≥ 5 ? &apos;thin&apos; : &apos;underwater&apos;
+        </code>
+
         <div className="pt-2">
-          <strong>V1 보강 예정:</strong> ÷ (1 + log(스마트스토어 등록상품수)) saturation_penalty · 커뮤니티 시그널 LLM 정규화 후 추가 · ggsan_price_history 가격 인하 추세 보너스
+          <strong>V1 보강 예정:</strong> ÷ (1 + log(스마트스토어 등록상품수)) saturation_penalty · 커뮤니티 시그널 LLM 정규화 후 추가 · ggsan_price_history 가격 인하 추세 보너스 · 동 카테고리 SERP 가격 modal bin 으로 distance-to-cliff 표시
         </div>
       </section>
+    </div>
+  )
+}
+
+function CliffStrip({ anchors, wholesale }: { anchors: CliffAnchor[]; wholesale: number | null }) {
+  if (wholesale == null) {
+    return <div className="text-[10px] text-gray-400 pt-1">cliff: 도매가 없음</div>
+  }
+  // 각 cliff 별 가로 막대: 막대 길이 = headroom_pct (음수면 0) · 색상 = status
+  const maxPct = Math.max(40, ...anchors.map((a) => Math.max(0, a.headroom_pct)))
+  return (
+    <div className="flex items-center gap-1 pt-1.5">
+      {anchors.map((a) => {
+        const widthPct = Math.max(2, Math.min(100, (Math.max(0, a.headroom_pct) / maxPct) * 100))
+        return (
+          <div key={a.cliff} className="flex-1 group relative" title={`₩${a.cliff.toLocaleString()} · ${a.headroom_pct}% · net ₩${a.net_margin.toLocaleString()} · ${a.status}`}>
+            <div className="text-[9px] text-gray-500 font-mono leading-tight mb-0.5">
+              ₩{(a.cliff / 1000).toFixed(a.cliff >= 10000 ? 0 : 1)}k
+            </div>
+            <div className="h-2 bg-gray-100 rounded-sm overflow-hidden relative">
+              <div
+                className={`h-full ${barColor(a.status)}`}
+                style={{ width: `${widthPct}%` }}
+              />
+            </div>
+            <div className={`text-[9px] font-mono leading-tight mt-0.5 ${
+              a.status === 'safe' ? 'text-emerald-700'
+              : a.status === 'thin' ? 'text-amber-700'
+              : 'text-rose-600'
+            }`}>
+              {a.headroom_pct > 0 ? '+' : ''}{a.headroom_pct}%
+            </div>
+          </div>
+        )
+      })}
     </div>
   )
 }
