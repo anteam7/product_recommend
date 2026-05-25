@@ -36,9 +36,21 @@ interface ScoreRow {
   computed_at: string
 }
 
+interface SiblingRow {
+  cluster_id: string
+  confidence: number
+  sku_source: string
+  sku_id: string
+  brand: string | null
+  channel: string | null
+  price_krw: number | null
+  url: string | null
+  image_url: string | null
+}
+
 async function fetchProduct(id: string) {
   const sb = createAdminClient()
-  const [prodRes, aliasRes, scoreRes] = await Promise.all([
+  const [prodRes, aliasRes, scoreRes, siblingsRes] = await Promise.all([
     sb.from('jimscanner_trends_products').select('*').eq('id', id).single(),
     sb
       .from('jimscanner_trends_aliases')
@@ -51,6 +63,12 @@ async function fetchProduct(id: string) {
       .eq('product_id', id)
       .order('computed_at', { ascending: false })
       .limit(30),
+    // OEM 형제 후보 (마이그레이션 후 RPC, 타입 미정의 → as any)
+    (sb as any).rpc('jimscanner_factory_siblings_by_sku', {
+      p_sku_source: 'trends_product',
+      p_sku_id: id,
+      result_limit: 20,
+    }),
   ])
 
   if (prodRes.error || !prodRes.data) return null
@@ -59,6 +77,7 @@ async function fetchProduct(id: string) {
     product: prodRes.data as ProductRow,
     aliases: (aliasRes.data ?? []) as AliasRow[],
     scoreHistory: (scoreRes.data ?? []) as ScoreRow[],
+    siblings: ((siblingsRes as any)?.data ?? []) as SiblingRow[],
   }
 }
 
@@ -70,7 +89,7 @@ export default async function ProductDetailPage({
   const { id } = await params
   const data = await fetchProduct(id)
   if (!data) notFound()
-  const { product, aliases, scoreHistory } = data
+  const { product, aliases, scoreHistory, siblings } = data
   const latest = scoreHistory[0]
 
   return (
@@ -161,6 +180,61 @@ export default async function ProductDetailPage({
           </pre>
         </section>
       )}
+
+      {/* OEM 형제 */}
+      <section>
+        <h2 className="text-sm font-semibold mb-2 flex items-center gap-2">
+          🏭 OEM 형제 후보
+          <Link
+            href="/admin/trend-radar/factory-clusters"
+            className="text-xs text-blue-700 hover:underline font-normal"
+          >
+            전체 보드 →
+          </Link>
+        </h2>
+        {siblings.length === 0 ? (
+          <div className="rounded border border-dashed border-gray-300 text-xs text-gray-500 px-4 py-4">
+            아직 매핑된 공유공장 클러스터가 없습니다.
+            <span className="text-gray-400 ml-1">
+              (scripts/cluster-factory.mjs 가 임베딩 hookup 후 채워줍니다.)
+            </span>
+          </div>
+        ) : (
+          <div className="rounded border border-gray-200 divide-y divide-gray-100">
+            {siblings.map((s) => (
+              <div
+                key={`${s.cluster_id}::${s.sku_source}::${s.sku_id}`}
+                className="grid grid-cols-12 px-3 py-2 text-sm items-center"
+              >
+                <div className="col-span-2 text-xs font-mono text-gray-500">{s.sku_source}</div>
+                <div className="col-span-3 text-gray-800">{s.brand ?? <i className="text-gray-400">brand 미상</i>}</div>
+                <div className="col-span-2 text-xs">
+                  {s.channel === 'wholesale' && (
+                    <span className="px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-700">도매</span>
+                  )}
+                  {s.channel === 'retail' && (
+                    <span className="px-1.5 py-0.5 rounded bg-rose-100 text-rose-700">리테일</span>
+                  )}
+                  {s.channel !== 'wholesale' && s.channel !== 'retail' && (
+                    <span className="text-gray-400">{s.channel ?? '—'}</span>
+                  )}
+                </div>
+                <div className="col-span-2 text-right font-mono text-xs">
+                  {s.price_krw != null ? `${s.price_krw.toLocaleString('ko-KR')}원` : '—'}
+                </div>
+                <div className="col-span-3 text-right text-xs">
+                  <Link
+                    href={`/admin/trend-radar/factory-clusters/${encodeURIComponent(s.cluster_id)}`}
+                    className="text-blue-700 hover:underline"
+                  >
+                    cluster {s.cluster_id.slice(0, 8)}… →
+                  </Link>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
 
       {/* aliases */}
       <section>
