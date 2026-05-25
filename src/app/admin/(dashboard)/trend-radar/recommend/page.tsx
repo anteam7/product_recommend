@@ -28,6 +28,19 @@ interface RecommendRow {
   search_sources: string[]
 }
 
+interface ConvergenceLookupRow {
+  keyword: string
+  convergence_score: number
+  source_count: number
+  positive_source_count: number
+}
+
+interface EnrichedRow extends RecommendRow {
+  convergence_score: number
+  convergence_sources: number
+  convergence_keyword: string | null
+}
+
 const DAYS_OPTIONS = [
   { v: 7, label: '7일' },
   { v: 14, label: '14일' },
@@ -40,6 +53,12 @@ const SIM_OPTIONS = [
   { v: 0.2, label: '0.20 (기본)' },
   { v: 0.3, label: '0.30 (엄격)' },
 ] as const
+
+const SORT_OPTIONS = [
+  { v: 'final', label: 'final_score (기본)' },
+  { v: 'convergence', label: '🎯 convergence_score' },
+] as const
+type SortMode = (typeof SORT_OPTIONS)[number]['v']
 
 async function fetchRecommend(opts: {
   days: number
@@ -62,6 +81,54 @@ async function fetchRecommend(opts: {
   if (opts.imminentOnly) rows = rows.filter((r) => r.is_imminent)
   if (opts.cate) rows = rows.filter((r) => r.cate_cd === opts.cate)
   return { rows, error: null as string | null }
+}
+
+async function enrichWithConvergence(rows: RecommendRow[]): Promise<EnrichedRow[]> {
+  if (rows.length === 0) return []
+  const sb = createAdminClient()
+  const keywords = Array.from(
+    new Set(
+      rows
+        .flatMap((r) => [r.tv_top_keyword, r.search_top_keyword])
+        .filter((k): k is string => !!k && k.trim().length > 1)
+        .map((k) => k.toLowerCase().trim()),
+    ),
+  )
+  if (keywords.length === 0) {
+    return rows.map((r) => ({
+      ...r,
+      convergence_score: 0,
+      convergence_sources: 0,
+      convergence_keyword: null,
+    }))
+  }
+  // jimscanner_keyword_convergence_lookup — supabase/keyword_convergence.sql
+  const { data, error } = await sb.rpc(
+    'jimscanner_keyword_convergence_lookup' as never,
+    { keywords } as never,
+  )
+  const lookup = new Map<string, ConvergenceLookupRow>()
+  if (!error && Array.isArray(data)) {
+    for (const r of data as ConvergenceLookupRow[]) lookup.set(r.keyword, r)
+  }
+  return rows.map((r) => {
+    const tvKey = r.tv_top_keyword?.toLowerCase().trim() ?? ''
+    const sKey = r.search_top_keyword?.toLowerCase().trim() ?? ''
+    const tvHit = tvKey ? lookup.get(tvKey) : undefined
+    const sHit = sKey ? lookup.get(sKey) : undefined
+    const best =
+      tvHit && sHit
+        ? tvHit.convergence_score >= sHit.convergence_score
+          ? tvHit
+          : sHit
+        : tvHit ?? sHit ?? null
+    return {
+      ...r,
+      convergence_score: best?.convergence_score ?? 0,
+      convergence_sources: best?.positive_source_count ?? 0,
+      convergence_keyword: best?.keyword ?? null,
+    }
+  })
 }
 
 const CATEGORIES: { code: string; label: string }[] = [
@@ -105,7 +172,13 @@ function sourceLabel(s: string): string {
 export default async function RecommendPage({
   searchParams,
 }: {
-  searchParams: Promise<{ days?: string; sim?: string; imminent?: string; cate?: string }>
+  searchParams: Promise<{
+    days?: string
+    sim?: string
+    imminent?: string
+    cate?: string
+    sort?: string
+  }>
 }) {
   const sp = await searchParams
   const days = parseInt(sp.days ?? '30', 10)
@@ -114,15 +187,32 @@ export default async function RecommendPage({
   const validSim = SIM_OPTIONS.some((s) => Math.abs(s.v - sim) < 0.001) ? sim : 0.2
   const imminentOnly = sp.imminent === '1'
   const cate = sp.cate ?? ''
+  const sort: SortMode =
+    sp.sort === 'convergence' ? 'convergence' : 'final'
 
   const current: Record<string, string> = {
     days: String(validDays),
     sim: String(validSim),
     imminent: imminentOnly ? '1' : '',
     cate,
+    sort,
   }
 
-  const { rows, error } = await fetchRecommend({ days: validDays, minSim: validSim, imminentOnly, cate })
+  const { rows: rawRows, error } = await fetchRecommend({
+    days: validDays,
+    minSim: validSim,
+    imminentOnly,
+    cate,
+  })
+  const enriched = await enrichWithConvergence(rawRows)
+  const rows: EnrichedRow[] =
+    sort === 'convergence'
+      ? [...enriched].sort((a, b) => {
+          // 임박은 여전히 상단 우선
+          if (a.is_imminent !== b.is_imminent) return a.is_imminent ? -1 : 1
+          return b.convergence_score - a.convergence_score
+        })
+      : enriched
 
   // KPI
   const total = rows.length
@@ -184,6 +274,18 @@ export default async function RecommendPage({
           >
             {imminentOnly ? '✓ ' : ''}임박특가만
           </Link>
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-gray-500">정렬</span>
+            {SORT_OPTIONS.map((s) => (
+              <Link
+                key={s.v}
+                href={buildHref(current, { sort: s.v })}
+                className={`px-2 py-1 text-xs rounded ${sort === s.v ? 'bg-emerald-100 text-emerald-700 font-semibold' : 'text-gray-500 hover:text-black'}`}
+              >
+                {s.label}
+              </Link>
+            ))}
+          </div>
         </div>
         <div className="flex flex-wrap gap-1 border-t border-gray-100 pt-2">
           <Link
@@ -289,6 +391,18 @@ export default async function RecommendPage({
                     {r.search_sources.length > 0 && (
                       <span className="text-gray-500">
                         from {r.search_sources.map(sourceLabel).join(', ')}
+                      </span>
+                    )}
+                    {r.convergence_score > 0 && (
+                      <span
+                        className={`px-2 py-0.5 rounded ${
+                          r.convergence_sources >= 2
+                            ? 'bg-emerald-100 text-emerald-800'
+                            : 'bg-gray-100 text-gray-600'
+                        }`}
+                        title={`키워드 "${r.convergence_keyword}" 의 cross-source convergence`}
+                      >
+                        🎯 conv {r.convergence_score.toFixed(2)} · {r.convergence_sources}소스
                       </span>
                     )}
                   </div>
