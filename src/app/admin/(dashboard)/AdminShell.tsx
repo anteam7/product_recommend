@@ -89,6 +89,24 @@ const NAV_GROUPS: NavGroup[] = [
     ],
   },
   {
+    id: 'coupang',
+    label: '쿠팡 자동등록',
+    items: [
+      {
+        href: '/admin/coupang-publish',
+        label: '등록 상품 관리',
+        icon: '🅒',
+        match: (p) => p.startsWith('/admin/coupang-publish'),
+      },
+      {
+        href: '/admin/coupang-orders',
+        label: '주문 ↔ 매입',
+        icon: '📦',
+        match: (p) => p.startsWith('/admin/coupang-orders'),
+      },
+    ],
+  },
+  {
     id: 'meta',
     label: '메타',
     items: [
