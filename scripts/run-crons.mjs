@@ -144,4 +144,27 @@ if (!skipClassify) {
   if (classifyExit !== 0) failCount++
 }
 
+// weather: KMA 예보 수집 + ggsan weather_tags 분류 (둘 다 로컬 노드 스크립트).
+const skipWeather = args.includes('--no-weather') || !!filter
+if (!skipWeather) {
+  for (const script of ['collect-weather-forecast.mjs', 'classify-weather-tags.mjs']) {
+    console.log(`[${new Date().toISOString()}] launching ${script}`)
+    const scriptPath = resolvePath(__dirname, script)
+    const exit = await new Promise((resolve) => {
+      const child = spawn(process.execPath, ['--env-file=.env.local', scriptPath], {
+        stdio: 'inherit',
+        env: process.env,
+      })
+      child.on('exit', (code) => resolve(code ?? 0))
+      child.on('error', (err) => {
+        console.error(`  ${script} spawn error: ${err.message}`)
+        resolve(1)
+      })
+    })
+    if (exit !== 0) {
+      console.warn(`  ${script} exited ${exit} — continuing`)
+    }
+  }
+}
+
 process.exit(failCount > 0 ? 1 : 0)

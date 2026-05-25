@@ -64,6 +64,71 @@ async function fetchRecommend(opts: {
   return { rows, error: null as string | null }
 }
 
+// 활성 기상 경보 → 매칭되는 product weather_tag 키
+const ALERT_TO_PRODUCT_TAG: Record<string, string> = {
+  heat: 'cool',
+  cold: 'heat',
+  rain: 'rain',
+  dust: 'dust',
+  uv: 'uv',
+  humidity: 'humidity',
+}
+
+async function fetchWeatherContext(goodsNos: string[]): Promise<{
+  activeProductTags: Set<string>
+  productTags: Map<string, Record<string, number>>
+}> {
+  const sb = createAdminClient()
+  const empty = { activeProductTags: new Set<string>(), productTags: new Map<string, Record<string, number>>() }
+  if (goodsNos.length === 0) return empty
+  // 최신 예보의 active_tags
+  const { data: fc, error: fcErr } = await sb
+    .from('jimscanner_weather_forecast_latest' as never)
+    .select('active_tags')
+    .limit(1)
+    .maybeSingle()
+  if (fcErr) {
+    // 테이블 미존재 등은 무시 — 기상 데이터 없을 뿐 페이지 동작은 유지.
+    return empty
+  }
+  const activeAlerts = ((fc as { active_tags?: string[] } | null)?.active_tags ?? []) as string[]
+  const activeProductTags = new Set<string>()
+  for (const a of activeAlerts) {
+    const k = ALERT_TO_PRODUCT_TAG[a]
+    if (k) activeProductTags.add(k)
+  }
+
+  const { data: prods } = await sb
+    .from('jimscanner_ggsan_products' as never)
+    .select('goods_no, weather_tags')
+    .in('goods_no', goodsNos)
+  const productTags = new Map<string, Record<string, number>>()
+  for (const p of (prods ?? []) as { goods_no: string; weather_tags: Record<string, number> | null }[]) {
+    if (p.weather_tags) productTags.set(p.goods_no, p.weather_tags)
+  }
+  return { activeProductTags, productTags }
+}
+
+function computeWeatherBoost(
+  goodsNo: string,
+  productTags: Map<string, Record<string, number>>,
+  activeProductTags: Set<string>,
+): { boost: number; matchedTag: string | null } {
+  const tags = productTags.get(goodsNo)
+  if (!tags) return { boost: 0, matchedTag: null }
+  let best = 0
+  let matched: string | null = null
+  for (const t of activeProductTags) {
+    const v = tags[t]
+    if (typeof v === 'number' && v > best) {
+      best = v
+      matched = t
+    }
+  }
+  // weather_boost 0~1 — final_score 가산용 가중치
+  return { boost: best, matchedTag: matched }
+}
+
 const CATEGORIES: { code: string; label: string }[] = [
   { code: '001', label: '장건강' },
   { code: '002', label: '눈건강' },
@@ -124,8 +189,21 @@ export default async function RecommendPage({
 
   const { rows, error } = await fetchRecommend({ days: validDays, minSim: validSim, imminentOnly, cate })
 
+  const weather = await fetchWeatherContext(rows.map((r) => r.goods_no))
+
+  const rowsWithBoost = rows.map((r) => {
+    const { boost, matchedTag } = computeWeatherBoost(r.goods_no, weather.productTags, weather.activeProductTags)
+    return {
+      ...r,
+      weather_boost: boost,
+      weather_match_tag: matchedTag,
+      final_score_with_weather: Number(r.final_score) + boost,
+    }
+  })
+
   // KPI
   const total = rows.length
+  const weatherHitCount = rowsWithBoost.filter((r) => r.weather_boost >= 0.5).length
   const imminentCount = rows.filter((r) => r.is_imminent).length
   const tvHitCount = rows.filter((r) => r.tv_score > 0).length
   const searchHitCount = rows.filter((r) => r.search_score > 0).length
@@ -205,11 +283,12 @@ export default async function RecommendPage({
       </div>
 
       {/* KPI */}
-      <section className="grid grid-cols-2 md:grid-cols-5 gap-3">
+      <section className="grid grid-cols-2 md:grid-cols-6 gap-3">
         <Kpi label="후보 상품" value={total} />
         <Kpi label="🔥 임박특가" value={imminentCount} highlight={imminentCount > 0} />
-        <Kpi label="TV 매칭" value={tvHitCount} />
-        <Kpi label="검색 매칭" value={searchHitCount} />
+        <Kpi label="📺 TV 매칭" value={tvHitCount} />
+        <Kpi label="🔍 검색 매칭" value={searchHitCount} />
+        <Kpi label="🌦 기상 매칭" value={weatherHitCount} highlight={weatherHitCount > 0} />
         <Kpi label="평균 final_score" value={avgFinal.toFixed(2)} />
       </section>
 
@@ -235,7 +314,7 @@ export default async function RecommendPage({
         </div>
       ) : (
         <div className="space-y-2">
-          {rows.map((r, i) => (
+          {rowsWithBoost.map((r, i) => (
             <a
               key={r.goods_no}
               href={r.detail_url ?? '#'}
@@ -291,6 +370,11 @@ export default async function RecommendPage({
                         from {r.search_sources.map(sourceLabel).join(', ')}
                       </span>
                     )}
+                    {r.weather_boost >= 0.5 && r.weather_match_tag && (
+                      <span className="bg-cyan-100 text-cyan-800 px-2 py-0.5 rounded">
+                        🌦 기상 +{r.weather_boost.toFixed(2)} ({r.weather_match_tag})
+                      </span>
+                    )}
                   </div>
                 </div>
 
@@ -306,6 +390,9 @@ export default async function RecommendPage({
                     <div>TV {Number(r.tv_score).toFixed(2)} × 1.5</div>
                     <div>검색 {Number(r.search_score).toFixed(2)} × 1.0</div>
                     {r.is_imminent && <div className="text-red-600">× 1.3 (임박)</div>}
+                    {r.weather_boost >= 0.5 && (
+                      <div className="text-cyan-700">+ {r.weather_boost.toFixed(2)} (기상)</div>
+                    )}
                   </div>
                 </div>
               </div>
