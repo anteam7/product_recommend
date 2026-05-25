@@ -28,6 +28,41 @@ interface RecommendRow {
   search_sources: string[]
 }
 
+interface ChannelTopRow {
+  goods_no: string
+  top1_channel: string
+  top1_margin_pct: number
+  top2_channel: string | null
+  top2_margin_pct: number | null
+  margin_delta_pct: number
+}
+
+const CHANNEL_LABELS: Record<string, string> = {
+  coupang: '쿠팡',
+  naver_smartstore: '네이버 스토어',
+  '11st': '11번가',
+  gmarket: '지마켓',
+  auction: '옥션',
+}
+
+const CHANNEL_COLORS: Record<string, string> = {
+  coupang: 'bg-orange-100 text-orange-800 border-orange-200',
+  naver_smartstore: 'bg-green-100 text-green-800 border-green-200',
+  '11st': 'bg-red-100 text-red-800 border-red-200',
+  gmarket: 'bg-emerald-100 text-emerald-800 border-emerald-200',
+  auction: 'bg-yellow-100 text-yellow-800 border-yellow-200',
+}
+
+function channelLabel(c: string | null | undefined): string {
+  if (!c) return '—'
+  return CHANNEL_LABELS[c] ?? c
+}
+
+function channelBadgeClass(c: string | null | undefined): string {
+  if (!c) return 'bg-gray-100 text-gray-500 border-gray-200'
+  return CHANNEL_COLORS[c] ?? 'bg-gray-100 text-gray-700 border-gray-200'
+}
+
 const DAYS_OPTIONS = [
   { v: 7, label: '7일' },
   { v: 14, label: '14일' },
@@ -62,6 +97,22 @@ async function fetchRecommend(opts: {
   if (opts.imminentOnly) rows = rows.filter((r) => r.is_imminent)
   if (opts.cate) rows = rows.filter((r) => r.cate_cd === opts.cate)
   return { rows, error: null as string | null }
+}
+
+async function fetchChannelTop(goodsNos: string[]): Promise<Map<string, ChannelTopRow>> {
+  if (goodsNos.length === 0) return new Map()
+  const sb = createAdminClient()
+  // RPC 는 supabase/channel_metrics.sql 에 정의 — generated 타입 미반영
+  const { data, error } = await sb.rpc('jimscanner_channel_match_top' as never, {
+    goods_nos: goodsNos,
+  } as never)
+  if (error) {
+    return new Map()
+  }
+  const rows = (data ?? []) as ChannelTopRow[]
+  const map = new Map<string, ChannelTopRow>()
+  for (const r of rows) map.set(r.goods_no, r)
+  return map
 }
 
 const CATEGORIES: { code: string; label: string }[] = [
@@ -123,6 +174,15 @@ export default async function RecommendPage({
   }
 
   const { rows, error } = await fetchRecommend({ days: validDays, minSim: validSim, imminentOnly, cate })
+  const channelMap = await fetchChannelTop(rows.map((r) => r.goods_no))
+
+  // 채널별 추천 카운트 (히트맵용)
+  const channelHeat = new Map<string, number>()
+  for (const ct of channelMap.values()) {
+    channelHeat.set(ct.top1_channel, (channelHeat.get(ct.top1_channel) ?? 0) + 1)
+  }
+  const channelHeatEntries = Array.from(channelHeat.entries()).sort((a, b) => b[1] - a[1])
+  const maxHeat = channelHeatEntries[0]?.[1] ?? 0
 
   // KPI
   const total = rows.length
@@ -213,6 +273,34 @@ export default async function RecommendPage({
         <Kpi label="평균 final_score" value={avgFinal.toFixed(2)} />
       </section>
 
+      {/* 채널 히트맵 패널 */}
+      {channelHeatEntries.length > 0 && (
+        <section className="rounded border border-gray-200 p-4">
+          <div className="text-xs font-semibold text-gray-700 mb-2">
+            🎯 채널 할당 옵티마이저 — Top1 추천 채널 분포
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {channelHeatEntries.map(([ch, cnt]) => {
+              const ratio = maxHeat > 0 ? cnt / maxHeat : 0
+              return (
+                <div
+                  key={ch}
+                  className={`px-3 py-2 rounded border text-xs ${channelBadgeClass(ch)}`}
+                  style={{ opacity: 0.5 + ratio * 0.5 }}
+                  title={`${channelLabel(ch)} 추천 ${cnt}건`}
+                >
+                  <span className="font-semibold">{channelLabel(ch)}</span>
+                  <span className="ml-2 font-mono">{cnt}</span>
+                </div>
+              )
+            })}
+          </div>
+          <div className="text-[10px] text-gray-400 mt-2">
+            match_score = (net_margin × (0.5 + SERP점유)) − 리뷰장벽×50 · 데이터: jimscanner_channel_metrics
+          </div>
+        </section>
+      )}
+
       {/* 에러 */}
       {error && (
         <div className="rounded border border-red-300 bg-red-50 px-4 py-3 text-sm text-red-800">
@@ -235,7 +323,9 @@ export default async function RecommendPage({
         </div>
       ) : (
         <div className="space-y-2">
-          {rows.map((r, i) => (
+          {rows.map((r, i) => {
+            const ch = channelMap.get(r.goods_no)
+            return (
             <a
               key={r.goods_no}
               href={r.detail_url ?? '#'}
@@ -294,6 +384,31 @@ export default async function RecommendPage({
                   </div>
                 </div>
 
+                {/* 추천 채널 */}
+                <div className="w-36 flex-shrink-0 space-y-1 text-right border-l border-gray-100 pl-3">
+                  <div className="text-[10px] text-gray-400 uppercase tracking-wide">추천 채널</div>
+                  {ch ? (
+                    <>
+                      <div className={`inline-block px-2 py-0.5 rounded border text-xs font-semibold ${channelBadgeClass(ch.top1_channel)}`}>
+                        ① {channelLabel(ch.top1_channel)}
+                      </div>
+                      <div className="text-xs font-mono text-gray-700">
+                        net {Number(ch.top1_margin_pct).toFixed(1)}%
+                      </div>
+                      {ch.top2_channel && (
+                        <div className={`inline-block px-2 py-0.5 rounded border text-[10px] ${channelBadgeClass(ch.top2_channel)}`}>
+                          ② {channelLabel(ch.top2_channel)} · {Number(ch.top2_margin_pct ?? 0).toFixed(1)}%
+                        </div>
+                      )}
+                      <div className="text-[10px] text-gray-500 font-mono">
+                        Δ {Number(ch.margin_delta_pct).toFixed(1)}pp
+                      </div>
+                    </>
+                  ) : (
+                    <div className="text-[10px] text-gray-400">데이터 없음</div>
+                  )}
+                </div>
+
                 {/* 점수 + 가격 */}
                 <div className="text-right flex-shrink-0 space-y-1">
                   <div className="text-base font-bold">
@@ -310,7 +425,8 @@ export default async function RecommendPage({
                 </div>
               </div>
             </a>
-          ))}
+            )
+          })}
         </div>
       )}
 
