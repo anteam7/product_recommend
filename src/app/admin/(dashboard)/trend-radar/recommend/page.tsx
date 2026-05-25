@@ -41,6 +41,16 @@ const SIM_OPTIONS = [
   { v: 0.3, label: '0.30 (엄격)' },
 ] as const
 
+interface DimMarginRow {
+  goods_no: string
+  billable_weight_g: number | null
+  weight_bucket: string | null
+  margin_pct: number | null
+  unit_landed_cost_krw: number | null
+  gate_status: string | null
+  gate_reason: string | null
+}
+
 async function fetchRecommend(opts: {
   days: number
   minSim: number
@@ -56,12 +66,55 @@ async function fetchRecommend(opts: {
     result_limit: 200,
   } as never)
   if (error) {
-    return { rows: [] as RecommendRow[], error: error.message }
+    return { rows: [] as RecommendRow[], dim: new Map<string, DimMarginRow>(), error: error.message }
   }
   let rows = (data ?? []) as RecommendRow[]
   if (opts.imminentOnly) rows = rows.filter((r) => r.is_imminent)
   if (opts.cate) rows = rows.filter((r) => r.cate_cd === opts.cate)
-  return { rows, error: null as string | null }
+
+  // DIM Margin 데이터 병합 (테이블: jimscanner_ggsan_dim_margin — generated 타입 반영 전이므로 캐스팅)
+  const ids = rows.map((r) => r.goods_no)
+  let dim = new Map<string, DimMarginRow>()
+  if (ids.length > 0) {
+    const { data: dimData, error: dimErr } = await (sb as unknown as {
+      from: (t: string) => {
+        select: (s: string) => { in: (col: string, v: string[]) => Promise<{ data: DimMarginRow[] | null; error: { message: string } | null }> }
+      }
+    })
+      .from('jimscanner_ggsan_dim_margin')
+      .select('goods_no, billable_weight_g, weight_bucket, margin_pct, unit_landed_cost_krw, gate_status, gate_reason')
+      .in('goods_no', ids)
+    if (!dimErr && dimData) {
+      dim = new Map(dimData.map((d) => [d.goods_no, d]))
+    }
+  }
+  return { rows, dim, error: null as string | null }
+}
+
+const WEIGHT_BUCKETS = ['lt2', '2_5', '5_10', '10_20', 'gt20'] as const
+const BUCKET_LABEL: Record<string, string> = {
+  lt2: '<2kg', '2_5': '2-5kg', '5_10': '5-10kg', '10_20': '10-20kg', gt20: '>20kg', unknown: '?',
+}
+const MARGIN_BUCKETS = [
+  { key: 'neg', label: '<0%', test: (m: number) => m < 0 },
+  { key: '0_15', label: '0-15%', test: (m: number) => m >= 0 && m < 15 },
+  { key: '15_25', label: '15-25%', test: (m: number) => m >= 15 && m < 25 },
+  { key: '25_40', label: '25-40%', test: (m: number) => m >= 25 && m < 40 },
+  { key: 'gte40', label: '≥40%', test: (m: number) => m >= 40 },
+] as const
+
+function buildHeatmap(dim: Map<string, DimMarginRow>): number[][] {
+  // rows = margin buckets (높은 마진이 위), cols = weight buckets (가벼운 쪽이 왼쪽)
+  const grid: number[][] = MARGIN_BUCKETS.map(() => WEIGHT_BUCKETS.map(() => 0))
+  for (const d of dim.values()) {
+    if (d.margin_pct == null || !d.weight_bucket) continue
+    const colIdx = WEIGHT_BUCKETS.indexOf(d.weight_bucket as (typeof WEIGHT_BUCKETS)[number])
+    if (colIdx < 0) continue
+    const rowIdx = MARGIN_BUCKETS.findIndex((m) => m.test(Number(d.margin_pct)))
+    if (rowIdx < 0) continue
+    grid[rowIdx][colIdx]++
+  }
+  return grid
 }
 
 const CATEGORIES: { code: string; label: string }[] = [
@@ -122,7 +175,10 @@ export default async function RecommendPage({
     cate,
   }
 
-  const { rows, error } = await fetchRecommend({ days: validDays, minSim: validSim, imminentOnly, cate })
+  const { rows, dim, error } = await fetchRecommend({ days: validDays, minSim: validSim, imminentOnly, cate })
+  const heatmap = buildHeatmap(dim)
+  const heatmapMax = Math.max(1, ...heatmap.flat())
+  const dimHoldCount = [...dim.values()].filter((d) => d.gate_status === 'hold').length
 
   // KPI
   const total = rows.length
@@ -205,12 +261,71 @@ export default async function RecommendPage({
       </div>
 
       {/* KPI */}
-      <section className="grid grid-cols-2 md:grid-cols-5 gap-3">
+      <section className="grid grid-cols-2 md:grid-cols-6 gap-3">
         <Kpi label="후보 상품" value={total} />
         <Kpi label="🔥 임박특가" value={imminentCount} highlight={imminentCount > 0} />
         <Kpi label="TV 매칭" value={tvHitCount} />
         <Kpi label="검색 매칭" value={searchHitCount} />
         <Kpi label="평균 final_score" value={avgFinal.toFixed(2)} />
+        <Kpi label="📦 DIM 보류" value={dimHoldCount} highlight={dimHoldCount > 0} />
+      </section>
+
+      {/* DIM Margin Heatmap — 무게 구간 × 마진% */}
+      <section className="rounded border border-gray-200 p-4">
+        <div className="flex items-baseline justify-between mb-3">
+          <h2 className="text-sm font-semibold">📦 부피무게 × 마진 분포</h2>
+          <span className="text-[11px] text-gray-500">
+            셀=핀 수 · 빨강=손실 위험 · 게이트: billable≥3kg &amp; 마진&lt;25% → 보류
+          </span>
+        </div>
+        {dim.size === 0 ? (
+          <div className="text-xs text-gray-400 py-4">
+            DIM 마진 데이터 없음. <code className="font-mono">node scripts/build-dim-margin.mjs</code> 실행 + supabase/kr_courier_rate_tiers.sql 적용 필요.
+          </div>
+        ) : (
+          <div className="inline-block">
+            <table className="text-[11px] border-collapse">
+              <thead>
+                <tr>
+                  <th className="px-2 py-1 text-gray-500 font-normal text-right">마진 ＼ 무게</th>
+                  {WEIGHT_BUCKETS.map((b) => (
+                    <th key={b} className="px-2 py-1 text-gray-500 font-normal text-center min-w-[60px]">
+                      {BUCKET_LABEL[b]}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {MARGIN_BUCKETS.map((mb, ri) => (
+                  <tr key={mb.key}>
+                    <td className="px-2 py-1 text-gray-600 text-right font-mono">{mb.label}</td>
+                    {WEIGHT_BUCKETS.map((wb, ci) => {
+                      const n = heatmap[ri][ci]
+                      const intensity = n / heatmapMax
+                      // 마진 < 25% 이면서 무게 ≥ 5kg 이면 위험존 → 빨강
+                      const isDanger = (mb.key === 'neg' || mb.key === '0_15' || mb.key === '15_25') && (wb === '5_10' || wb === '10_20' || wb === 'gt20')
+                      const bg = n === 0
+                        ? 'rgba(0,0,0,0.02)'
+                        : isDanger
+                          ? `rgba(239,68,68,${0.15 + intensity * 0.65})`
+                          : `rgba(245,158,11,${0.15 + intensity * 0.65})`
+                      return (
+                        <td
+                          key={wb}
+                          className="px-2 py-2 text-center font-mono"
+                          style={{ background: bg, color: n === 0 ? '#9ca3af' : '#111' }}
+                          title={`마진 ${mb.label} × 무게 ${BUCKET_LABEL[wb]}: ${n}건${isDanger ? ' (위험존)' : ''}`}
+                        >
+                          {n}
+                        </td>
+                      )
+                    })}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </section>
 
       {/* 에러 */}
@@ -235,16 +350,21 @@ export default async function RecommendPage({
         </div>
       ) : (
         <div className="space-y-2">
-          {rows.map((r, i) => (
+          {rows.map((r, i) => {
+            const d = dim.get(r.goods_no)
+            const isHold = d?.gate_status === 'hold'
+            return (
             <a
               key={r.goods_no}
               href={r.detail_url ?? '#'}
               target="_blank"
               rel="noopener"
               className={`block rounded border overflow-hidden hover:shadow-sm transition-all ${
-                r.is_imminent
-                  ? 'border-red-200 bg-red-50/40 hover:bg-red-50'
-                  : 'border-gray-200 hover:bg-gray-50'
+                isHold
+                  ? 'border-red-300 bg-red-50/60 hover:bg-red-50 opacity-80'
+                  : r.is_imminent
+                    ? 'border-red-200 bg-red-50/40 hover:bg-red-50'
+                    : 'border-gray-200 hover:bg-gray-50'
               }`}
             >
               <div className="flex items-start gap-3 p-3">
@@ -291,6 +411,22 @@ export default async function RecommendPage({
                         from {r.search_sources.map(sourceLabel).join(', ')}
                       </span>
                     )}
+                    {d && d.billable_weight_g != null && (
+                      <span
+                        className={`px-2 py-0.5 rounded ${
+                          isHold
+                            ? 'bg-red-100 text-red-800 font-semibold'
+                            : d.gate_status === 'pass'
+                              ? 'bg-emerald-50 text-emerald-700'
+                              : 'bg-gray-100 text-gray-600'
+                        }`}
+                        title={d.gate_reason ?? ''}
+                      >
+                        📦 {(d.billable_weight_g / 1000).toFixed(1)}kg
+                        {d.margin_pct != null && ` · 마진 ${d.margin_pct}%`}
+                        {isHold && ' · 보류'}
+                      </span>
+                    )}
                   </div>
                 </div>
 
@@ -310,7 +446,7 @@ export default async function RecommendPage({
                 </div>
               </div>
             </a>
-          ))}
+          )})}
         </div>
       )}
 
