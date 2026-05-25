@@ -29,6 +29,12 @@ const NAV_GROUPS: NavGroup[] = [
     label: '개요',
     items: [
       {
+        href: '/admin/trend-radar/brief',
+        label: '📰 오늘의 브리프',
+        icon: '📰',
+        match: (p) => p.startsWith('/admin/trend-radar/brief'),
+      },
+      {
         href: '/admin/trend-radar',
         label: '대시보드',
         icon: '🏠',
