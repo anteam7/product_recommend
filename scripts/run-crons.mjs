@@ -144,4 +144,24 @@ if (!skipClassify) {
   if (classifyExit !== 0) failCount++
 }
 
+// autocomplete-drift: 로컬 전용 (Vercel cron 한도 우회).
+//   filter 가 걸리면 건너뜀. --no-autocomplete-drift 플래그도 지원.
+const skipAcDrift = args.includes('--no-autocomplete-drift') || !!filter
+if (!skipAcDrift) {
+  console.log(`[${new Date().toISOString()}] launching autocomplete-drift-cron`)
+  const scriptPath = resolvePath(__dirname, 'autocomplete-drift-cron.mjs')
+  const exitCode = await new Promise((resolve) => {
+    const child = spawn(process.execPath, [scriptPath], {
+      stdio: 'inherit',
+      env: process.env,
+    })
+    child.on('exit', (code) => resolve(code ?? 0))
+    child.on('error', (err) => {
+      console.error(`  autocomplete-drift spawn error: ${err.message}`)
+      resolve(1)
+    })
+  })
+  if (exitCode !== 0) failCount++
+}
+
 process.exit(failCount > 0 ? 1 : 0)
