@@ -11,6 +11,7 @@
     { "path": "/api/cron/collect-clien-park", "schedule": "30 18 * * *" },
     { "path": "/api/cron/collect-quasarzone-sale", "schedule": "40 18 * * *" },
     { "path": "/api/cron/collect-kca-press", "schedule": "50 18 * * *" },
+    { "path": "/api/cron/collect-kca-comparative", "schedule": "55 18 * * *" },
     { "path": "/api/cron/collect-gsc-daily", "schedule": "0 19 * * *" },
     { "path": "/api/cron/collect-naver-tvtime", "schedule": "10 19 * * *" }
   ]
