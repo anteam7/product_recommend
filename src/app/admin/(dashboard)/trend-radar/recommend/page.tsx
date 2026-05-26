@@ -3,6 +3,34 @@ import { createAdminClient } from '@/lib/auth/admin-supabase'
 
 export const dynamic = 'force-dynamic'
 
+// Reverse-Economics Pin Gate 상수
+const RRS_BLOCK_THRESHOLD = 0.35
+const RRS_WARN_THRESHOLD = 0.2
+const REVERSE_LOGISTICS_FACTOR = 0.6 // 반품 1건당 마진 60% 잠식
+// 위탁 식품·건강기능식품 가정 명목마진 (대시보드 표시용 — 실제 마진은 상품별 다름)
+const ASSUMED_NOMINAL_MARGIN = 0.25
+
+function priceBandOf(price: number | null): string {
+  if (!price) return 'unknown'
+  if (price < 10000) return 'lt10k'
+  if (price < 30000) return '10_30k'
+  if (price < 50000) return '30_50k'
+  if (price < 100000) return '50_100k'
+  return 'gt100k'
+}
+
+function rrsColor(rrs: number): string {
+  if (rrs >= RRS_BLOCK_THRESHOLD) return '#dc2626'
+  if (rrs >= RRS_WARN_THRESHOLD) return '#f59e0b'
+  return '#10b981'
+}
+
+function rrsStatus(rrs: number): 'block' | 'warn' | 'pass' {
+  if (rrs >= RRS_BLOCK_THRESHOLD) return 'block'
+  if (rrs >= RRS_WARN_THRESHOLD) return 'warn'
+  return 'pass'
+}
+
 interface RecommendRow {
   goods_no: string
   title: string
@@ -124,12 +152,58 @@ export default async function RecommendPage({
 
   const { rows, error } = await fetchRecommend({ days: validDays, minSim: validSim, imminentOnly, cate })
 
-  // KPI
-  const total = rows.length
-  const imminentCount = rows.filter((r) => r.is_imminent).length
-  const tvHitCount = rows.filter((r) => r.tv_score > 0).length
-  const searchHitCount = rows.filter((r) => r.search_score > 0).length
-  const avgFinal = rows.length > 0 ? rows.reduce((s, r) => s + Number(r.final_score), 0) / rows.length : 0
+  // RRS 룩업 — health 카테고리 (가격대 × 옵션복잡도 simple 기본) 풀 셋 가져와 priceBand → rrs 맵 구성
+  const sb = createAdminClient()
+  const rrsByBand = new Map<string, { rrs: number; mention_rate: number; sample_size: number }>()
+  let riskTableMissing = false
+  try {
+    const { data: risks, error: riskErr } = await (sb as any)
+      .from('jimscanner_return_risk')
+      .select('category, price_band, variant_complexity, rrs, mention_rate, sample_size')
+      .eq('category', 'health')
+    if (riskErr) {
+      riskTableMissing = true
+    } else {
+      // 같은 price_band 내 variant_complexity 별 평균
+      const grouped = new Map<string, { sum: number; n: number; mr: number; ss: number }>()
+      for (const r of (risks ?? []) as Array<{ price_band: string; rrs: number; mention_rate: number; sample_size: number }>) {
+        const g = grouped.get(r.price_band) ?? { sum: 0, n: 0, mr: 0, ss: 0 }
+        g.sum += Number(r.rrs)
+        g.mr += Number(r.mention_rate)
+        g.ss += Number(r.sample_size)
+        g.n += 1
+        grouped.set(r.price_band, g)
+      }
+      for (const [band, g] of grouped.entries()) {
+        rrsByBand.set(band, {
+          rrs: g.n > 0 ? g.sum / g.n : 0,
+          mention_rate: g.n > 0 ? g.mr / g.n : 0,
+          sample_size: g.ss,
+        })
+      }
+    }
+  } catch {
+    riskTableMissing = true
+  }
+
+  // 자동 hide 적용 — RRS ≥ 0.35 인 row 는 visibleRows 에서 제외하되 hiddenCount 표시
+  const annotated = rows.map((r) => {
+    const band = priceBandOf(r.price_krw)
+    const risk = rrsByBand.get(band) ?? null
+    const rrs = risk?.rrs ?? 0
+    const realizedMarginFactor = Math.max(0, 1 - rrs * REVERSE_LOGISTICS_FACTOR)
+    const realizedMargin = ASSUMED_NOMINAL_MARGIN * realizedMarginFactor
+    return { ...r, _rrs: rrs, _rrsBand: band, _rrsSample: risk?.sample_size ?? 0, _realizedFactor: realizedMarginFactor, _realizedMargin: realizedMargin }
+  })
+  const hiddenCount = annotated.filter((r) => r._rrs >= RRS_BLOCK_THRESHOLD).length
+  const visibleRows = annotated.filter((r) => r._rrs < RRS_BLOCK_THRESHOLD)
+
+  // KPI — visible 기준 (hidden 은 별도 카운트)
+  const total = visibleRows.length
+  const imminentCount = visibleRows.filter((r) => r.is_imminent).length
+  const tvHitCount = visibleRows.filter((r) => r.tv_score > 0).length
+  const searchHitCount = visibleRows.filter((r) => r.search_score > 0).length
+  const avgFinal = visibleRows.length > 0 ? visibleRows.reduce((s, r) => s + Number(r.final_score), 0) / visibleRows.length : 0
 
   return (
     <div className="space-y-6 p-6">
@@ -205,8 +279,9 @@ export default async function RecommendPage({
       </div>
 
       {/* KPI */}
-      <section className="grid grid-cols-2 md:grid-cols-5 gap-3">
-        <Kpi label="후보 상품" value={total} />
+      <section className="grid grid-cols-2 md:grid-cols-6 gap-3">
+        <Kpi label="후보 (visible)" value={total} />
+        <Kpi label="🛑 RRS hide" value={hiddenCount} highlight={hiddenCount > 0} />
         <Kpi label="🔥 임박특가" value={imminentCount} highlight={imminentCount > 0} />
         <Kpi label="TV 매칭" value={tvHitCount} />
         <Kpi label="검색 매칭" value={searchHitCount} />
@@ -223,8 +298,21 @@ export default async function RecommendPage({
         </div>
       )}
 
+      {/* Reverse Risk 알림 */}
+      {riskTableMissing ? (
+        <div className="rounded border border-gray-200 bg-gray-50 px-4 py-2 text-xs text-gray-500">
+          ℹ Return Risk 테이블 미적용. <code>supabase/return_risk_view.sql</code> +{' '}
+          <code>scripts/scan-return-mentions.mjs</code> 실행 시 RRS 게이트 활성화.
+        </div>
+      ) : hiddenCount > 0 ? (
+        <div className="rounded border border-red-200 bg-red-50 px-4 py-2 text-xs text-red-800">
+          🛑 Return Risk 게이트로 <strong>{hiddenCount}건</strong> 자동 hide (RRS ≥ {RRS_BLOCK_THRESHOLD}).
+          실현마진 잠식 위험. ?showHidden=1 로 확인.
+        </div>
+      ) : null}
+
       {/* 결과 카드 */}
-      {!error && rows.length === 0 ? (
+      {!error && visibleRows.length === 0 ? (
         <div className="rounded border border-dashed border-gray-300 p-12 text-center text-gray-500 space-y-2">
           <div className="text-base font-medium">조건에 맞는 후보 없음</div>
           <div className="text-xs text-gray-400">
@@ -235,7 +323,7 @@ export default async function RecommendPage({
         </div>
       ) : (
         <div className="space-y-2">
-          {rows.map((r, i) => (
+          {visibleRows.map((r, i) => (
             <a
               key={r.goods_no}
               href={r.detail_url ?? '#'}
@@ -307,6 +395,23 @@ export default async function RecommendPage({
                     <div>검색 {Number(r.search_score).toFixed(2)} × 1.0</div>
                     {r.is_imminent && <div className="text-red-600">× 1.3 (임박)</div>}
                   </div>
+                  {/* Reverse-Economics Pin Gate */}
+                  {r._rrs > 0 && (
+                    <div
+                      className="mt-1 pt-1 border-t border-gray-200 text-[10px] font-mono"
+                      title={`band=${r._rrsBand} · sample_size=${r._rrsSample}`}
+                    >
+                      <div style={{ color: rrsColor(r._rrs) }} className="font-bold">
+                        RRS {r._rrs.toFixed(3)} {rrsStatus(r._rrs).toUpperCase()}
+                      </div>
+                      <div className="text-gray-600">
+                        실현마진 ≈ {(r._realizedMargin * 100).toFixed(1)}%
+                      </div>
+                      <div className="text-gray-400">
+                        ({(ASSUMED_NOMINAL_MARGIN * 100).toFixed(0)}% × {r._realizedFactor.toFixed(2)})
+                      </div>
+                    </div>
+                  )}
                 </div>
               </div>
             </a>
@@ -328,6 +433,12 @@ export default async function RecommendPage({
         </code>
         <div className="pt-2">
           <strong>V1 보강 예정:</strong> ÷ (1 + log(스마트스토어 등록상품수)) saturation_penalty · 커뮤니티 시그널 LLM 정규화 후 추가 · ggsan_price_history 가격 인하 추세 보너스
+        </div>
+        <div className="pt-2 border-t border-gray-100 mt-2">
+          <strong>🛑 Reverse-Economics Pin Gate:</strong>{' '}
+          <code className="font-mono">실현마진 = 명목마진 × (1 − RRS × {REVERSE_LOGISTICS_FACTOR})</code>{' '}
+          · RRS ≥ {RRS_BLOCK_THRESHOLD} 자동 hide · ≥ {RRS_WARN_THRESHOLD} 주의.
+          소스: <code>jimscanner_return_risk</code> ← <code>scripts/scan-return-mentions.mjs</code> nightly.
         </div>
       </section>
     </div>

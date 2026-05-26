@@ -14,6 +14,15 @@ interface ScoreRow {
   computed_at: string
 }
 
+interface ReturnRiskRow {
+  category: string
+  price_band: string
+  variant_complexity: string
+  rrs: number
+  mention_rate: number
+  sample_size: number
+}
+
 async function fetchData() {
   const sb = createAdminClient()
 
@@ -33,7 +42,7 @@ async function fetchData() {
   }
 
   const ids = latest.map((s) => s.product_id)
-  if (ids.length === 0) return { rows: [] }
+  if (ids.length === 0) return { rows: [], riskByCategory: new Map<string, number>() }
 
   const { data: prods } = await sb
     .from('jimscanner_trends_products')
@@ -41,25 +50,51 @@ async function fetchData() {
     .in('id', ids)
   const byId = new Map((prods ?? []).map((p: any) => [p.id, p]))
 
+  // Return Risk — 카테고리별 평균 RRS (히트맵 오버레이용)
+  // 마이그레이션 (supabase/return_risk_view.sql) 미적용 환경에서도 깨지지 않게 try-catch
+  const riskByCategory = new Map<string, number>()
+  try {
+    const { data: risks } = await (sb as any)
+      .from('jimscanner_return_risk')
+      .select('category, price_band, variant_complexity, rrs, mention_rate, sample_size')
+      .limit(500)
+    const grouped = new Map<string, { sum: number; n: number }>()
+    for (const r of (risks ?? []) as ReturnRiskRow[]) {
+      const g = grouped.get(r.category) ?? { sum: 0, n: 0 }
+      g.sum += Number(r.rrs)
+      g.n += 1
+      grouped.set(r.category, g)
+    }
+    for (const [cat, g] of grouped.entries()) {
+      riskByCategory.set(cat, g.n > 0 ? g.sum / g.n : 0)
+    }
+  } catch {
+    // 테이블 부재 — 무시
+  }
+
   return {
     rows: latest.map((s) => {
       const p = byId.get(s.product_id) ?? {}
+      const category = (p as any).category_top ?? 'all'
+      const rrs = riskByCategory.get(category) ?? 0
       return {
         id: s.product_id,
         name: (p as any).canonical_name ?? '?',
-        category: (p as any).category_top ?? 'all',
+        category,
         x: s.competition_score,        // 경쟁 약함 → 점수 높음 → 오른쪽
         y: s.trend_score,              // 트렌드 강함 → 위
         size: Math.max(50, s.commerce_score * 4),
         final: s.final_score,
         supplier: s.supplier_score,
+        rrs,                            // 0-1 normalized return risk
       }
     }),
+    riskByCategory,
   }
 }
 
 export default async function OpportunityPage() {
-  const { rows } = await fetchData()
+  const { rows, riskByCategory } = await fetchData()
 
   return (
     <div className="space-y-6 p-6">
@@ -80,7 +115,7 @@ export default async function OpportunityPage() {
           아직 데이터 없음. cron 누적 후 다시 방문.
         </div>
       ) : (
-        <OpportunityScatter rows={rows} />
+        <OpportunityScatter rows={rows} riskByCategory={Object.fromEntries(riskByCategory)} />
       )}
     </div>
   )
