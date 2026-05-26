@@ -40,9 +40,10 @@ async function logRun(
   triggeredBy: string,
   startedAt: number,
   summary: Omit<CollectSummary, 'durationMs' | 'source'>,
+  triggeredSeedId?: string,
 ) {
   const finishedAt = Date.now()
-  await admin.from('jimscanner_trends_runs').insert({
+  const row: Record<string, unknown> = {
     source,
     status: summary.status,
     fetched_count: summary.fetched,
@@ -52,7 +53,34 @@ async function logRun(
     triggered_by: triggeredBy,
     started_at: new Date(startedAt).toISOString(),
     finished_at: new Date(finishedAt).toISOString(),
-  })
+  }
+  if (triggeredSeedId) row.triggered_seed_id = triggeredSeedId
+  // triggered_seed_id 는 trends_v4_seed_yield 마이그레이션 적용 후 사용 가능
+  await admin.from('jimscanner_trends_runs').insert(row as never)
+}
+
+// seed-level yield 어트리뷰션 — 시드별 1 row 를 trends_runs 에 추가 기록.
+// 기존 aggregate row 와 별개로 seed_id 컬럼 채워 등록.
+async function logSeedRuns(
+  admin: SupabaseClient,
+  source: string,
+  triggeredBy: string,
+  perSeed: Map<string, { fetched: number; inserted: number; status: 'ok' | 'partial' | 'error'; error?: string; startedAt: number; finishedAt: number }>,
+) {
+  const rows = Array.from(perSeed.entries()).map(([seedId, s]) => ({
+    source,
+    status: s.status,
+    fetched_count: s.fetched,
+    inserted_count: s.inserted,
+    duration_ms: s.finishedAt - s.startedAt,
+    error_message: s.error ?? null,
+    triggered_by: triggeredBy,
+    triggered_seed_id: seedId,
+    started_at: new Date(s.startedAt).toISOString(),
+    finished_at: new Date(s.finishedAt).toISOString(),
+  }))
+  if (rows.length === 0) return
+  await admin.from('jimscanner_trends_runs').insert(rows as never)
 }
 
 export async function collectNaverSearchTrends(
@@ -87,15 +115,21 @@ export async function collectNaverSearchTrends(
   let inserted = 0
   let lastErr: string | undefined
 
+  // seed-level 어트리뷰션 — 각 시드별 fetched/inserted 추적
+  const perSeed = new Map<string, { fetched: number; inserted: number; status: 'ok' | 'partial' | 'error'; error?: string; startedAt: number; finishedAt: number }>()
+  for (const s of seedList) {
+    perSeed.set(s.id, { fetched: 0, inserted: 0, status: 'ok', startedAt: Date.now(), finishedAt: Date.now() })
+  }
+
   // 검색어 트렌드는 한 호출당 최대 5 그룹
   for (const batch of chunk(seedList, 5)) {
-    const keywordGroups: DatalabKeywordGroup[] = batch
-      .map((s) => ({
-        groupName: s.config.groupName ?? s.label,
-        keywords: s.config.keywords ?? [],
-      }))
-      .filter((g) => g.keywords.length > 0)
+    const chunkSeeds = batch.filter((s) => (s.config.keywords ?? []).length > 0)
+    const keywordGroups: DatalabKeywordGroup[] = chunkSeeds.map((s) => ({
+      groupName: s.config.groupName ?? s.label,
+      keywords: s.config.keywords ?? [],
+    }))
     if (keywordGroups.length === 0) continue
+    const chunkStarted = Date.now()
 
     try {
       const resp = await fetchSearchTrend({
@@ -105,6 +139,10 @@ export async function collectNaverSearchTrends(
         keywordGroups,
       })
       fetched++
+      for (const s of chunkSeeds) {
+        const cur = perSeed.get(s.id)!
+        cur.fetched += 1
+      }
 
       // raw 저장
       await admin.from('jimscanner_trends_raw').insert({
@@ -115,7 +153,9 @@ export async function collectNaverSearchTrends(
 
       // keywords 정규화 — 각 그룹의 마지막 시점 ratio
       const rows: Array<Record<string, unknown>> = []
-      for (const group of resp.results ?? []) {
+      const titleToSeed = new Map<string, string>()
+      for (let i = 0; i < (resp.results ?? []).length; i++) {
+        const group = resp.results![i]
         const last = group.data?.[group.data.length - 1]
         rows.push({
           keyword: group.title,
@@ -125,14 +165,40 @@ export async function collectNaverSearchTrends(
           rank: null,
           volume_relative: last?.ratio ?? null,
         })
+        const seedForGroup = chunkSeeds[i] ?? chunkSeeds.find((s) => (s.config.groupName ?? s.label) === group.title)
+        if (seedForGroup) titleToSeed.set(group.title, seedForGroup.id)
       }
       if (rows.length > 0) {
         const { error: insErr } = await admin.from('jimscanner_trends_keywords').insert(rows)
-        if (insErr) lastErr = insErr.message
-        else inserted += rows.length
+        if (insErr) {
+          lastErr = insErr.message
+          for (const s of chunkSeeds) {
+            const cur = perSeed.get(s.id)!
+            cur.status = cur.inserted > 0 ? 'partial' : 'error'
+            cur.error = insErr.message
+          }
+        } else {
+          inserted += rows.length
+          for (const r of rows) {
+            const sid = titleToSeed.get(r.keyword as string)
+            if (sid) perSeed.get(sid)!.inserted += 1
+          }
+        }
       }
     } catch (e) {
-      lastErr = e instanceof Error ? e.message : String(e)
+      const msg = e instanceof Error ? e.message : String(e)
+      lastErr = msg
+      for (const s of chunkSeeds) {
+        const cur = perSeed.get(s.id)!
+        cur.status = cur.inserted > 0 ? 'partial' : 'error'
+        cur.error = msg
+      }
+    } finally {
+      const chunkEnded = Date.now()
+      for (const s of chunkSeeds) {
+        perSeed.get(s.id)!.finishedAt = chunkEnded
+        perSeed.get(s.id)!.startedAt = chunkStarted
+      }
     }
   }
 
@@ -143,6 +209,7 @@ export async function collectNaverSearchTrends(
     : 'ok'
   const summary = { fetched, inserted, status, error: lastErr }
   await logRun(admin, source, triggeredBy, startedAt, summary)
+  await logSeedRuns(admin, source, triggeredBy, perSeed)
   return { ...summary, source, durationMs: Date.now() - startedAt }
 }
 
@@ -178,15 +245,20 @@ export async function collectNaverShoppingTrends(
   let inserted = 0
   let lastErr: string | undefined
 
+  const perSeed = new Map<string, { fetched: number; inserted: number; status: 'ok' | 'partial' | 'error'; error?: string; startedAt: number; finishedAt: number }>()
+  for (const s of seedList) {
+    perSeed.set(s.id, { fetched: 0, inserted: 0, status: 'ok', startedAt: Date.now(), finishedAt: Date.now() })
+  }
+
   // 쇼핑 카테고리는 한 호출당 최대 3 카테고리
   for (const batch of chunk(seedList, 3)) {
-    const category: DatalabCategoryGroup[] = batch
-      .filter((s) => !!s.config.cid)
-      .map((s) => ({
-        name: s.config.name ?? s.label,
-        param: [s.config.cid!],
-      }))
+    const chunkSeeds = batch.filter((s) => !!s.config.cid)
+    const category: DatalabCategoryGroup[] = chunkSeeds.map((s) => ({
+      name: s.config.name ?? s.label,
+      param: [s.config.cid!],
+    }))
     if (category.length === 0) continue
+    const chunkStarted = Date.now()
 
     try {
       const resp = await fetchShoppingCategories({
@@ -196,6 +268,7 @@ export async function collectNaverShoppingTrends(
         category,
       })
       fetched++
+      for (const s of chunkSeeds) perSeed.get(s.id)!.fetched += 1
 
       await admin.from('jimscanner_trends_raw').insert({
         source,
@@ -204,24 +277,52 @@ export async function collectNaverShoppingTrends(
       })
 
       const rows: Array<Record<string, unknown>> = []
-      for (const group of resp.results ?? []) {
+      const titleToSeed = new Map<string, string>()
+      for (let i = 0; i < (resp.results ?? []).length; i++) {
+        const group = resp.results![i]
         const last = group.data?.[group.data.length - 1]
         rows.push({
           keyword: group.title,
           source,
-          category: group.title, // 카테고리 자체가 키워드
+          category: group.title,
           category_top: group.title,
           rank: null,
           volume_relative: last?.ratio ?? null,
         })
+        const seedForGroup = chunkSeeds[i] ?? chunkSeeds.find((s) => (s.config.name ?? s.label) === group.title)
+        if (seedForGroup) titleToSeed.set(group.title, seedForGroup.id)
       }
       if (rows.length > 0) {
         const { error: insErr } = await admin.from('jimscanner_trends_keywords').insert(rows)
-        if (insErr) lastErr = insErr.message
-        else inserted += rows.length
+        if (insErr) {
+          lastErr = insErr.message
+          for (const s of chunkSeeds) {
+            const cur = perSeed.get(s.id)!
+            cur.status = cur.inserted > 0 ? 'partial' : 'error'
+            cur.error = insErr.message
+          }
+        } else {
+          inserted += rows.length
+          for (const r of rows) {
+            const sid = titleToSeed.get(r.keyword as string)
+            if (sid) perSeed.get(sid)!.inserted += 1
+          }
+        }
       }
     } catch (e) {
-      lastErr = e instanceof Error ? e.message : String(e)
+      const msg = e instanceof Error ? e.message : String(e)
+      lastErr = msg
+      for (const s of chunkSeeds) {
+        const cur = perSeed.get(s.id)!
+        cur.status = cur.inserted > 0 ? 'partial' : 'error'
+        cur.error = msg
+      }
+    } finally {
+      const chunkEnded = Date.now()
+      for (const s of chunkSeeds) {
+        perSeed.get(s.id)!.finishedAt = chunkEnded
+        perSeed.get(s.id)!.startedAt = chunkStarted
+      }
     }
   }
 
@@ -232,5 +333,6 @@ export async function collectNaverShoppingTrends(
     : 'ok'
   const summary = { fetched, inserted, status, error: lastErr }
   await logRun(admin, source, triggeredBy, startedAt, summary)
+  await logSeedRuns(admin, source, triggeredBy, perSeed)
   return { ...summary, source, durationMs: Date.now() - startedAt }
 }
