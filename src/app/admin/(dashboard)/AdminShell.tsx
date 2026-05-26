@@ -104,6 +104,12 @@ const NAV_GROUPS: NavGroup[] = [
         icon: '📦',
         match: (p) => p.startsWith('/admin/coupang-orders'),
       },
+      {
+        href: '/admin/coupang-margin-drift',
+        label: '마진 드리프트',
+        icon: '📉',
+        match: (p) => p.startsWith('/admin/coupang-margin-drift'),
+      },
     ],
   },
   {
