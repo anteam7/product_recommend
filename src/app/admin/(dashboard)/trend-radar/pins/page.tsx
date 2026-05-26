@@ -29,6 +29,13 @@ export default async function PinsPage() {
           <p className="text-sm text-gray-500 mt-1">
             위탁 검토 후보. 메모 + 검토 상태 토글은 다음 버전.
           </p>
+          <p className="text-xs text-gray-400 mt-0.5">
+            cohort 기반 잔여수명·출구 큐는{' '}
+            <Link href="/admin/trend-radar/lifecycle" className="underline">
+              Lifecycle 보드
+            </Link>
+            .
+          </p>
         </div>
         <Link href="/admin/trend-radar" className="text-sm text-gray-700 hover:text-black underline">
           ← 대시보드

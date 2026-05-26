@@ -69,6 +69,9 @@ export default async function OpportunityPage() {
           <p className="text-sm text-gray-500 mt-1">
             X = competition (오른쪽 = 경쟁 약함) · Y = trend · 크기 = commerce · 핀 후보 = 우상단 큰 점
           </p>
+          <p className="text-xs text-gray-400 mt-0.5">
+            cohort 기반 잔여수명은 <Link href="/admin/trend-radar/lifecycle" className="underline">Lifecycle 보드</Link> 에서 확인.
+          </p>
         </div>
         <Link href="/admin/trend-radar" className="text-sm text-gray-700 hover:text-black underline">
           ← 대시보드
