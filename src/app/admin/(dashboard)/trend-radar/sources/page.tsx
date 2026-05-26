@@ -125,9 +125,17 @@ export default async function SourcesPage() {
             v4 cron — Naver DataLab + tvtime + market_raw 시그널 + LLM 분류
           </p>
         </div>
-        <Link href="/admin/trend-radar" className="text-sm text-gray-700 hover:text-black underline">
-          ← 대시보드
-        </Link>
+        <div className="flex items-center gap-3">
+          <Link
+            href="/admin/trend-radar/sources/roi"
+            className="text-sm px-3 py-1 rounded bg-black text-white hover:bg-gray-800"
+          >
+            소스 ROI Sankey →
+          </Link>
+          <Link href="/admin/trend-radar" className="text-sm text-gray-700 hover:text-black underline">
+            ← 대시보드
+          </Link>
+        </div>
       </header>
 
       {/* trends_runs 기반 collector 그룹 */}

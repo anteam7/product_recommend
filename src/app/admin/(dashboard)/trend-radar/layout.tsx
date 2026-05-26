@@ -13,6 +13,7 @@ const NAV = [
   { href: '/admin/trend-radar/opportunity', label: 'Opportunity' },
   { href: '/admin/trend-radar/pins', label: '핀' },
   { href: '/admin/trend-radar/sources', label: '소스 헬스' },
+  { href: '/admin/trend-radar/sources/roi', label: '소스 ROI' },
 ]
 
 export default function TrendRadarLayout({ children }: { children: React.ReactNode }) {
