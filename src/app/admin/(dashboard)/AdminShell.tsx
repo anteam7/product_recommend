@@ -96,7 +96,16 @@ const NAV_GROUPS: NavGroup[] = [
         href: '/admin/coupang-publish',
         label: '등록 상품 관리',
         icon: '🅒',
-        match: (p) => p.startsWith('/admin/coupang-publish'),
+        match: (p) =>
+          p === '/admin/coupang-publish' ||
+          p === '/admin/coupang-publish/' ||
+          (p.startsWith('/admin/coupang-publish') && !p.startsWith('/admin/coupang-publish/rank-watch')),
+      },
+      {
+        href: '/admin/coupang-publish/rank-watch',
+        label: 'SERP 순위 추적',
+        icon: '📈',
+        match: (p) => p.startsWith('/admin/coupang-publish/rank-watch'),
       },
       {
         href: '/admin/coupang-orders',
