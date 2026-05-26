@@ -56,12 +56,45 @@ async function fetchRecommend(opts: {
     result_limit: 200,
   } as never)
   if (error) {
-    return { rows: [] as RecommendRow[], error: error.message }
+    return { rows: [] as RecommendRow[], intentMap: new Map<string, number>(), error: error.message }
   }
   let rows = (data ?? []) as RecommendRow[]
   if (opts.imminentOnly) rows = rows.filter((r) => r.is_imminent)
   if (opts.cate) rows = rows.filter((r) => r.cate_cd === opts.cate)
-  return { rows, error: null as string | null }
+
+  // UGC Intent Density 조인 — view 가 미적용된 환경에서도 실패하지 않게 try/catch
+  const intentMap = new Map<string, number>()
+  try {
+    const { data: densRows } = await (sb
+      .from('jimscanner_ugc_intent_density' as never)
+      .select('keyword, intent_density_pct, intent_count')
+      .order('intent_count', { ascending: false })
+      .limit(500) as unknown as Promise<{ data: Array<{ keyword: string; intent_density_pct: number | null; intent_count: number }> | null }>)
+    for (const d of densRows ?? []) {
+      if (d.intent_density_pct != null) intentMap.set(d.keyword, d.intent_density_pct)
+    }
+  } catch {
+    // 무시 — view 미적용 환경
+  }
+  return { rows, intentMap, error: null as string | null }
+}
+
+function findIntentDensity(row: RecommendRow, intentMap: Map<string, number>): number | null {
+  if (intentMap.size === 0) return null
+  // 1) tv_top_keyword 매칭
+  if (row.tv_top_keyword && intentMap.has(row.tv_top_keyword)) return intentMap.get(row.tv_top_keyword)!
+  // 2) search_top_keyword 매칭
+  if (row.search_top_keyword && intentMap.has(row.search_top_keyword)) {
+    return intentMap.get(row.search_top_keyword)!
+  }
+  // 3) title 부분 매칭 (최고값)
+  let best: number | null = null
+  for (const [kw, dens] of intentMap) {
+    if (kw.length >= 2 && row.title.includes(kw)) {
+      if (best == null || dens > best) best = dens
+    }
+  }
+  return best
 }
 
 const CATEGORIES: { code: string; label: string }[] = [
@@ -122,7 +155,7 @@ export default async function RecommendPage({
     cate,
   }
 
-  const { rows, error } = await fetchRecommend({ days: validDays, minSim: validSim, imminentOnly, cate })
+  const { rows, intentMap, error } = await fetchRecommend({ days: validDays, minSim: validSim, imminentOnly, cate })
 
   // KPI
   const total = rows.length
@@ -235,7 +268,9 @@ export default async function RecommendPage({
         </div>
       ) : (
         <div className="space-y-2">
-          {rows.map((r, i) => (
+          {rows.map((r, i) => {
+            const intentDensity = findIntentDensity(r, intentMap)
+            return (
             <a
               key={r.goods_no}
               href={r.detail_url ?? '#'}
@@ -291,6 +326,20 @@ export default async function RecommendPage({
                         from {r.search_sources.map(sourceLabel).join(', ')}
                       </span>
                     )}
+                    {intentDensity != null && (
+                      <span
+                        className={
+                          intentDensity >= 30
+                            ? 'bg-red-100 text-red-800 px-2 py-0.5 rounded font-semibold'
+                            : intentDensity >= 15
+                              ? 'bg-amber-100 text-amber-800 px-2 py-0.5 rounded'
+                              : 'bg-gray-100 text-gray-600 px-2 py-0.5 rounded'
+                        }
+                        title="UGC 구매의향 발화 밀도 — 핀 결정 게이트"
+                      >
+                        💬 Intent {intentDensity.toFixed(1)}%
+                      </span>
+                    )}
                   </div>
                 </div>
 
@@ -310,7 +359,8 @@ export default async function RecommendPage({
                 </div>
               </div>
             </a>
-          ))}
+            )
+          })}
         </div>
       )}
 
