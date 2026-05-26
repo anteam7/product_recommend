@@ -12,6 +12,7 @@ type Status =
   | 'SELLING'
   | 'STOPPED'
   | 'FAILED'
+  | 'SKIPPED'
 
 interface ListingRow {
   id: string
@@ -51,6 +52,7 @@ const STATUS_LABELS: Record<Status, { label: string; cls: string }> = {
   SELLING: { label: '판매중', cls: 'bg-green-100 text-green-700' },
   STOPPED: { label: '판매중지', cls: 'bg-zinc-200 text-zinc-700' },
   FAILED: { label: '실패', cls: 'bg-red-100 text-red-700' },
+  SKIPPED: { label: '제외', cls: 'bg-zinc-100 text-zinc-500' },
 }
 
 const SORT_OPTIONS = [
