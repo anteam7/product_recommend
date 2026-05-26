@@ -144,4 +144,24 @@ if (!skipClassify) {
   if (classifyExit !== 0) failCount++
 }
 
+// compute-trend-inflection: 2차미분(가속·감속) 사분면 사전계산.
+//   filter 가 걸리면 건너뜀. --no-inflection 플래그도 지원.
+const skipInflection = args.includes('--no-inflection') || !!filter
+if (!skipInflection) {
+  console.log(`[${new Date().toISOString()}] launching compute-trend-inflection`)
+  const scriptPath = resolvePath(__dirname, 'compute-trend-inflection.mjs')
+  const inflectionExit = await new Promise((resolve) => {
+    const child = spawn(process.execPath, [scriptPath], {
+      stdio: 'inherit',
+      env: process.env,
+    })
+    child.on('exit', (code) => resolve(code ?? 0))
+    child.on('error', (err) => {
+      console.error(`  inflection spawn error: ${err.message}`)
+      resolve(1)
+    })
+  })
+  if (inflectionExit !== 0) failCount++
+}
+
 process.exit(failCount > 0 ? 1 : 0)

@@ -36,9 +36,20 @@ interface ScoreRow {
   computed_at: string
 }
 
+interface InflectionRow {
+  score_kind: 'final' | 'trend' | 'commerce' | 'supplier' | 'competition'
+  latest_score: number
+  slope_7d: number
+  accel_7d: number
+  sample_count: number
+  quadrant: 'accel_up' | 'decel_up' | 'accel_down' | 'decel_down' | 'flat'
+  rank_score: number
+  computed_at: string
+}
+
 async function fetchProduct(id: string) {
   const sb = createAdminClient()
-  const [prodRes, aliasRes, scoreRes] = await Promise.all([
+  const [prodRes, aliasRes, scoreRes, inflRes] = await Promise.all([
     sb.from('jimscanner_trends_products').select('*').eq('id', id).single(),
     sb
       .from('jimscanner_trends_aliases')
@@ -51,6 +62,10 @@ async function fetchProduct(id: string) {
       .eq('product_id', id)
       .order('computed_at', { ascending: false })
       .limit(30),
+    sb
+      .from('jimscanner_trends_inflection' as never)
+      .select('score_kind, latest_score, slope_7d, accel_7d, sample_count, quadrant, rank_score, computed_at')
+      .eq('product_id', id),
   ])
 
   if (prodRes.error || !prodRes.data) return null
@@ -59,18 +74,23 @@ async function fetchProduct(id: string) {
     product: prodRes.data as ProductRow,
     aliases: (aliasRes.data ?? []) as AliasRow[],
     scoreHistory: (scoreRes.data ?? []) as ScoreRow[],
+    inflection: ((inflRes.data ?? []) as unknown as InflectionRow[]) ?? [],
   }
 }
 
 export default async function ProductDetailPage({
   params,
+  searchParams,
 }: {
   params: Promise<{ id: string }>
+  searchParams: Promise<{ tab?: string }>
 }) {
   const { id } = await params
+  const sp = await searchParams
+  const tab = sp.tab === 'trajectory' ? 'trajectory' : 'overview'
   const data = await fetchProduct(id)
   if (!data) notFound()
-  const { product, aliases, scoreHistory } = data
+  const { product, aliases, scoreHistory, inflection } = data
   const latest = scoreHistory[0]
 
   return (
@@ -108,6 +128,57 @@ export default async function ProductDetailPage({
         </div>
       </header>
 
+      {/* 탭 */}
+      <nav className="flex gap-2 border-b border-gray-200">
+        <Link
+          href={`/admin/trend-radar/products/${product.id}`}
+          className={`px-3 py-2 text-sm ${
+            tab === 'overview'
+              ? 'border-b-2 border-black font-semibold text-black'
+              : 'text-gray-500 hover:text-black'
+          }`}
+        >
+          개요
+        </Link>
+        <Link
+          href={`/admin/trend-radar/products/${product.id}?tab=trajectory`}
+          className={`px-3 py-2 text-sm ${
+            tab === 'trajectory'
+              ? 'border-b-2 border-black font-semibold text-black'
+              : 'text-gray-500 hover:text-black'
+          }`}
+        >
+          🔺 변곡 (trajectory)
+        </Link>
+      </nav>
+
+      {tab === 'trajectory' ? (
+        <TrajectoryTab inflection={inflection} scoreHistory={scoreHistory} />
+      ) : (
+        <OverviewTab
+          latest={latest}
+          scoreHistory={scoreHistory}
+          aliases={aliases}
+          product={product}
+        />
+      )}
+    </div>
+  )
+}
+
+function OverviewTab({
+  latest,
+  scoreHistory,
+  aliases,
+  product,
+}: {
+  latest: ScoreRow | undefined
+  scoreHistory: ScoreRow[]
+  aliases: AliasRow[]
+  product: ProductRow
+}) {
+  return (
+    <>
       {/* 4점수 카드 */}
       {latest && (
         <section className="grid grid-cols-2 md:grid-cols-5 gap-3">
@@ -182,8 +253,149 @@ export default async function ProductDetailPage({
       <section className="text-xs text-gray-500">
         first_seen: {product.first_seen_at} · last_seen: {product.last_seen_at}
       </section>
-    </div>
+    </>
   )
+}
+
+const SCORE_KIND_COLOR: Record<string, string> = {
+  final: '#111827',
+  trend: '#059669',
+  commerce: '#2563eb',
+  supplier: '#7c3aed',
+  competition: '#e11d48',
+}
+
+const QUADRANT_LABEL: Record<string, string> = {
+  accel_up: '🚀 가속·상승',
+  decel_up: '⚠️ 감속·상승',
+  accel_down: '🔻 가속·하락',
+  decel_down: '🌱 감속·하락',
+  flat: '➖ 정체',
+}
+
+function TrajectoryTab({
+  inflection,
+  scoreHistory,
+}: {
+  inflection: InflectionRow[]
+  scoreHistory: ScoreRow[]
+}) {
+  // score_kind 별 inflection map
+  const infByKind = new Map<string, InflectionRow>()
+  for (const r of inflection) infByKind.set(r.score_kind, r)
+
+  // 시계열은 오래된 → 최근 순으로 sparkline 그리기 (scoreHistory 는 desc 순)
+  const series = [...scoreHistory].reverse()
+
+  const kinds: Array<{ k: InflectionRow['score_kind']; column: keyof ScoreRow }> = [
+    { k: 'final', column: 'final_score' },
+    { k: 'trend', column: 'trend_score' },
+    { k: 'commerce', column: 'commerce_score' },
+    { k: 'supplier', column: 'supplier_score' },
+    { k: 'competition', column: 'competition_score' },
+  ]
+
+  return (
+    <>
+      <section className="grid grid-cols-1 md:grid-cols-2 gap-3">
+        {kinds.map(({ k, column }) => {
+          const inf = infByKind.get(k)
+          const values = series
+            .map((s) => Number(s[column]))
+            .filter((v) => Number.isFinite(v))
+          return (
+            <div key={k} className="rounded border border-gray-200 p-3">
+              <div className="flex items-baseline justify-between">
+                <div>
+                  <div className="text-xs uppercase text-gray-500">{k}</div>
+                  <div className="text-2xl font-mono font-semibold">
+                    {inf ? inf.latest_score : values[values.length - 1] ?? '—'}
+                  </div>
+                </div>
+                <div className="text-right text-xs">
+                  {inf ? (
+                    <>
+                      <div className="text-xs text-gray-700 font-medium">
+                        {QUADRANT_LABEL[inf.quadrant] ?? inf.quadrant}
+                      </div>
+                      <div className="font-mono text-gray-500 mt-0.5">
+                        slope {fmtNum(inf.slope_7d)} / accel {fmtNum(inf.accel_7d)}
+                      </div>
+                      <div className="font-mono text-gray-400 text-[10px]">
+                        n={inf.sample_count}
+                      </div>
+                    </>
+                  ) : (
+                    <div className="text-xs text-gray-400">변곡 미산출</div>
+                  )}
+                </div>
+              </div>
+              <Sparkline
+                values={values}
+                color={SCORE_KIND_COLOR[k] ?? '#111827'}
+                markerLast={!!inf}
+              />
+            </div>
+          )
+        })}
+      </section>
+
+      <section className="text-xs text-gray-500">
+        변곡 산출 = 최근 7일 회귀 slope − 직전 7일 slope · rank = |slope| × |accel|
+      </section>
+    </>
+  )
+}
+
+function Sparkline({
+  values,
+  color,
+  markerLast,
+}: {
+  values: number[]
+  color: string
+  markerLast?: boolean
+}) {
+  if (values.length < 2) {
+    return <div className="mt-2 h-12 text-xs text-gray-400">샘플 부족 ({values.length})</div>
+  }
+  const w = 280
+  const h = 48
+  const padX = 2
+  const padY = 4
+  const min = Math.min(...values)
+  const max = Math.max(...values)
+  const range = max - min || 1
+  const n = values.length
+  const points = values.map((v, i) => {
+    const x = padX + (i / (n - 1)) * (w - padX * 2)
+    const y = h - padY - ((v - min) / range) * (h - padY * 2)
+    return [x, y] as const
+  })
+  const d = points
+    .map(([x, y], i) => `${i === 0 ? 'M' : 'L'}${x.toFixed(1)},${y.toFixed(1)}`)
+    .join(' ')
+  const last = points[points.length - 1]
+  return (
+    <svg
+      viewBox={`0 0 ${w} ${h}`}
+      preserveAspectRatio="none"
+      className="mt-2 w-full h-12"
+      aria-hidden
+    >
+      <path d={d} fill="none" stroke={color} strokeWidth={1.5} />
+      {markerLast && last && (
+        <circle cx={last[0]} cy={last[1]} r={3} fill={color} />
+      )}
+    </svg>
+  )
+}
+
+function fmtNum(n: number) {
+  if (!Number.isFinite(n)) return '—'
+  const abs = Math.abs(n)
+  const s = abs >= 10 ? n.toFixed(1) : abs >= 1 ? n.toFixed(2) : n.toFixed(3)
+  return n > 0 ? `+${s}` : s
 }
 
 function ScoreCard({ label, value, bold }: { label: string; value: number; bold?: boolean }) {
