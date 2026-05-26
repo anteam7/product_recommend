@@ -142,6 +142,22 @@ if (!skipClassify) {
     })
   })
   if (classifyExit !== 0) failCount++
+
+  // scan-reorder-cadence: classify 직후 자기상관 기반 재구매 주기 추정 (가벼움)
+  console.log(`[${new Date().toISOString()}] launching scan-reorder-cadence`)
+  const reorderScript = resolvePath(__dirname, 'scan-reorder-cadence.mjs')
+  const reorderExit = await new Promise((resolve) => {
+    const child = spawn(process.execPath, [reorderScript], {
+      stdio: 'inherit',
+      env: process.env,
+    })
+    child.on('exit', (code) => resolve(code ?? 0))
+    child.on('error', (err) => {
+      console.error(`  scan-reorder-cadence spawn error: ${err.message}`)
+      resolve(1)
+    })
+  })
+  if (reorderExit !== 0) failCount++
 }
 
 process.exit(failCount > 0 ? 1 : 0)

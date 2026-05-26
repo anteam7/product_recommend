@@ -41,6 +41,97 @@ const SIM_OPTIONS = [
   { v: 0.3, label: '0.30 (엄격)' },
 ] as const
 
+interface ReorderHit {
+  cycle_days: number
+  segment: string
+  confidence: number
+  ltv_proxy_krw: number | null
+}
+
+async function fetchReorderLookup(): Promise<
+  Array<{ name: string; aliases: string[]; hit: ReorderHit }>
+> {
+  const sb = createAdminClient()
+  // reorder_cycle 테이블은 generated 타입 미반영 — as any 캐스팅
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const cycleRes = await (sb as any)
+    .from('jimscanner_trends_reorder_cycle')
+    .select('product_id, cycle_days, segment, confidence, ltv_proxy_krw')
+    .gte('confidence', 0.3)
+    .limit(2000)
+  const cycles = (cycleRes?.data ?? []) as Array<{
+    product_id: string
+    cycle_days: number
+    segment: string
+    confidence: number
+    ltv_proxy_krw: number | null
+  }>
+  if (cycles.length === 0) return []
+  const ids = [...new Set(cycles.map((c) => c.product_id))]
+  const { data: prods } = await sb
+    .from('jimscanner_trends_products')
+    .select('id, canonical_name')
+    .in('id', ids)
+  const pmap = new Map<string, string>()
+  for (const p of (prods ?? []) as Array<{ id: string; canonical_name: string }>) {
+    pmap.set(p.id, p.canonical_name)
+  }
+  const { data: aliases } = await sb
+    .from('jimscanner_trends_aliases')
+    .select('product_id, alias')
+    .in('product_id', ids)
+  const amap = new Map<string, string[]>()
+  for (const a of (aliases ?? []) as Array<{ product_id: string; alias: string }>) {
+    if (!amap.has(a.product_id)) amap.set(a.product_id, [])
+    amap.get(a.product_id)!.push(a.alias)
+  }
+  return cycles
+    .map((c) => {
+      const name = pmap.get(c.product_id)
+      if (!name) return null
+      return {
+        name: name.toLowerCase(),
+        aliases: (amap.get(c.product_id) ?? []).map((a) => a.toLowerCase()),
+        hit: {
+          cycle_days: c.cycle_days,
+          segment: c.segment,
+          confidence: c.confidence,
+          ltv_proxy_krw: c.ltv_proxy_krw,
+        },
+      }
+    })
+    .filter((x): x is { name: string; aliases: string[]; hit: ReorderHit } => x != null)
+}
+
+function matchReorder(
+  title: string,
+  searchKeyword: string,
+  lookup: Array<{ name: string; aliases: string[]; hit: ReorderHit }>,
+): ReorderHit | null {
+  if (lookup.length === 0) return null
+  const t = (title + ' ' + searchKeyword).toLowerCase()
+  let best: ReorderHit | null = null
+  for (const entry of lookup) {
+    if (entry.name && t.includes(entry.name)) {
+      if (!best || entry.hit.confidence > best.confidence) best = entry.hit
+      continue
+    }
+    for (const a of entry.aliases) {
+      if (a && a.length >= 2 && t.includes(a)) {
+        if (!best || entry.hit.confidence > best.confidence) best = entry.hit
+        break
+      }
+    }
+  }
+  return best
+}
+
+function reorderLift(seg: string): number {
+  if (seg === 'consumable') return 1.25
+  if (seg === 'repeatable') return 1.1
+  return 1.0
+}
+
 async function fetchRecommend(opts: {
   days: number
   minSim: number
@@ -56,12 +147,24 @@ async function fetchRecommend(opts: {
     result_limit: 200,
   } as never)
   if (error) {
-    return { rows: [] as RecommendRow[], error: error.message }
+    return { rows: [] as Array<RecommendRow & { reorder?: ReorderHit | null }>, error: error.message }
   }
   let rows = (data ?? []) as RecommendRow[]
   if (opts.imminentOnly) rows = rows.filter((r) => r.is_imminent)
   if (opts.cate) rows = rows.filter((r) => r.cate_cd === opts.cate)
-  return { rows, error: null as string | null }
+
+  // Enrich with reorder cycle (additive lift on final_score for sort).
+  const lookup = await fetchReorderLookup()
+  const enriched = rows.map((r) => {
+    const reorder = matchReorder(r.title, r.search_top_keyword ?? '', lookup)
+    return { ...r, reorder } as RecommendRow & { reorder: ReorderHit | null }
+  })
+  enriched.sort((a, b) => {
+    const aLift = a.reorder ? reorderLift(a.reorder.segment) : 1
+    const bLift = b.reorder ? reorderLift(b.reorder.segment) : 1
+    return Number(b.final_score) * bLift - Number(a.final_score) * aLift
+  })
+  return { rows: enriched, error: null as string | null }
 }
 
 const CATEGORIES: { code: string; label: string }[] = [
@@ -291,6 +394,25 @@ export default async function RecommendPage({
                         from {r.search_sources.map(sourceLabel).join(', ')}
                       </span>
                     )}
+                    {r.reorder && (
+                      <span
+                        className={`px-2 py-0.5 rounded ${
+                          r.reorder.segment === 'consumable'
+                            ? 'bg-red-100 text-red-700'
+                            : r.reorder.segment === 'repeatable'
+                              ? 'bg-amber-100 text-amber-700'
+                              : 'bg-blue-100 text-blue-700'
+                        }`}
+                        title={`ACF cycle ${r.reorder.cycle_days}d · conf ${r.reorder.confidence.toFixed(2)} · lift ×${reorderLift(r.reorder.segment).toFixed(2)}`}
+                      >
+                        🔁 {r.reorder.cycle_days}d {r.reorder.segment}
+                        {r.reorder.ltv_proxy_krw != null && (
+                          <span className="ml-1 text-emerald-700">
+                            · LTV {r.reorder.ltv_proxy_krw.toLocaleString()}원
+                          </span>
+                        )}
+                      </span>
+                    )}
                   </div>
                 </div>
 
@@ -306,6 +428,11 @@ export default async function RecommendPage({
                     <div>TV {Number(r.tv_score).toFixed(2)} × 1.5</div>
                     <div>검색 {Number(r.search_score).toFixed(2)} × 1.0</div>
                     {r.is_imminent && <div className="text-red-600">× 1.3 (임박)</div>}
+                    {r.reorder && (
+                      <div className="text-indigo-700">
+                        × {reorderLift(r.reorder.segment).toFixed(2)} (reorder)
+                      </div>
+                    )}
                   </div>
                 </div>
               </div>
