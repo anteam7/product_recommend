@@ -41,26 +41,96 @@ const SIM_OPTIONS = [
   { v: 0.3, label: '0.30 (엄격)' },
 ] as const
 
+interface BuzzGradeLookup {
+  // search keyword (lowercase) → grade
+  grades: Record<string, string>
+  burstScores: Record<string, number>
+}
+
+async function fetchBuzzGrades(): Promise<BuzzGradeLookup> {
+  const sb = createAdminClient()
+  // 가장 최근 computed_at 의 buzz_quality 행만 가져와서 alias 조인.
+  // supabase/buzz_quality.sql 적용 후 generated 타입 반영 시 캐스팅 제거.
+  const { data, error } = (await sb
+    .from('jimscanner_trends_buzz_quality' as never)
+    .select('product_id, grade, burst_score, computed_at')
+    .order('computed_at', { ascending: false })
+    .limit(2000)) as unknown as {
+    data: { product_id: string; grade: string; burst_score: number | null; computed_at: string }[] | null
+    error: { message: string } | null
+  }
+  if (error || !data) return { grades: {}, burstScores: {} }
+
+  // product_id 별 가장 최근만 유지
+  const latestByProduct = new Map<string, { grade: string; burst_score: number | null }>()
+  for (const r of data) {
+    if (!latestByProduct.has(r.product_id)) {
+      latestByProduct.set(r.product_id, { grade: r.grade, burst_score: r.burst_score })
+    }
+  }
+  const productIds = Array.from(latestByProduct.keys())
+  if (productIds.length === 0) return { grades: {}, burstScores: {} }
+
+  const { data: aliasData } = await sb
+    .from('jimscanner_trends_aliases')
+    .select('product_id, alias')
+    .in('product_id', productIds)
+
+  const grades: Record<string, string> = {}
+  const burstScores: Record<string, number> = {}
+  for (const a of aliasData ?? []) {
+    const bq = latestByProduct.get(a.product_id)
+    if (!bq) continue
+    const key = a.alias.toLowerCase()
+    // 가장 강한 신호 우선 (sponsored_suspect > mixed > organic > insufficient)
+    const rank: Record<string, number> = {
+      sponsored_suspect: 3,
+      mixed: 2,
+      organic: 1,
+      insufficient: 0,
+    }
+    if (!grades[key] || (rank[bq.grade] ?? 0) > (rank[grades[key]] ?? 0)) {
+      grades[key] = bq.grade
+      burstScores[key] = bq.burst_score ?? 0
+    }
+  }
+  return { grades, burstScores }
+}
+
 async function fetchRecommend(opts: {
   days: number
   minSim: number
   imminentOnly: boolean
+  organicOnly: boolean
   cate: string
 }) {
   const sb = createAdminClient()
   // RPC는 DB(supabase/ggsan_recommend_rpc.sql)에 존재하나 generated 타입 미반영 — `npm run gen:types` 시 캐스팅 제거
-  const { data, error } = await sb.rpc('jimscanner_ggsan_recommend' as never, {
-    days_window: opts.days,
-    min_sim: opts.minSim,
-    min_score: 0.5,
-    result_limit: 200,
-  } as never)
+  const [{ data, error }, buzzLookup] = await Promise.all([
+    sb.rpc('jimscanner_ggsan_recommend' as never, {
+      days_window: opts.days,
+      min_sim: opts.minSim,
+      min_score: 0.5,
+      result_limit: 200,
+    } as never),
+    fetchBuzzGrades(),
+  ])
   if (error) {
-    return { rows: [] as RecommendRow[], error: error.message }
+    return { rows: [] as (RecommendRow & { buzz_grade?: string })[], error: error.message }
   }
-  let rows = (data ?? []) as RecommendRow[]
+  let rows = ((data ?? []) as RecommendRow[]).map((r) => ({
+    ...r,
+    buzz_grade: r.search_top_keyword
+      ? buzzLookup.grades[r.search_top_keyword.toLowerCase()] ?? undefined
+      : undefined,
+  }))
   if (opts.imminentOnly) rows = rows.filter((r) => r.is_imminent)
   if (opts.cate) rows = rows.filter((r) => r.cate_cd === opts.cate)
+  if (opts.organicOnly) {
+    // organic + 매칭 안 된 행도 제외하지 않음 (커버리지 낮은 단계라 too aggressive 회피).
+    // 단, 'sponsored_suspect' 만 명시적으로 배제.
+    rows = rows.filter((r) => r.buzz_grade !== 'sponsored_suspect')
+  }
   return { rows, error: null as string | null }
 }
 
@@ -105,7 +175,7 @@ function sourceLabel(s: string): string {
 export default async function RecommendPage({
   searchParams,
 }: {
-  searchParams: Promise<{ days?: string; sim?: string; imminent?: string; cate?: string }>
+  searchParams: Promise<{ days?: string; sim?: string; imminent?: string; organic?: string; cate?: string }>
 }) {
   const sp = await searchParams
   const days = parseInt(sp.days ?? '30', 10)
@@ -113,16 +183,18 @@ export default async function RecommendPage({
   const sim = parseFloat(sp.sim ?? '0.2')
   const validSim = SIM_OPTIONS.some((s) => Math.abs(s.v - sim) < 0.001) ? sim : 0.2
   const imminentOnly = sp.imminent === '1'
+  const organicOnly = sp.organic === '1'
   const cate = sp.cate ?? ''
 
   const current: Record<string, string> = {
     days: String(validDays),
     sim: String(validSim),
     imminent: imminentOnly ? '1' : '',
+    organic: organicOnly ? '1' : '',
     cate,
   }
 
-  const { rows, error } = await fetchRecommend({ days: validDays, minSim: validSim, imminentOnly, cate })
+  const { rows, error } = await fetchRecommend({ days: validDays, minSim: validSim, imminentOnly, organicOnly, cate })
 
   // KPI
   const total = rows.length
@@ -183,6 +255,13 @@ export default async function RecommendPage({
             className={`px-3 py-1 text-xs rounded ${imminentOnly ? 'bg-red-100 text-red-700 font-semibold' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}
           >
             {imminentOnly ? '✓ ' : ''}임박특가만
+          </Link>
+          <Link
+            href={buildHref(current, { organic: organicOnly ? null : '1' })}
+            className={`px-3 py-1 text-xs rounded ${organicOnly ? 'bg-green-100 text-green-700 font-semibold' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}
+            title="버즈 분포 분석으로 sponsored 의심 키워드를 가진 후보 제외"
+          >
+            {organicOnly ? '✓ ' : ''}🌱 organic only
           </Link>
         </div>
         <div className="flex flex-wrap gap-1 border-t border-gray-100 pt-2">
@@ -291,6 +370,7 @@ export default async function RecommendPage({
                         from {r.search_sources.map(sourceLabel).join(', ')}
                       </span>
                     )}
+                    {r.buzz_grade && <BuzzGradeBadge grade={r.buzz_grade} />}
                   </div>
                 </div>
 
@@ -332,6 +412,17 @@ export default async function RecommendPage({
       </section>
     </div>
   )
+}
+
+function BuzzGradeBadge({ grade }: { grade: string }) {
+  const meta: Record<string, { label: string; cls: string }> = {
+    organic: { label: '🌱 organic', cls: 'bg-green-100 text-green-800' },
+    mixed: { label: '🟡 mixed', cls: 'bg-yellow-100 text-yellow-800' },
+    sponsored_suspect: { label: '⚠ sponsored?', cls: 'bg-red-100 text-red-800' },
+    insufficient: { label: '· low n', cls: 'bg-gray-100 text-gray-500' },
+  }
+  const m = meta[grade] ?? meta.insufficient
+  return <span className={`${m.cls} px-2 py-0.5 rounded`}>{m.label}</span>
 }
 
 function Kpi({ label, value, highlight = false }: { label: string; value: number | string; highlight?: boolean }) {
