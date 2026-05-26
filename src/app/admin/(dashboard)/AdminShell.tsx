@@ -96,13 +96,21 @@ const NAV_GROUPS: NavGroup[] = [
         href: '/admin/coupang-publish',
         label: '등록 상품 관리',
         icon: '🅒',
-        match: (p) => p.startsWith('/admin/coupang-publish'),
+        match: (p) =>
+          p === '/admin/coupang-publish' ||
+          (p.startsWith('/admin/coupang-publish') && !p.startsWith('/admin/coupang-publish/cost-drift')),
       },
       {
         href: '/admin/coupang-orders',
         label: '주문 ↔ 매입',
         icon: '📦',
         match: (p) => p.startsWith('/admin/coupang-orders'),
+      },
+      {
+        href: '/admin/coupang-publish/cost-drift',
+        label: '공급가 드리프트',
+        icon: '📈',
+        match: (p) => p.startsWith('/admin/coupang-publish/cost-drift'),
       },
     ],
   },

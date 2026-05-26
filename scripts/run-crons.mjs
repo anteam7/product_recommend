@@ -144,4 +144,24 @@ if (!skipClassify) {
   if (classifyExit !== 0) failCount++
 }
 
+// cost-drift-scan: 발행 SKU 도매원가 드리프트 검사 (--no-cost-drift 로 생략).
+//   filter 가 걸린 경우(특정 cron 만)도 건너뜀.
+const skipCostDrift = args.includes('--no-cost-drift') || !!filter
+if (!skipCostDrift) {
+  console.log(`[${new Date().toISOString()}] launching cost-drift-scan`)
+  const scriptPath = resolvePath(__dirname, 'cost-drift-scan.mjs')
+  const exitCode = await new Promise((resolve) => {
+    const child = spawn(process.execPath, [scriptPath], {
+      stdio: 'inherit',
+      env: process.env,
+    })
+    child.on('exit', (code) => resolve(code ?? 0))
+    child.on('error', (err) => {
+      console.error(`  cost-drift spawn error: ${err.message}`)
+      resolve(1)
+    })
+  })
+  if (exitCode !== 0) failCount++
+}
+
 process.exit(failCount > 0 ? 1 : 0)

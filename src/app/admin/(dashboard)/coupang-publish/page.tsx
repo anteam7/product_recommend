@@ -171,6 +171,12 @@ export default async function CoupangPublishPage({
             <strong>{meta.displayable.toLocaleString()}</strong>건
           </p>
         </div>
+        <Link
+          href="/admin/coupang-publish/cost-drift"
+          className="text-sm px-3 py-1.5 rounded bg-rose-50 text-rose-700 hover:bg-rose-100 border border-rose-200"
+        >
+          📈 공급가 드리프트 보드 →
+        </Link>
       </header>
 
       {/* 상태 필터 탭 */}
