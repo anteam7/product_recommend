@@ -13,6 +13,7 @@
     { "path": "/api/cron/collect-kca-press", "schedule": "50 18 * * *" },
     { "path": "/api/cron/collect-gsc-daily", "schedule": "0 19 * * *" },
     { "path": "/api/cron/collect-naver-tvtime", "schedule": "10 19 * * *" },
-    { "path": "/api/cron/coupang-stock-sync", "schedule": "0 * * * *" }
+    { "path": "/api/cron/coupang-stock-sync", "schedule": "0 * * * *" },
+    { "path": "/api/cron/competitor-stock-poll", "schedule": "30 */2 * * *" }
   ]
 }
