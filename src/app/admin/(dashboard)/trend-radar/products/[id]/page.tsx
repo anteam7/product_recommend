@@ -1,6 +1,7 @@
 import Link from 'next/link'
 import { notFound } from 'next/navigation'
 import { createAdminClient } from '@/lib/auth/admin-supabase'
+import FingerprintPanel from './FingerprintPanel'
 
 export const dynamic = 'force-dynamic'
 
@@ -36,9 +37,17 @@ interface ScoreRow {
   computed_at: string
 }
 
+interface FingerprintRow {
+  gender_share: Record<string, number>
+  age_share: Record<string, number>
+  dominant_segment: string | null
+  concentration_hhi: number | null
+  computed_at: string
+}
+
 async function fetchProduct(id: string) {
   const sb = createAdminClient()
-  const [prodRes, aliasRes, scoreRes] = await Promise.all([
+  const [prodRes, aliasRes, scoreRes, fpRes] = await Promise.all([
     sb.from('jimscanner_trends_products').select('*').eq('id', id).single(),
     sb
       .from('jimscanner_trends_aliases')
@@ -51,6 +60,12 @@ async function fetchProduct(id: string) {
       .eq('product_id', id)
       .order('computed_at', { ascending: false })
       .limit(30),
+    (sb as any)
+      .from('jimscanner_trends_demo_fingerprint')
+      .select('gender_share, age_share, dominant_segment, concentration_hhi, computed_at')
+      .eq('product_id', id)
+      .order('computed_at', { ascending: false })
+      .limit(1),
   ])
 
   if (prodRes.error || !prodRes.data) return null
@@ -59,6 +74,7 @@ async function fetchProduct(id: string) {
     product: prodRes.data as ProductRow,
     aliases: (aliasRes.data ?? []) as AliasRow[],
     scoreHistory: (scoreRes.data ?? []) as ScoreRow[],
+    fingerprint: ((fpRes?.data ?? [])[0] ?? null) as FingerprintRow | null,
   }
 }
 
@@ -70,7 +86,7 @@ export default async function ProductDetailPage({
   const { id } = await params
   const data = await fetchProduct(id)
   if (!data) notFound()
-  const { product, aliases, scoreHistory } = data
+  const { product, aliases, scoreHistory, fingerprint } = data
   const latest = scoreHistory[0]
 
   return (
@@ -150,6 +166,17 @@ export default async function ProductDetailPage({
             </table>
           </div>
         </section>
+      )}
+
+      {/* demographic fingerprint */}
+      {fingerprint && (
+        <FingerprintPanel
+          gender_share={fingerprint.gender_share}
+          age_share={fingerprint.age_share}
+          dominant_segment={fingerprint.dominant_segment}
+          concentration_hhi={fingerprint.concentration_hhi}
+          computed_at={fingerprint.computed_at}
+        />
       )}
 
       {/* score breakdown */}
