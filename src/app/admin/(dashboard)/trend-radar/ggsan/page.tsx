@@ -139,13 +139,21 @@ export default async function GgsanPage({
             건강기능식품 위탁판매 도매몰 · 22 카테고리 · 누적 {meta.totalProducts.toLocaleString()}개 상품
           </p>
         </div>
-        <RefreshButton
-          initialActive={
-            meta.queueRow && (meta.queueRow.status === 'pending' || meta.queueRow.status === 'running')
-              ? meta.queueRow
-              : null
-          }
-        />
+        <div className="flex items-center gap-2">
+          <Link
+            href="/admin/trend-radar/ggsan/drift"
+            className="px-3 py-1.5 text-xs rounded border border-red-300 text-red-700 hover:bg-red-50 font-medium"
+          >
+            ⚠ 메타 드리프트
+          </Link>
+          <RefreshButton
+            initialActive={
+              meta.queueRow && (meta.queueRow.status === 'pending' || meta.queueRow.status === 'running')
+                ? meta.queueRow
+                : null
+            }
+          />
+        </div>
       </header>
 
       {/* last sync 정보 */}
