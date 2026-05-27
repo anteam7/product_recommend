@@ -47,6 +47,28 @@ async function fetchTvGgsanMatchSummary() {
   return { totalRows: rows.length, uniqueKw, imminentRows, imminentKw }
 }
 
+interface LeadLagRow {
+  lead_category: string
+  lag_category: string
+  best_lag: number
+  best_r: number
+  lead_accel: number
+}
+
+async function fetchLeadLagCallouts() {
+  const sb = createAdminClient()
+  const { data } = await sb.rpc('jimscanner_trends_category_leadlag' as never, {
+    window_days: 45,
+    min_overlap: 10,
+    max_lag: 14,
+  } as never)
+  const rows = ((data ?? []) as unknown as LeadLagRow[])
+    .filter((r) => Number(r.best_r) >= 0.5 && Number(r.best_lag) >= 3 && Number(r.lead_accel) > 0)
+    .sort((a, b) => Number(b.best_r) - Number(a.best_r))
+    .slice(0, 3)
+  return rows
+}
+
 async function fetchTvPushes() {
   const sb = createAdminClient()
   const since = new Date(Date.now() - 30 * 86400_000).toISOString()
@@ -132,10 +154,11 @@ export default async function TrendRadarPage({
   const sp = await searchParams
   const category = (CATEGORIES.includes(sp.cat as Category) ? sp.cat : 'all') as Category
 
-  const [{ products, scores, kpis }, tvPushes, tvGgsan] = await Promise.all([
+  const [{ products, scores, kpis }, tvPushes, tvGgsan, leadLagCallouts] = await Promise.all([
     fetchData(category),
     fetchTvPushes(),
     fetchTvGgsanMatchSummary(),
+    fetchLeadLagCallouts().catch(() => [] as LeadLagRow[]),
   ])
 
   const sorted = products
@@ -185,6 +208,39 @@ export default async function TrendRadarPage({
           </Link>
         ))}
       </nav>
+
+      {/* 🔔 카테고리 lead-lag callout — 선행 카테고리 가속 → 후행 카테고리 예측 */}
+      {leadLagCallouts.length > 0 && (
+        <Link
+          href="/admin/trend-radar/leadlag"
+          className="block rounded border border-amber-300 bg-amber-50 px-4 py-3 hover:bg-amber-100 transition-colors"
+        >
+          <div className="text-sm font-semibold">
+            🔔 매입 선행 시그널{' '}
+            <span className="text-xs font-normal text-gray-500 ml-1">
+              · 선행 카테고리 가속 중 → N일 뒤 후행 카테고리 가능성
+            </span>
+          </div>
+          <div className="mt-1 space-y-0.5">
+            {leadLagCallouts.map((c) => (
+              <div
+                key={`${c.lead_category}->${c.lag_category}`}
+                className="text-xs text-gray-700"
+              >
+                <span className="font-semibold">{c.lead_category}</span>
+                <span className="mx-1 text-gray-500">
+                  → {Number(c.best_lag)}일 후 →
+                </span>
+                <span className="font-semibold">{c.lag_category}</span>
+                <span className="ml-2 text-gray-500">
+                  r={Number(c.best_r).toFixed(2)} · 가속=
+                  {Number(c.lead_accel).toFixed(2)}
+                </span>
+              </div>
+            ))}
+          </div>
+        </Link>
+      )}
 
       {/* 🔥 TV ↔ ggsan 매칭 callout */}
       <Link
