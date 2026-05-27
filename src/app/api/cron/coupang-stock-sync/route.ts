@@ -137,11 +137,51 @@ export async function GET(req: NextRequest) {
   let total = 0, soldOut = 0, resumed = 0, errors = 0
 
   try {
-    // 활성 등록 상품
+    // 0단계: PENDING_APPROVAL 상품의 승인 상태 폴링 → 승인완료시 재고 5개 자동 적용
+    const { data: pending } = await sb
+      .from('jimscanner_coupang_listings')
+      .select('id, seller_product_id')
+      .eq('status', 'PENDING_APPROVAL')
+    for (const p of ((pending ?? []) as unknown as Array<{ id: string; seller_product_id: number | null }>)) {
+      if (!p.seller_product_id) continue
+      const detail = await coupangApi('GET', `/v2/providers/seller_api/apis/api/v1/marketplace/seller-products/${p.seller_product_id}`)
+      const d = (detail.body as { data?: { statusName?: string; items?: Array<{ vendorItemId?: number; itemName?: string }> } })?.data
+      const statusName = d?.statusName
+      if (statusName === '승인완료') {
+        // vendorItemId 부여됐는지 확인 + 재고 5개
+        for (const it of (d?.items ?? [])) {
+          if (it.vendorItemId) {
+            await coupangApi('PUT', `/v2/providers/seller_api/apis/api/v1/marketplace/vendor-items/${it.vendorItemId}/quantities/5`)
+          }
+        }
+        await sb.from('jimscanner_coupang_listings').update({
+          status: 'APPROVED',
+          approval_status_name: statusName,
+          approved_at: new Date().toISOString(),
+          last_synced_at: new Date().toISOString(),
+        }).eq('id', p.id)
+      } else if (statusName === '승인거절' || statusName === '거절') {
+        await sb.from('jimscanner_coupang_listings').update({
+          status: 'REJECTED',
+          approval_status_name: statusName,
+          rejection_reason: '쿠팡 검수 거절 (Wing에서 사유 확인 필요)',
+          last_synced_at: new Date().toISOString(),
+        }).eq('id', p.id)
+      } else {
+        // 심사중 등 - status 유지
+        await sb.from('jimscanner_coupang_listings').update({
+          approval_status_name: statusName ?? null,
+          last_synced_at: new Date().toISOString(),
+        }).eq('id', p.id)
+      }
+      await new Promise((s) => setTimeout(s, 200))
+    }
+
+    // 활성 등록 상품 — 재고 추적 대상 (APPROVED, SELLING)
     const { data: listings } = await sb
       .from('jimscanner_coupang_listings')
       .select('id, seller_product_id, source_goods_no, stock_status, auto_paused')
-      .in('status', ['TEMPORARY_SAVE', 'PENDING_APPROVAL', 'APPROVED', 'SELLING'])
+      .in('status', ['APPROVED', 'SELLING'])
     const rows = (listings ?? []) as unknown as Array<{
       id: string
       seller_product_id: number | null
