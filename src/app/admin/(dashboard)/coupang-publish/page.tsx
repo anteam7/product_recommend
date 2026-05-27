@@ -107,6 +107,24 @@ async function fetchData(opts: {
   return { rows: (data ?? []) as unknown as ListingRow[], total: count ?? 0 }
 }
 
+async function fetchRiskMap() {
+  const sb = createAdminClient() as unknown as {
+    from: (t: string) => ReturnType<ReturnType<typeof createAdminClient>['from']>
+  }
+  const { data } = await sb
+    .from('jimscanner_self_cannibal_risk')
+    .select('listing_id, risk_score, overlapping_keywords')
+  const map = new Map<string, { risk: number; kw: number }>()
+  for (const r of (data ?? []) as unknown as {
+    listing_id: string
+    risk_score: number
+    overlapping_keywords: number
+  }[]) {
+    map.set(r.listing_id, { risk: r.risk_score, kw: r.overlapping_keywords })
+  }
+  return map
+}
+
 async function fetchMeta() {
   const sb = createAdminClient() as unknown as {
     from: (t: string) => ReturnType<ReturnType<typeof createAdminClient>['from']>
@@ -156,9 +174,10 @@ export default async function CoupangPublishPage({
   const page = Math.max(1, parseInt(sp.page ?? '1', 10) || 1)
   const current: Record<string, string> = { status, displayable, q, sort, page: String(page) }
 
-  const [{ rows, total }, meta] = await Promise.all([
+  const [{ rows, total }, meta, riskMap] = await Promise.all([
     fetchData({ status, displayable, q, sort, page }),
     fetchMeta(),
+    fetchRiskMap().catch(() => new Map<string, { risk: number; kw: number }>()),
   ])
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE))
 
@@ -261,6 +280,7 @@ export default async function CoupangPublishPage({
               <th className="px-3 py-2 text-right font-semibold">판매가</th>
               <th className="px-3 py-2 text-right font-semibold">마진율</th>
               <th className="px-3 py-2 text-center font-semibold">상태</th>
+              <th className="px-3 py-2 text-center font-semibold" title="자기 SKU 잠식 게이트">잠식</th>
               <th className="px-3 py-2 text-center font-semibold">노출</th>
               <th className="px-3 py-2 text-center font-semibold">링크</th>
             </tr>
@@ -268,7 +288,7 @@ export default async function CoupangPublishPage({
           <tbody>
             {rows.length === 0 && (
               <tr>
-                <td colSpan={8} className="px-3 py-12 text-center text-gray-400 text-sm">
+                <td colSpan={9} className="px-3 py-12 text-center text-gray-400 text-sm">
                   아직 등록된 상품이 없습니다. 에이전트가 쿠팡 등록을 수행하면 자동으로 추가됩니다.
                 </td>
               </tr>
@@ -314,6 +334,29 @@ export default async function CoupangPublishPage({
                     {r.rejection_reason && (
                       <div className="text-[10px] text-rose-600 mt-1 line-clamp-2">{r.rejection_reason}</div>
                     )}
+                  </td>
+                  <td className="px-3 py-2 text-center">
+                    {(() => {
+                      const rk = riskMap.get(r.id)
+                      if (!rk || rk.risk === 0) {
+                        return <span className="text-[10px] text-gray-400">—</span>
+                      }
+                      const cls =
+                        rk.risk >= 70
+                          ? 'bg-rose-100 text-rose-700 border border-rose-300'
+                          : rk.risk >= 40
+                            ? 'bg-amber-100 text-amber-700 border border-amber-300'
+                            : 'bg-yellow-50 text-yellow-700 border border-yellow-200'
+                      return (
+                        <Link
+                          href="/admin/trend-radar/self-cannibal"
+                          title={`잠식 키워드 ${rk.kw}개`}
+                          className={`inline-block px-2 py-0.5 rounded text-xs font-semibold ${cls}`}
+                        >
+                          {rk.risk}
+                        </Link>
+                      )
+                    })()}
                   </td>
                   <td className="px-3 py-2 text-center">
                     {r.displayable ? (
