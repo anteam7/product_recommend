@@ -102,7 +102,15 @@ const NAV_GROUPS: NavGroup[] = [
         href: '/admin/coupang-orders',
         label: '주문 ↔ 매입',
         icon: '📦',
-        match: (p) => p.startsWith('/admin/coupang-orders'),
+        match: (p) =>
+          p.startsWith('/admin/coupang-orders') &&
+          !p.startsWith('/admin/coupang-orders/risk-matrix'),
+      },
+      {
+        href: '/admin/coupang-orders/risk-matrix',
+        label: '⚠️ 위험 매트릭스',
+        icon: '⚠️',
+        match: (p) => p.startsWith('/admin/coupang-orders/risk-matrix'),
       },
     ],
   },
