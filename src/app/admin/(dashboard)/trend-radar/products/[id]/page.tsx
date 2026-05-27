@@ -36,6 +36,12 @@ interface ScoreRow {
   computed_at: string
 }
 
+interface ChurnBadge {
+  cohort_size: number
+  surviving: number
+  survival_rate: number | null
+}
+
 async function fetchProduct(id: string) {
   const sb = createAdminClient()
   const [prodRes, aliasRes, scoreRes] = await Promise.all([
@@ -55,10 +61,28 @@ async function fetchProduct(id: string) {
 
   if (prodRes.error || !prodRes.data) return null
 
+  // 90일 셀러 생존율 배지 — RPC 신설, 타입 미생성 상태로 캐스팅
+  let churn90d: ChurnBadge | null = null
+  const categoryTop = (prodRes.data as ProductRow).category_top
+  if (categoryTop) {
+    const { data: churnData } = await (sb as any).rpc('jimscanner_seller_churn_90d', {
+      p_category_top: categoryTop,
+    })
+    const row = (churnData as any[])?.[0]
+    if (row && row.cohort_size > 0) {
+      churn90d = {
+        cohort_size: row.cohort_size,
+        surviving: row.surviving,
+        survival_rate: row.survival_rate != null ? Number(row.survival_rate) : null,
+      }
+    }
+  }
+
   return {
     product: prodRes.data as ProductRow,
     aliases: (aliasRes.data ?? []) as AliasRow[],
     scoreHistory: (scoreRes.data ?? []) as ScoreRow[],
+    churn90d,
   }
 }
 
@@ -70,8 +94,9 @@ export default async function ProductDetailPage({
   const { id } = await params
   const data = await fetchProduct(id)
   if (!data) notFound()
-  const { product, aliases, scoreHistory } = data
+  const { product, aliases, scoreHistory, churn90d } = data
   const latest = scoreHistory[0]
+  const churnTrap = churn90d?.survival_rate != null && churn90d.survival_rate <= 40
 
   return (
     <div className="space-y-6 p-6">
@@ -87,12 +112,27 @@ export default async function ProductDetailPage({
             카테고리: {product.category_top}
             {product.category_mid ? ` / ${product.category_mid}` : ''} · alias {product.alias_count}건
           </p>
-          {(product.intent_label || product.description) && (
+          {(product.intent_label || product.description || churn90d) && (
             <div className="mt-2 flex items-center gap-2 flex-wrap">
               {product.intent_label && (
                 <span className="text-xs px-2 py-0.5 rounded bg-amber-100 text-amber-700 font-medium">
                   🏷 {product.intent_label}
                 </span>
+              )}
+              {churn90d?.survival_rate != null && (
+                <Link
+                  href="/admin/trend-radar/seller-churn"
+                  title={`코호트 ${churn90d.cohort_size} 셀러 중 ${churn90d.surviving} 생존`}
+                  className={`text-xs px-2 py-0.5 rounded font-medium ${
+                    churnTrap
+                      ? 'bg-red-100 text-red-700 border border-red-300'
+                      : churn90d.survival_rate <= 60
+                        ? 'bg-amber-100 text-amber-700'
+                        : 'bg-emerald-100 text-emerald-700'
+                  }`}
+                >
+                  {churnTrap ? '⚠ ' : ''}90일 셀러 생존율 {churn90d.survival_rate.toFixed(0)}%
+                </Link>
               )}
               {product.description && (
                 <span className="text-sm text-gray-700">{product.description}</span>
