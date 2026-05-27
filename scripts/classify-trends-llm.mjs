@@ -53,9 +53,17 @@ const SYSTEM_PROMPT = `한국 위탁 판매 상품 분류기. 입력 리스트�
 - category_mid: 5-10자 한국어 (예: "오메가3", "수납용품")
 - intent_label: 5-7자 (예: "예방건강", "문제해결", "소모품")
 - description: 15자 이내 1문장 (위탁 판매 의사결정 단서)
+- intent_class: 검색 의도 top-1 (transactional | comparison | informational | navigational)
+  · transactional: 즉시 구매·가격·할인·"사다"·"구매" — 위탁 ROI 최상
+  · comparison: 비교·추천·순위·"vs"·"어떤" — 위탁 ROI 상
+  · informational: 정보탐색·"사용법"·"원리"·"란"·"효과" — 위탁 ROI 낮음 (구매 의도 약함)
+  · navigational: 특정 브랜드·사이트 진입 — 위탁 부적합
+- intent_probs: 4-class 확률 벡터, 합=1.0
+  · 예: {"transactional":0.62,"comparison":0.18,"informational":0.15,"navigational":0.05}
+  · 소수점 둘째 자리, 합이 1.0 이 되도록 정규화
 
 예시 입력: - id="abc" name="닥터린 초임계 알티지 오메가3 60캡슐" cur_top=health aliases=2 samples=[종근당 오메가3 | 일양 오메가3] sources=[naver_shopping_hot,musinsa_best]
-예시 출력: [{"id":"abc","canonical_name":"오메가3","brand":"닥터린","category_top":"health","category_mid":"오메가3","intent_label":"예방건강","description":"혈행건강 영양제"}]`
+예시 출력: [{"id":"abc","canonical_name":"오메가3","brand":"닥터린","category_top":"health","category_mid":"오메가3","intent_label":"예방건강","description":"혈행건강 영양제","intent_class":"transactional","intent_probs":{"transactional":0.6,"comparison":0.25,"informational":0.1,"navigational":0.05}}]`
 
 function buildUserPrompt(items) {
   const lines = items.map(
@@ -89,6 +97,40 @@ function tryParseJsonArray(text) {
   return null
 }
 
+const INTENT_CLASSES = ['transactional', 'comparison', 'informational', 'navigational']
+
+function normalizeIntent(o) {
+  const probsRaw = o && typeof o === 'object' && o.intent_probs && typeof o.intent_probs === 'object'
+    ? o.intent_probs
+    : null
+  const probs = { transactional: 0, comparison: 0, informational: 0, navigational: 0 }
+  let sum = 0
+  if (probsRaw) {
+    for (const k of INTENT_CLASSES) {
+      const v = Number(probsRaw[k])
+      if (Number.isFinite(v) && v >= 0) {
+        probs[k] = v
+        sum += v
+      }
+    }
+  }
+  if (sum <= 0) {
+    // 폴백: top-1 만 1.0
+    const cls = INTENT_CLASSES.includes(o?.intent_class) ? o.intent_class : 'informational'
+    probs[cls] = 1
+    return { cls, probs, eligible: cls === 'transactional' || cls === 'comparison' }
+  }
+  // 정규화
+  for (const k of INTENT_CLASSES) probs[k] = Number((probs[k] / sum).toFixed(3))
+  let cls = INTENT_CLASSES.includes(o?.intent_class) ? o.intent_class : null
+  if (!cls) {
+    // top-1 픽
+    cls = INTENT_CLASSES.reduce((a, b) => (probs[b] > probs[a] ? b : a), 'informational')
+  }
+  const eligible = probs.transactional >= 0.6 || probs.comparison >= 0.55
+  return { cls, probs, eligible }
+}
+
 function normalizeResult(o, fallbackId) {
   if (!o || typeof o !== 'object') return null
   const id = String(o.id ?? fallbackId).trim()
@@ -98,6 +140,7 @@ function normalizeResult(o, fallbackId) {
   const top = ['health', 'living', 'digital', 'other'].includes(o.category_top)
     ? o.category_top
     : 'other'
+  const intent = normalizeIntent(o)
   return {
     id,
     canonical_name: cn,
@@ -106,6 +149,9 @@ function normalizeResult(o, fallbackId) {
     category_mid: typeof o.category_mid === 'string' ? o.category_mid.trim().slice(0, 30) : '',
     intent_label: typeof o.intent_label === 'string' ? o.intent_label.trim().slice(0, 20) : '',
     description: typeof o.description === 'string' ? o.description.trim().slice(0, 80) : '',
+    intent_class: intent.cls,
+    intent_probs: intent.probs,
+    is_pin_eligible: intent.eligible,
   }
 }
 
@@ -239,6 +285,24 @@ async function applyResults(results) {
         .eq('id', r.id),
     ),
   )
+
+  // 의도 분류 upsert — jimscanner_trends_intent
+  const intentRows = results.map((r) => ({
+    product_id: r.id,
+    intent_class: r.intent_class,
+    intent_probs: r.intent_probs,
+    is_pin_eligible: r.is_pin_eligible,
+    model: MODEL,
+    classified_at: now,
+  }))
+  try {
+    const { error } = await sb
+      .from('jimscanner_trends_intent')
+      .upsert(intentRows, { onConflict: 'product_id' })
+    if (error) console.error(`  (intent upsert failed: ${error.message})`)
+  } catch (e) {
+    console.error(`  (intent upsert threw: ${e instanceof Error ? e.message : e})`)
+  }
 }
 
 async function logRun(payload) {
