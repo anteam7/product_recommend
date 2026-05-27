@@ -107,6 +107,31 @@ async function fetchData(opts: {
   return { rows: (data ?? []) as unknown as ListingRow[], total: count ?? 0 }
 }
 
+async function fetchCronStatus() {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const sb = createAdminClient() as any
+  const [stockRun, ordersAggResp, ordersCountResp] = await Promise.all([
+    sb
+      .from('jimscanner_coupang_stock_sync_runs')
+      .select('started_at, status, total_checked, sold_out_count, resumed_count, error_count, duration_ms')
+      .order('started_at', { ascending: false })
+      .limit(1)
+      .maybeSingle(),
+    sb
+      .from('jimscanner_coupang_orders')
+      .select('last_synced_at')
+      .order('last_synced_at', { ascending: false, nullsFirst: false })
+      .limit(1)
+      .maybeSingle(),
+    sb.from('jimscanner_coupang_orders').select('*', { count: 'exact', head: true }),
+  ])
+  return {
+    stock: stockRun.data,
+    ordersLastSync: ordersAggResp.data?.last_synced_at ?? null,
+    ordersTotal: ordersCountResp.count ?? 0,
+  }
+}
+
 async function fetchMeta() {
   const sb = createAdminClient() as unknown as {
     from: (t: string) => ReturnType<ReturnType<typeof createAdminClient>['from']>
@@ -142,6 +167,9 @@ function fmt(n: number | null | undefined) {
   if (n == null) return '—'
   return n.toLocaleString()
 }
+function fmtDate(s: string | null | undefined) {
+  return s ? s.slice(0, 16).replace('T', ' ') : '—'
+}
 
 export default async function CoupangPublishPage({
   searchParams,
@@ -156,9 +184,10 @@ export default async function CoupangPublishPage({
   const page = Math.max(1, parseInt(sp.page ?? '1', 10) || 1)
   const current: Record<string, string> = { status, displayable, q, sort, page: String(page) }
 
-  const [{ rows, total }, meta] = await Promise.all([
+  const [{ rows, total }, meta, cronStatus] = await Promise.all([
     fetchData({ status, displayable, q, sort, page }),
     fetchMeta(),
+    fetchCronStatus(),
   ])
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE))
 
@@ -174,6 +203,49 @@ export default async function CoupangPublishPage({
           </p>
         </div>
       </header>
+
+      {/* cron 위젯 */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+        {/* Stock sync */}
+        <div className="bg-white border rounded p-3">
+          <div className="flex items-baseline justify-between mb-2">
+            <span className="text-xs font-semibold text-gray-500">⏱ Stock-Sync (시간당)</span>
+            {cronStatus.stock?.status === 'success' ? (
+              <span className="text-[10px] bg-emerald-100 text-emerald-700 px-1.5 py-0.5 rounded">정상</span>
+            ) : cronStatus.stock?.status === 'error' ? (
+              <span className="text-[10px] bg-rose-100 text-rose-700 px-1.5 py-0.5 rounded">에러</span>
+            ) : (
+              <span className="text-[10px] bg-gray-100 text-gray-500 px-1.5 py-0.5 rounded">대기</span>
+            )}
+          </div>
+          {cronStatus.stock ? (
+            <div className="text-xs text-gray-700 space-y-0.5">
+              <div>마지막 실행: <strong>{fmtDate(cronStatus.stock.started_at)}</strong> ({((cronStatus.stock.duration_ms ?? 0) / 1000).toFixed(1)}s)</div>
+              <div>
+                체크 <strong>{cronStatus.stock.total_checked ?? 0}</strong> · 품절 {cronStatus.stock.sold_out_count ?? 0} · 재개 {cronStatus.stock.resumed_count ?? 0} · 에러 {cronStatus.stock.error_count ?? 0}
+              </div>
+            </div>
+          ) : (
+            <div className="text-xs text-gray-400">아직 실행 기록 없음</div>
+          )}
+        </div>
+
+        {/* Orders sync */}
+        <div className="bg-white border rounded p-3">
+          <div className="flex items-baseline justify-between mb-2">
+            <span className="text-xs font-semibold text-gray-500">📦 Orders-Sync (시간당)</span>
+            {cronStatus.ordersLastSync ? (
+              <span className="text-[10px] bg-emerald-100 text-emerald-700 px-1.5 py-0.5 rounded">정상</span>
+            ) : (
+              <span className="text-[10px] bg-gray-100 text-gray-500 px-1.5 py-0.5 rounded">대기</span>
+            )}
+          </div>
+          <div className="text-xs text-gray-700 space-y-0.5">
+            <div>마지막 sync: <strong>{fmtDate(cronStatus.ordersLastSync)}</strong></div>
+            <div>누적 주문: <strong>{cronStatus.ordersTotal.toLocaleString()}</strong> · <a href="/admin/coupang-orders" className="text-blue-600 hover:underline">→ 주문 관리</a></div>
+          </div>
+        </div>
+      </div>
 
       {/* 상태 필터 탭 */}
       <nav className="flex flex-wrap gap-1 border-b border-gray-200">
