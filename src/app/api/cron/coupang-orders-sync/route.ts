@@ -14,7 +14,7 @@ import { createAdminClient } from '@/lib/auth/admin-supabase'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
-export const maxDuration = 300
+export const maxDuration = 60
 
 const HOST = 'https://api-gateway.coupang.com'
 
