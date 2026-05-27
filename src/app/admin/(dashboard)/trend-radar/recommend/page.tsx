@@ -41,6 +41,15 @@ const SIM_OPTIONS = [
   { v: 0.3, label: '0.30 (엄격)' },
 ] as const
 
+// 경쟁상품 추정 월매출 게이트 (단위: 만원)
+const MIN_MONTH_REV_OPTIONS = [
+  { v: 0, label: '미적용' },
+  { v: 100, label: '100만+' },
+  { v: 500, label: '500만+' },
+  { v: 1000, label: '1,000만+' },
+  { v: 3000, label: '3,000만+' },
+] as const
+
 async function fetchRecommend(opts: {
   days: number
   minSim: number
@@ -105,7 +114,7 @@ function sourceLabel(s: string): string {
 export default async function RecommendPage({
   searchParams,
 }: {
-  searchParams: Promise<{ days?: string; sim?: string; imminent?: string; cate?: string }>
+  searchParams: Promise<{ days?: string; sim?: string; imminent?: string; cate?: string; minRev?: string }>
 }) {
   const sp = await searchParams
   const days = parseInt(sp.days ?? '30', 10)
@@ -114,12 +123,15 @@ export default async function RecommendPage({
   const validSim = SIM_OPTIONS.some((s) => Math.abs(s.v - sim) < 0.001) ? sim : 0.2
   const imminentOnly = sp.imminent === '1'
   const cate = sp.cate ?? ''
+  const minRev = parseInt(sp.minRev ?? '0', 10)
+  const validMinRev = MIN_MONTH_REV_OPTIONS.some((o) => o.v === minRev) ? minRev : 0
 
   const current: Record<string, string> = {
     days: String(validDays),
     sim: String(validSim),
     imminent: imminentOnly ? '1' : '',
     cate,
+    minRev: validMinRev > 0 ? String(validMinRev) : '',
   }
 
   const { rows, error } = await fetchRecommend({ days: validDays, minSim: validSim, imminentOnly, cate })
@@ -184,6 +196,20 @@ export default async function RecommendPage({
           >
             {imminentOnly ? '✓ ' : ''}임박특가만
           </Link>
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-gray-500" title="경쟁상품의 리뷰 적립속도로 추정한 월 매출. 스냅샷 누적 후 활성.">
+              💰 경쟁 추정 월매출 ≥
+            </span>
+            {MIN_MONTH_REV_OPTIONS.map((o) => (
+              <Link
+                key={o.v}
+                href={buildHref(current, { minRev: o.v > 0 ? String(o.v) : null })}
+                className={`px-2 py-1 text-xs rounded ${validMinRev === o.v ? 'bg-amber-100 text-amber-700 font-semibold' : 'text-gray-500 hover:text-black'}`}
+              >
+                {o.label}
+              </Link>
+            ))}
+          </div>
         </div>
         <div className="flex flex-wrap gap-1 border-t border-gray-100 pt-2">
           <Link
