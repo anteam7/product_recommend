@@ -148,21 +148,19 @@ export async function GET(req: NextRequest) {
       const d = (detail.body as { data?: { statusName?: string; items?: Array<{ vendorItemId?: number; itemName?: string }> } })?.data
       const statusName = d?.statusName
       if (statusName === '승인완료') {
-        // vendorItemId 부여됐는지 확인 + 재고 5개 + 판매중지 (사용자 정책: 노출 OFF 유지)
+        // 승인완료 감지 → 재고 5개 (판매중지 안 함, 정상 판매중 유지)
         for (const it of (d?.items ?? [])) {
           if (it.vendorItemId) {
             await coupangApi('PUT', `/v2/providers/seller_api/apis/api/v1/marketplace/vendor-items/${it.vendorItemId}/quantities/5`)
-            await new Promise((s) => setTimeout(s, 200))
-            await coupangApi('PUT', `/v2/providers/seller_api/apis/api/v1/marketplace/vendor-items/${it.vendorItemId}/sales/stop`)
           }
         }
         await sb.from('jimscanner_coupang_listings').update({
           status: 'APPROVED',
           approval_status_name: statusName,
           approved_at: new Date().toISOString(),
-          displayable: false,
-          auto_paused: true,
-          coupang_sale_stopped_at: new Date().toISOString(),
+          displayable: true,
+          auto_paused: false,
+          stock_status: 'in_stock',
           last_synced_at: new Date().toISOString(),
         }).eq('id', p.id)
       } else if (statusName === '승인거절' || statusName === '거절') {
