@@ -8,6 +8,7 @@ export type MarketSource =
   | 'clien_park'
   | 'quasarzone_sale'
   | 'kca_press'
+  | 'mfds_recall'
 
 export type MarketRawInsert = {
   source: MarketSource

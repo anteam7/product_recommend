@@ -128,6 +128,32 @@ AS $$
     GROUP BY goods_no
   ),
 
+  -- 4.5) 안전 필터 — 식약처 회수·판매중지·원료금지 매칭 product (RED 게이트)
+  --   Recall Block Watch (supabase/recall_block_watch.sql) 의 mfds_recall raw 와
+  --   ggsan title 을 pg_trgm 매칭. 임계값 0.40 이상이면 추천에서 제외.
+  red_blocked AS (
+    SELECT DISTINCT g.goods_no
+    FROM (
+      SELECT
+        COALESCE(NULLIF(mr.metadata->>'product_name', ''), mr.title) AS product_name,
+        NULLIF(mr.metadata->>'ingredient', '') AS ingredient
+      FROM jimscanner_market_raw mr
+      WHERE mr.source = 'mfds_recall'
+        AND mr.captured_at > now() - interval '365 days'
+    ) rc
+    CROSS JOIN LATERAL (
+      SELECT gp.goods_no, gp.title
+      FROM jimscanner_ggsan_products gp
+      WHERE (rc.product_name IS NOT NULL AND gp.title % rc.product_name)
+         OR (rc.ingredient   IS NOT NULL AND gp.title % rc.ingredient)
+      LIMIT 5
+    ) g
+    WHERE GREATEST(
+            CASE WHEN rc.product_name IS NOT NULL THEN similarity(rc.product_name, g.title) ELSE 0 END,
+            CASE WHEN rc.ingredient   IS NOT NULL THEN similarity(rc.ingredient, g.title)   ELSE 0 END
+          ) >= 0.40
+  ),
+
   -- 5) ggsan 상품에 점수 매핑 (시그널 1개 이상 있는 것만)
   scored AS (
     SELECT
@@ -144,7 +170,9 @@ AS $$
     FROM jimscanner_ggsan_products gp
     LEFT JOIN tv_agg tv ON tv.goods_no = gp.goods_no
     LEFT JOIN search_agg s ON s.goods_no = gp.goods_no
-    WHERE tv.tv_score IS NOT NULL OR s.search_score IS NOT NULL
+    WHERE (tv.tv_score IS NOT NULL OR s.search_score IS NOT NULL)
+      -- 안전 필터: 회수·판매중지·원료금지 매칭 product 제외
+      AND gp.goods_no NOT IN (SELECT goods_no FROM red_blocked)
   )
 
   SELECT

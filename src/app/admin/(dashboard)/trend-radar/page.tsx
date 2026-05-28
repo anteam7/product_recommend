@@ -216,6 +216,27 @@ export default async function TrendRadarPage({
         </div>
       </Link>
 
+      {/* 🛑 회수·판매중지 사전차단 게이트 callout */}
+      <Link
+        href="/admin/trend-radar/safety-gate"
+        className="block rounded border border-gray-200 px-4 py-3 transition-colors hover:bg-red-50"
+      >
+        <div className="flex items-center justify-between flex-wrap gap-2">
+          <div>
+            <div className="text-sm font-semibold">
+              🛑 회수·판매중지 사전차단 게이트{' '}
+              <span className="text-xs font-normal text-gray-500 ml-1">
+                식약처 회수·원료금지 공고 ↔ ggsan 후보 매칭
+              </span>
+            </div>
+            <div className="text-xs text-gray-600 mt-0.5">
+              발행/판매 전 RED 차단 — final_score 추천에서도 자동 제외
+            </div>
+          </div>
+          <span className="text-xs text-gray-500">안전 점검 →</span>
+        </div>
+      </Link>
+
       {/* TV 편성 push Top 20 */}
       <section className="rounded border border-gray-200 p-4 bg-amber-50/40">
         <div className="flex items-baseline justify-between mb-3">

@@ -41,6 +41,7 @@ const CRONS = [
   '/api/cron/collect-clien-park',
   '/api/cron/collect-quasarzone-sale',
   '/api/cron/collect-kca-press',
+  '/api/cron/collect-mfds-recall',
   '/api/cron/collect-gsc-daily',
   '/api/cron/collect-naver-tvtime',
 ]
