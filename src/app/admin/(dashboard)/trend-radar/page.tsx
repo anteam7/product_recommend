@@ -216,6 +216,27 @@ export default async function TrendRadarPage({
         </div>
       </Link>
 
+      {/* 📉 TV-Quiet 역게이트 callout */}
+      <Link
+        href="/admin/trend-radar/tv-quiet"
+        className="block rounded border border-emerald-300 bg-emerald-50 px-4 py-3 hover:bg-emerald-100 transition-colors"
+      >
+        <div className="flex items-center justify-between flex-wrap gap-2">
+          <div>
+            <div className="text-sm font-semibold">
+              📉 TV-Quiet 틈새 게이트{' '}
+              <span className="text-xs font-normal text-gray-500 ml-1">
+                TV편성을 경쟁압으로 역해석 — 수요↑ × TV편성↓ 조용한 틈새
+              </span>
+            </div>
+            <div className="text-xs text-gray-600 mt-0.5">
+              recommend 보드와 정반대 — 대형사 TV 광고가 없는 구간에서 소형 위탁 셀러 기회 발굴
+            </div>
+          </div>
+          <span className="text-xs text-gray-500">사분면 보드 →</span>
+        </div>
+      </Link>
+
       {/* TV 편성 push Top 20 */}
       <section className="rounded border border-gray-200 p-4 bg-amber-50/40">
         <div className="flex items-baseline justify-between mb-3">
