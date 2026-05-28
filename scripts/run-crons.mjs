@@ -142,6 +142,22 @@ if (!skipClassify) {
     })
   })
   if (classifyExit !== 0) failCount++
+
+  // extract-review-aspects: 경쟁 SKU 리뷰 → aspect×sentiment 분해 (Weak-Axis 보드).
+  console.log(`[${new Date().toISOString()}] launching extract-review-aspects (claude CLI)`)
+  const aspectsPath = resolvePath(__dirname, 'extract-review-aspects.mjs')
+  const aspectsExit = await new Promise((resolve) => {
+    const child = spawn(process.execPath, [aspectsPath], {
+      stdio: 'inherit',
+      env: process.env,
+    })
+    child.on('exit', (code) => resolve(code ?? 0))
+    child.on('error', (err) => {
+      console.error(`  extract-review-aspects spawn error: ${err.message}`)
+      resolve(1)
+    })
+  })
+  if (aspectsExit !== 0) failCount++
 }
 
 process.exit(failCount > 0 ? 1 : 0)

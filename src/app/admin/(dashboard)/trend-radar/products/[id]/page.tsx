@@ -36,6 +36,39 @@ interface ScoreRow {
   computed_at: string
 }
 
+// DB aspect 키 → 한국어 라벨 (weak-axis 보드와 일치)
+const ASPECT_LABELS: Record<string, string> = {
+  delivery: '배송',
+  packaging: '포장',
+  quality: '품질',
+  taste: '맛·향',
+  size_fit: '사이즈·핏',
+  design: '디자인',
+  price: '가격',
+  usability: '사용감',
+}
+
+interface WeakAxisRow {
+  aspect: string
+  neg_ratio: number
+  neg_count: number
+  total_count: number
+}
+
+// 이 카테고리의 약점 축 — 발행 시 카피·이미지에서 선제 방어할 포인트.
+async function fetchWeakAxes(categoryTop: string): Promise<WeakAxisRow[]> {
+  const sb = createAdminClient()
+  // v_category_aspect_weakness 는 생성된 Supabase 타입에 아직 없음 → as any (마이그레이션 후 제거)
+  const { data } = await (sb as any)
+    .from('v_category_aspect_weakness')
+    .select('aspect, neg_ratio, neg_count, total_count')
+    .eq('category_top', categoryTop)
+    .gte('total_count', 5)
+    .order('neg_ratio', { ascending: false })
+    .limit(3)
+  return ((data ?? []) as WeakAxisRow[]).filter((w) => w.neg_ratio >= 0.2)
+}
+
 async function fetchProduct(id: string) {
   const sb = createAdminClient()
   const [prodRes, aliasRes, scoreRes] = await Promise.all([
@@ -72,6 +105,7 @@ export default async function ProductDetailPage({
   if (!data) notFound()
   const { product, aliases, scoreHistory } = data
   const latest = scoreHistory[0]
+  const weakAxes = await fetchWeakAxes(product.category_top)
 
   return (
     <div className="space-y-6 p-6">
@@ -107,6 +141,30 @@ export default async function ProductDetailPage({
           )}
         </div>
       </header>
+
+      {/* 이 카테고리의 weak axis — 발행 시 선제 방어 전략 핀에 주입 */}
+      {weakAxes.length > 0 && (
+        <section className="rounded border border-red-200 bg-red-50/40 p-4">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="text-xs font-semibold text-red-700">⚠ 이 카테고리의 weak axis</span>
+            {weakAxes.map((w) => (
+              <span
+                key={w.aspect}
+                className="text-xs px-2 py-0.5 rounded bg-red-100 text-red-800 font-medium"
+                title={`부정 ${w.neg_count}/${w.total_count} 발화`}
+              >
+                {ASPECT_LABELS[w.aspect] ?? w.aspect}(부정 {Math.round(w.neg_ratio * 100)}%)
+              </span>
+            ))}
+          </div>
+          <p className="text-[11px] text-gray-500 mt-2">
+            경쟁 SKU 공통 약점. 발행 시 카피·상세·이미지에서 이 축을 선제 방어하면 차별화 →{' '}
+            <Link href="/admin/trend-radar/weak-axis" className="underline hover:text-black">
+              Weak-Axis 보드
+            </Link>
+          </p>
+        </section>
+      )}
 
       {/* 4점수 카드 */}
       {latest && (
