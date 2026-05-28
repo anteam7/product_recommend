@@ -13,6 +13,7 @@ const NAV = [
   { href: '/admin/trend-radar/opportunity', label: 'Opportunity' },
   { href: '/admin/trend-radar/synonyms', label: '의미군' },
   { href: '/admin/trend-radar/pins', label: '핀' },
+  { href: '/admin/trend-radar/import-stats', label: '관세청 수입' },
   { href: '/admin/trend-radar/sources', label: '소스 헬스' },
 ]
 
