@@ -64,6 +64,47 @@ async function fetchRecommend(opts: {
   return { rows, error: null as string | null }
 }
 
+async function fetchOpennessByCate(): Promise<Record<string, { openness: number; verdict: string }>> {
+  const sb = createAdminClient()
+  // 마이그레이션 미적용 환경 보호: 에러 무시
+  try {
+    const { data, error } = await (sb as any)
+      .from('jimscanner_category_openness')
+      .select('scope_kind, scope_value, openness_index, verdict, computed_for')
+      .eq('scope_kind', 'category')
+      .order('computed_for', { ascending: false })
+      .limit(200)
+    if (error) return {}
+    const out: Record<string, { openness: number; verdict: string }> = {}
+    for (const r of (data ?? []) as any[]) {
+      if (out[r.scope_value]) continue
+      out[r.scope_value] = { openness: Number(r.openness_index), verdict: r.verdict }
+    }
+    return out
+  } catch {
+    return {}
+  }
+}
+
+function OpennessBadge({ info }: { info: { openness: number; verdict: string } | undefined }) {
+  if (!info) return null
+  if (info.openness < 30) {
+    return (
+      <span className="bg-red-100 text-red-800 px-2 py-0.5 rounded text-xs" title={`Openness ${info.openness.toFixed(0)} — ${info.verdict}`}>
+        🚫 봉쇄경고 ({info.openness.toFixed(0)})
+      </span>
+    )
+  }
+  if (info.openness > 70) {
+    return (
+      <span className="bg-emerald-100 text-emerald-800 px-2 py-0.5 rounded text-xs" title={`Openness ${info.openness.toFixed(0)} — ${info.verdict}`}>
+        🚀 진입추천 ({info.openness.toFixed(0)})
+      </span>
+    )
+  }
+  return null
+}
+
 const CATEGORIES: { code: string; label: string }[] = [
   { code: '001', label: '장건강' },
   { code: '002', label: '눈건강' },
@@ -123,6 +164,7 @@ export default async function RecommendPage({
   }
 
   const { rows, error } = await fetchRecommend({ days: validDays, minSim: validSim, imminentOnly, cate })
+  const opennessByCate = await fetchOpennessByCate()
 
   // KPI
   const total = rows.length
@@ -291,6 +333,7 @@ export default async function RecommendPage({
                         from {r.search_sources.map(sourceLabel).join(', ')}
                       </span>
                     )}
+                    {r.cate_cd && <OpennessBadge info={opennessByCate[r.cate_cd]} />}
                   </div>
                 </div>
 
