@@ -26,6 +26,11 @@ interface RecommendRow {
   search_match_count: number
   search_top_keyword: string
   search_sources: string[]
+
+  ip_grade?: 'safe' | 'caution' | 'block' | 'unknown' | null
+  ip_score?: number | null
+  ip_top_mark?: string | null
+  ip_top_applicant?: string | null
 }
 
 const DAYS_OPTIONS = [
@@ -46,14 +51,17 @@ async function fetchRecommend(opts: {
   minSim: number
   imminentOnly: boolean
   cate: string
+  ipBlockOnly: boolean
 }) {
   const sb = createAdminClient()
-  // RPC는 DB(supabase/ggsan_recommend_rpc.sql)에 존재하나 generated 타입 미반영 — `npm run gen:types` 시 캐스팅 제거
+  // RPC는 DB(supabase/ggsan_recommend_rpc.sql + supabase/kipris_ip_risk.sql)에 존재하나
+  // generated 타입 미반영 — `npm run gen:types` 시 캐스팅 제거
   const { data, error } = await sb.rpc('jimscanner_ggsan_recommend' as never, {
     days_window: opts.days,
     min_sim: opts.minSim,
     min_score: 0.5,
     result_limit: 200,
+    ip_block_only: opts.ipBlockOnly,
   } as never)
   if (error) {
     return { rows: [] as RecommendRow[], error: error.message }
@@ -62,6 +70,13 @@ async function fetchRecommend(opts: {
   if (opts.imminentOnly) rows = rows.filter((r) => r.is_imminent)
   if (opts.cate) rows = rows.filter((r) => r.cate_cd === opts.cate)
   return { rows, error: null as string | null }
+}
+
+function ipBadge(grade: string | null | undefined) {
+  if (grade === 'block') return { label: '🛑 IP block', cls: 'bg-red-100 text-red-800 border-red-200' }
+  if (grade === 'caution') return { label: '⚠️ IP caution', cls: 'bg-amber-100 text-amber-800 border-amber-200' }
+  if (grade === 'safe') return { label: '✓ IP safe', cls: 'bg-emerald-50 text-emerald-700 border-emerald-200' }
+  return null
 }
 
 const CATEGORIES: { code: string; label: string }[] = [
@@ -105,7 +120,7 @@ function sourceLabel(s: string): string {
 export default async function RecommendPage({
   searchParams,
 }: {
-  searchParams: Promise<{ days?: string; sim?: string; imminent?: string; cate?: string }>
+  searchParams: Promise<{ days?: string; sim?: string; imminent?: string; cate?: string; ip_block_only?: string }>
 }) {
   const sp = await searchParams
   const days = parseInt(sp.days ?? '30', 10)
@@ -113,16 +128,24 @@ export default async function RecommendPage({
   const sim = parseFloat(sp.sim ?? '0.2')
   const validSim = SIM_OPTIONS.some((s) => Math.abs(s.v - sim) < 0.001) ? sim : 0.2
   const imminentOnly = sp.imminent === '1'
+  const ipBlockOnly = sp.ip_block_only === '1'
   const cate = sp.cate ?? ''
 
   const current: Record<string, string> = {
     days: String(validDays),
     sim: String(validSim),
     imminent: imminentOnly ? '1' : '',
+    ip_block_only: ipBlockOnly ? '1' : '',
     cate,
   }
 
-  const { rows, error } = await fetchRecommend({ days: validDays, minSim: validSim, imminentOnly, cate })
+  const { rows, error } = await fetchRecommend({
+    days: validDays,
+    minSim: validSim,
+    imminentOnly,
+    cate,
+    ipBlockOnly,
+  })
 
   // KPI
   const total = rows.length
@@ -183,6 +206,13 @@ export default async function RecommendPage({
             className={`px-3 py-1 text-xs rounded ${imminentOnly ? 'bg-red-100 text-red-700 font-semibold' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}
           >
             {imminentOnly ? '✓ ' : ''}임박특가만
+          </Link>
+          <Link
+            href={buildHref(current, { ip_block_only: ipBlockOnly ? null : '1' })}
+            className={`px-3 py-1 text-xs rounded ${ipBlockOnly ? 'bg-red-100 text-red-700 font-semibold' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}
+            title="IP risk_grade=block 인 후보 제외 (KIPRIS 상표 적중)"
+          >
+            🛡 {ipBlockOnly ? '✓ ' : ''}IP block 제외
           </Link>
         </div>
         <div className="flex flex-wrap gap-1 border-t border-gray-100 pt-2">
@@ -291,6 +321,24 @@ export default async function RecommendPage({
                         from {r.search_sources.map(sourceLabel).join(', ')}
                       </span>
                     )}
+                    {(() => {
+                      const b = ipBadge(r.ip_grade ?? null)
+                      if (!b) return null
+                      const tooltip = r.ip_top_mark
+                        ? `${r.ip_top_mark}${r.ip_top_applicant ? ` (${r.ip_top_applicant})` : ''}`
+                        : ''
+                      return (
+                        <span
+                          className={`px-2 py-0.5 rounded border ${b.cls}`}
+                          title={tooltip}
+                        >
+                          {b.label}
+                          {typeof r.ip_score === 'number' && r.ip_score > 0 ? (
+                            <span className="ml-1 font-mono opacity-70">{r.ip_score.toFixed(2)}</span>
+                          ) : null}
+                        </span>
+                      )
+                    })()}
                   </div>
                 </div>
 
