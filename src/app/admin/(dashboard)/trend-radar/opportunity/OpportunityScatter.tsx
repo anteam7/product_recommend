@@ -11,6 +11,25 @@ interface Row {
   size: number
   final: number
   supplier: number
+  genericShare: number | null
+}
+
+// generic_share ≥ 60 → 위탁 충족 가능 (브랜드 지배 아님)
+const GENERIC_GATE = 60
+
+function GenericBadge({ share }: { share: number | null }) {
+  if (share == null) return null
+  const ok = share >= GENERIC_GATE
+  return (
+    <span
+      className={`ml-2 inline-block rounded px-1.5 py-0.5 text-[10px] font-mono align-middle ${
+        ok ? 'bg-emerald-100 text-emerald-700' : 'bg-gray-100 text-gray-500'
+      }`}
+      title={ok ? '일반명 수요 지배 — 위탁 충족 가능' : '브랜드 수요 지배 — 위탁 어려움'}
+    >
+      {ok ? '🏆' : '🚫'} {share}%
+    </span>
+  )
 }
 
 const CATEGORY_COLORS: Record<string, string> = {
@@ -94,7 +113,7 @@ export default function OpportunityScatter({ rows }: { rows: Row[] }) {
         {hover && (
           <div className="absolute top-2 right-2 rounded bg-black/85 text-white text-xs px-3 py-2 max-w-xs">
             <div className="font-semibold">{hover.name}</div>
-            <div>category: {hover.category}</div>
+            <div>category: {hover.category}{hover.genericShare != null ? ` · generic_share ${hover.genericShare}%` : ''}</div>
             <div>final: {hover.final} · trend: {hover.y} · competition: {hover.x} · supplier: {hover.supplier}</div>
           </div>
         )}
@@ -126,6 +145,7 @@ export default function OpportunityScatter({ rows }: { rows: Row[] }) {
               >
                 <span className="font-mono text-gray-500 mr-2">{r.final}</span>
                 {r.name}
+                <GenericBadge share={r.genericShare} />
               </Link>
             ))}
           {rows.filter((r) => r.y >= 60 && r.x >= 60).length === 0 && (

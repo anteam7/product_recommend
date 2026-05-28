@@ -336,6 +336,14 @@ async function main() {
 
   if (allResults.length > 0) await applyResults(allResults)
 
+  // generic-share 보드용: classify 된 product.brand 를 매핑 키워드로 전파 (brand 비면 generic 유지)
+  try {
+    const { data: tagged } = await sb.rpc('jimscanner_trends_backfill_keyword_brand')
+    if (typeof tagged === 'number' && tagged > 0) console.log(`  keyword brand 전파: ${tagged} rows`)
+  } catch (e) {
+    console.error(`  (keyword brand 전파 실패: ${e instanceof Error ? e.message : e})`)
+  }
+
   if (reqCount > 0) {
     await bumpCounter(counter.day, {
       req: reqCount,

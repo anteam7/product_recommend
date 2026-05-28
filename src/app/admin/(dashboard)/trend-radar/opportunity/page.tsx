@@ -41,18 +41,27 @@ async function fetchData() {
     .in('id', ids)
   const byId = new Map((prods ?? []).map((p: any) => [p.id, p]))
 
+  // category_top 별 generic_share (위탁 충족 가능성) — RPC, 마이그레이션 후 생성 → as any.
+  const shareByCat = new Map<string, number>()
+  const { data: shares } = await (sb as any).rpc('jimscanner_trends_generic_share', { days_window: 30 })
+  if (Array.isArray(shares)) {
+    for (const r of shares as any[]) shareByCat.set(r.category_top ?? '', Number(r.generic_share ?? 0))
+  }
+
   return {
     rows: latest.map((s) => {
       const p = byId.get(s.product_id) ?? {}
+      const cat = (p as any).category_top ?? 'all'
       return {
         id: s.product_id,
         name: (p as any).canonical_name ?? '?',
-        category: (p as any).category_top ?? 'all',
+        category: cat,
         x: s.competition_score,        // 경쟁 약함 → 점수 높음 → 오른쪽
         y: s.trend_score,              // 트렌드 강함 → 위
         size: Math.max(50, s.commerce_score * 4),
         final: s.final_score,
         supplier: s.supplier_score,
+        genericShare: shareByCat.has(cat) ? shareByCat.get(cat)! : null,
       }
     }),
   }
