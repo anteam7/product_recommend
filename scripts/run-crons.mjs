@@ -123,6 +123,27 @@ console.log(
   `[${new Date().toISOString()}] HTTP crons done — ${okCount} ok, ${failCount} fail in ${totalMs}ms`,
 )
 
+// wadiz-tumblbug-fetcher: 펀딩 → 리테일 선점 보드 데이터 수집.
+//   HTTP cron 이 아닌 로컬 fetch 라서 별도 spawn.
+//   --no-crowdfunding 플래그로 생략 가능. filter 모드에선 자동 생략.
+const skipCrowdfunding = args.includes('--no-crowdfunding') || !!filter
+if (!skipCrowdfunding) {
+  console.log(`[${new Date().toISOString()}] launching wadiz-tumblbug-fetcher`)
+  const fetcherPath = resolvePath(__dirname, 'wadiz-tumblbug-fetcher.mjs')
+  const fetcherExit = await new Promise((resolve) => {
+    const child = spawn(process.execPath, [fetcherPath], {
+      stdio: 'inherit',
+      env: process.env,
+    })
+    child.on('exit', (code) => resolve(code ?? 0))
+    child.on('error', (err) => {
+      console.error(`  crowdfunding spawn error: ${err.message}`)
+      resolve(1)
+    })
+  })
+  if (fetcherExit !== 0) failCount++
+}
+
 // classify-trends-llm: 로컬 Claude CLI 단계.
 //   filter 가 걸리면 (특정 cron 만 돌리는 경우) 건너뜀.
 //   --no-classify 플래그도 지원.
