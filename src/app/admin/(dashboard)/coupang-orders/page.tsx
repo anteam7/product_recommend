@@ -1,5 +1,6 @@
 import Link from 'next/link'
 import { createAdminClient } from '@/lib/auth/admin-supabase'
+import { PurchaseStatusCell } from './PurchaseStatusCell'
 
 export const dynamic = 'force-dynamic'
 
@@ -43,6 +44,9 @@ interface OrderRow {
   paid_amount: number | null
   ordered_at: string
   last_synced_at: string | null
+  // 조인: 매입처(ggsan) 바로가기용
+  ggsan_goods_no?: string | null
+  ggsan_url?: string | null
 }
 
 const PURCHASE_STATUS_LABELS: Record<PurchaseStatus, { label: string; cls: string }> = {
@@ -95,7 +99,28 @@ async function fetchData(opts: {
   const offset = (opts.page - 1) * PAGE_SIZE
   query = query.range(offset, offset + PAGE_SIZE - 1)
   const { data, count } = await query
-  return { rows: (data ?? []) as unknown as OrderRow[], total: count ?? 0 }
+  const rows = (data ?? []) as unknown as OrderRow[]
+
+  // 매입처(ggsan) 바로가기: listing에서 goods_no / detail_url 조인
+  const spids = [...new Set(rows.map((r) => r.seller_product_id).filter(Boolean))] as number[]
+  if (spids.length > 0) {
+    const { data: listings } = await sb
+      .from('jimscanner_coupang_listings')
+      .select('seller_product_id, source_goods_no, source_detail_url')
+      .in('seller_product_id', spids)
+    const lmap = new Map<number, { source_goods_no: string | null; source_detail_url: string | null }>(
+      ((listings ?? []) as unknown as Array<{ seller_product_id: number; source_goods_no: string | null; source_detail_url: string | null }>)
+        .map((l) => [l.seller_product_id, l]),
+    )
+    for (const r of rows) {
+      const l = r.seller_product_id ? lmap.get(r.seller_product_id) : undefined
+      const goodsNo = l?.source_goods_no ?? null
+      r.ggsan_goods_no = goodsNo
+      r.ggsan_url = l?.source_detail_url
+        ?? (goodsNo ? `https://www.ggsan.com/goods/goods_view.php?goodsNo=${goodsNo}` : null)
+    }
+  }
+  return { rows, total: count ?? 0 }
 }
 
 async function fetchMeta() {
@@ -242,15 +267,25 @@ export default async function CoupangOrdersPage({
               </tr>
             )}
             {rows.map((r) => {
-              const ps = PURCHASE_STATUS_LABELS[r.purchase_status]
               const ss = SHIPPING_STATUS_LABELS[r.shipping_status]
               return (
                 <tr key={r.id} className="border-t hover:bg-amber-50/30">
                   <td className="px-3 py-2">
                     <div className="font-medium text-gray-900 line-clamp-2">{r.product_name}</div>
                     {r.option_name && <div className="text-[11px] text-gray-500 mt-0.5">{r.option_name}</div>}
-                    <div className="text-[10px] text-gray-400 mt-0.5">
-                      order#{r.order_id} · item#{r.order_item_id}
+                    <div className="text-[10px] text-gray-400 mt-0.5 flex items-center gap-2 flex-wrap">
+                      <span>order#{r.order_id} · item#{r.order_item_id}</span>
+                      {r.ggsan_url && (
+                        <a
+                          href={r.ggsan_url}
+                          target="_blank"
+                          rel="noreferrer noopener"
+                          className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded bg-amber-100 text-amber-700 font-semibold hover:bg-amber-200"
+                          title="건강산(ggsan) 상세페이지에서 매입"
+                        >
+                          🛒 건강산 매입{r.ggsan_goods_no ? ` ${r.ggsan_goods_no}` : ''} →
+                        </a>
+                      )}
                     </div>
                   </td>
                   <td className="px-3 py-2 text-center tabular-nums">{r.shipping_count}</td>
@@ -262,10 +297,13 @@ export default async function CoupangOrdersPage({
                     )}
                   </td>
                   <td className="px-3 py-2 text-center">
-                    <span className={`inline-block px-2 py-0.5 rounded text-xs ${ps.cls}`}>{ps.label}</span>
-                    {r.purchase_ordered_at && (
-                      <div className="text-[10px] text-gray-400 mt-0.5">{fmtDate(r.purchase_ordered_at)}</div>
-                    )}
+                    <PurchaseStatusCell
+                      id={r.id}
+                      status={r.purchase_status}
+                      unitCost={r.purchase_unit_cost}
+                      shippingCount={r.shipping_count}
+                      orderedAt={r.purchase_ordered_at}
+                    />
                   </td>
                   <td className="px-3 py-2 text-center">
                     <span className={`inline-block px-2 py-0.5 rounded text-xs ${ss.cls}`}>{ss.label}</span>

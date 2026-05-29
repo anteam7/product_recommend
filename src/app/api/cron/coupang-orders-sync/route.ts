@@ -39,9 +39,9 @@ async function coupangApi(method: string, urlPath: string, query = '') {
   try { return { status: res.status, body: JSON.parse(text) } } catch { return { status: res.status, body: text as unknown } }
 }
 
-function fmtKstDateTime(d: Date) {
+function fmtKstYmd(d: Date) {
   const kst = new Date(d.getTime() + 9 * 3600 * 1000)
-  return kst.toISOString().replace('T', ' ').slice(0, 19)
+  return kst.toISOString().slice(0, 10) // yyyy-MM-dd (쿠팡 ordersheet API 필수 포맷)
 }
 
 export async function GET(req: NextRequest) {
@@ -60,11 +60,11 @@ export async function GET(req: NextRequest) {
   const errorSamples: string[] = []
 
   try {
-    // 최근 24시간 ACCEPT(주문확인) 상태 주문 가져옴
+    // 최근 7일 주문 (놓친 실행 대비 — upsert라 중복 무해). 쿠팡은 yyyy-MM-dd 포맷만 허용(14자리 보내면 HTTP 400).
     const now = new Date()
-    const yesterday = new Date(now.getTime() - 24 * 3600 * 1000)
-    const created_at_from = fmtKstDateTime(yesterday).replace(/[- :]/g, '').slice(0, 14)
-    const created_at_to = fmtKstDateTime(now).replace(/[- :]/g, '').slice(0, 14)
+    const from = new Date(now.getTime() - 7 * 24 * 3600 * 1000)
+    const created_at_from = fmtKstYmd(from)
+    const created_at_to = fmtKstYmd(now)
     // 쿠팡 ordersheet API
     // path: /v2/providers/openapi/apis/api/v4/vendors/{vendorId}/ordersheets
     const path = `/v2/providers/openapi/apis/api/v4/vendors/${vendorId}/ordersheets`
@@ -99,7 +99,8 @@ export async function GET(req: NextRequest) {
       try {
         const items = (order.orderItems as Array<Record<string, unknown>>) ?? []
         for (const it of items) {
-          const orderItemId = it.vendorItemPackageId ?? it.shipmentBoxId ?? it.cartId
+          // vendorItemPackageId는 비-패키지 상품에서 0(falsy)이라 ??로 못 거름 → ||로 주문 단위 shipmentBoxId 사용
+          const orderItemId = (it.vendorItemPackageId as number) || (order.shipmentBoxId as number)
           if (!orderItemId) continue
           const row = {
             order_id: order.orderId as number,
