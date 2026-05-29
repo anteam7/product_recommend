@@ -24,7 +24,7 @@ export default async function TrendsPage() {
 
   const since = new Date(Date.now() - 14 * 86400_000).toISOString()
 
-  const [kwRes, pinRes, runRes] = await Promise.all([
+  const [kwRes, pinRes, runRes, calRes] = await Promise.all([
     supabase
       .from('jimscanner_trends_keywords')
       .select('keyword, source, category, category_top, volume_relative, collected_at')
@@ -39,9 +39,27 @@ export default async function TrendsPage() {
       .select('source, status, fetched_count, inserted_count, duration_ms, error_message, started_at, triggered_by')
       .order('started_at', { ascending: false })
       .limit(20),
+    // 검색광고 월간검색수 앵커로 재스케일된 추정 절대 월간검색수
+    // (RPC 는 마이그레이션 trends_searchad_volume.sql 후 존재 — 생성 타입엔 없어 any 캐스팅)
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (supabase as any).rpc('jimscanner_trends_calibrated_keywords'),
   ])
 
   const allKw = (kwRes.data ?? []) as KeywordRow[]
+  // (keyword, source) → 추정 절대 월간검색수 / 그룹 앵커
+  type CalRow = {
+    keyword: string
+    source: string
+    anchor_monthly_total: number | null
+    estimated_monthly_volume: number | null
+  }
+  const calMap = new Map<string, { estimated: number | null; anchor: number | null }>()
+  for (const c of ((calRes?.data ?? []) as CalRow[])) {
+    calMap.set(`${c.keyword}|${c.source}`, {
+      estimated: c.estimated_monthly_volume,
+      anchor: c.anchor_monthly_total,
+    })
+  }
   const pins = (pinRes.data ?? []) as PinRow[]
   const pinSet = new Set(pins.map((p) => `${p.keyword}|${p.source}`))
   const pinNotes = new Map(pins.map((p) => [`${p.keyword}|${p.source}`, p.notes ?? '']))
@@ -64,12 +82,15 @@ export default async function TrendsPage() {
     const avgLast = sparkline.length > 0 ? sparkline.reduce((a, b) => a + b, 0) / sparkline.length : 0
     const avgPrev = prev7.length > 0 ? prev7.reduce((a, b) => a + b, 0) / prev7.length : 0
     const velocity = avgPrev > 0 ? (avgLast - avgPrev) / avgPrev : null
+    const cal = calMap.get(k)
     items.push({
       keyword: latest.keyword,
       source: latest.source,
       category: latest.category,
       categoryTop: latest.category_top,
       volume: latest.volume_relative,
+      estimatedMonthlyVolume: cal?.estimated ?? null,
+      anchorMonthlyTotal: cal?.anchor ?? null,
       lastAt: latest.collected_at,
       sparkline,
       velocity,
@@ -80,6 +101,10 @@ export default async function TrendsPage() {
   }
   items.sort((a, b) => {
     if (a.pinned !== b.pinned) return a.pinned ? -1 : 1
+    // 앵커가 있으면 추정 절대 월간검색수(진짜 시장크기) 순, 없으면 상대 ratio 순
+    const av = a.estimatedMonthlyVolume ?? -1
+    const bv = b.estimatedMonthlyVolume ?? -1
+    if (av >= 0 || bv >= 0) return bv - av
     return (b.volume ?? 0) - (a.volume ?? 0)
   })
 
@@ -102,7 +127,8 @@ export default async function TrendsPage() {
           Naver DataLab 검색어 트렌드 + 쇼핑 카테고리 인기도. 글감 후보를 핀해두면 블로그 초안 워크플로에 연결.
         </p>
         <p className="mt-1 text-xs text-gray-400">
-          매일 자동 수집 (검색어 KST 06시 / 쇼핑 KST 06:10). 절대 검색량이 아닌 0~100 상대 ratio.
+          매일 자동 수집 (검색어 KST 06시 / 쇼핑 KST 06:10). ratio 는 그룹 내부 0~100 상대값이며,
+          검색광고 월간검색수 앵커로 재스케일한 <b>추정 월검색수</b>가 그룹간 비교 가능한 실수요 축입니다.
         </p>
       </header>
       <TrendsPanel items={items} runs={runs} />

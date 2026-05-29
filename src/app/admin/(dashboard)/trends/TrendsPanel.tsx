@@ -8,6 +8,8 @@ export type TrendItem = {
   category: string | null
   categoryTop: string | null
   volume: number | null
+  estimatedMonthlyVolume: number | null
+  anchorMonthlyTotal: number | null
   lastAt: string
   sparkline: number[]
   velocity: number | null
@@ -30,6 +32,13 @@ export type RunRow = {
 const SOURCE_LABELS: Record<string, string> = {
   naver_search_trend: '네이버 검색어',
   naver_shopping_insight: '네이버 쇼핑',
+}
+
+function formatVolume(n: number | null): string {
+  if (n === null || n === undefined) return '—'
+  if (n >= 10_000) return `${(n / 10_000).toFixed(1)}만`
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}천`
+  return String(n)
 }
 
 function formatTime(iso: string): string {
@@ -227,6 +236,7 @@ export default function TrendsPanel({ items: initialItems, runs }: { items: Tren
               <th className="text-left px-3 py-2 font-medium">소스</th>
               <th className="text-left px-3 py-2 font-medium">카테고리</th>
               <th className="text-right px-3 py-2 font-medium">최근 ratio</th>
+              <th className="text-right px-3 py-2 font-medium" title="검색광고 월간검색수 앵커 × ratio/100 — 그룹간 비교 가능한 실수요 추정치">추정 월검색수</th>
               <th className="text-right px-3 py-2 font-medium">7일 변동</th>
               <th className="text-left px-3 py-2 font-medium">7일 추이</th>
               <th className="text-left px-3 py-2 font-medium">갱신</th>
@@ -236,7 +246,7 @@ export default function TrendsPanel({ items: initialItems, runs }: { items: Tren
           <tbody className="divide-y">
             {filtered.length === 0 && (
               <tr>
-                <td colSpan={9} className="px-4 py-8 text-center text-sm text-gray-400">
+                <td colSpan={10} className="px-4 py-8 text-center text-sm text-gray-400">
                   표시할 키워드가 없습니다. 상단 "수집" 버튼을 눌러 데이터를 가져오세요.
                 </td>
               </tr>
@@ -257,6 +267,12 @@ export default function TrendsPanel({ items: initialItems, runs }: { items: Tren
                 <td className="px-3 py-2 text-xs text-gray-500">{SOURCE_LABELS[it.source] ?? it.source}</td>
                 <td className="px-3 py-2 text-xs text-gray-600">{it.categoryTop ?? '—'}</td>
                 <td className="px-3 py-2 text-right tabular-nums">{it.volume?.toFixed(1) ?? '—'}</td>
+                <td
+                  className="px-3 py-2 text-right tabular-nums font-medium text-gray-900"
+                  title={it.anchorMonthlyTotal != null ? `그룹 앵커 ${it.anchorMonthlyTotal.toLocaleString()}/월` : '검색광고 앵커 없음 — collect-searchad-volume 수집 필요'}
+                >
+                  {formatVolume(it.estimatedMonthlyVolume)}
+                </td>
                 <td className="px-3 py-2 text-right"><VelocityBadge v={it.velocity} /></td>
                 <td className="px-3 py-2"><Sparkline data={it.sparkline} /></td>
                 <td className="px-3 py-2 text-xs text-gray-500">{formatTime(it.lastAt)}</td>
