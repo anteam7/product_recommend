@@ -31,6 +31,19 @@ interface ScoreRow {
   score_components?: any
 }
 
+async function fetchPrimetimeSummary() {
+  const sb = createAdminClient()
+  // 신규 RPC — 생성된 타입에 아직 없어 캐스팅
+  const { data } = await (sb.rpc as any)('jimscanner_tv_primetime_conviction', {
+    days_window: 14,
+  })
+  type Row = { conviction: number; prime_share: number }
+  const rows = (data ?? []) as Row[]
+  const primeDominant = rows.filter((r) => r.prime_share >= 0.5).length
+  const topConviction = rows.length > 0 ? Math.max(...rows.map((r) => r.conviction)) : 0
+  return { scored: rows.length, primeDominant, topConviction }
+}
+
 async function fetchTvGgsanMatchSummary() {
   const sb = createAdminClient()
   const { data } = await sb.rpc('jimscanner_tv_ggsan_match', {
@@ -132,10 +145,11 @@ export default async function TrendRadarPage({
   const sp = await searchParams
   const category = (CATEGORIES.includes(sp.cat as Category) ? sp.cat : 'all') as Category
 
-  const [{ products, scores, kpis }, tvPushes, tvGgsan] = await Promise.all([
+  const [{ products, scores, kpis }, tvPushes, tvGgsan, primetime] = await Promise.all([
     fetchData(category),
     fetchTvPushes(),
     fetchTvGgsanMatchSummary(),
+    fetchPrimetimeSummary(),
   ])
 
   const sorted = products
@@ -160,13 +174,19 @@ export default async function TrendRadarPage({
         </Link>
       </header>
 
-      {/* KPI 5종 */}
-      <section className="grid grid-cols-2 md:grid-cols-5 gap-4">
+      {/* KPI 6종 */}
+      <section className="grid grid-cols-2 md:grid-cols-6 gap-4">
         <KpiCard label="canonical 상품" value={kpis.products} hint="누적 매핑" />
         <KpiCard label="LLM 분류" value={kpis.llmClassified} hint={`${kpis.products > 0 ? Math.round((kpis.llmClassified / kpis.products) * 100) : 0}% 진척`} />
         <KpiCard label="고득점 (≥50)" value={kpis.top} hint="final_score 기준" />
         <KpiCard label="supplier 매칭" value={kpis.supplier} hint="도매꾹·알리 검출" />
         <KpiCard label="TV push" value={kpis.tv} hint="홈쇼핑 편성 검출" />
+        <KpiCard
+          label="🎯 골든타임 우세"
+          value={primetime.primeDominant}
+          hint={`프라임 share≥50% · 최고확신 ${primetime.topConviction.toFixed(0)}`}
+          href="/admin/trend-radar/tv-primetime"
+        />
       </section>
 
       {/* 카테고리 탭 */}
@@ -307,14 +327,22 @@ export default async function TrendRadarPage({
   )
 }
 
-function KpiCard({ label, value, hint }: { label: string; value: number; hint: string | number }) {
-  return (
-    <div className="rounded border border-gray-200 p-4">
+function KpiCard({ label, value, hint, href }: { label: string; value: number; hint: string | number; href?: string }) {
+  const inner = (
+    <>
       <div className="text-xs text-gray-500">{label}</div>
       <div className="text-3xl font-bold mt-1">{value.toLocaleString()}</div>
       <div className="text-xs text-gray-400 mt-1">{hint}</div>
-    </div>
+    </>
   )
+  if (href) {
+    return (
+      <Link href={href} className="rounded border border-gray-200 p-4 hover:bg-gray-50 transition-colors">
+        {inner}
+      </Link>
+    )
+  }
+  return <div className="rounded border border-gray-200 p-4">{inner}</div>
 }
 
 function EmptyState({ category }: { category: Category }) {
