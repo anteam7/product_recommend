@@ -92,3 +92,38 @@ export function computeMargin(listPrice: number, dome: number, shipping: number 
     marginPct: listPrice ? +((margin / listPrice) * 100).toFixed(2) : 0,
   }
 }
+
+// ─── 반품 버퍼 마진 (위탁 드롭십 손익 기대치) ───
+// 위탁은 마진이 얇아 반품 1건이 정상 판매 수 건의 이익을 상쇄한다.
+// return_risk_score(0~100) → 예상 반품률 → 회수불가 비용(왕복 배송 + 재고 손실)을
+// 건당 기대 손실로 환산해 마진에서 차감, "반품 보정 후 기대 마진"을 구한다.
+//
+// 모델: expectedReturnRate = score/100 * MAX_RETURN_RATE
+//       건당 반품 손실 = 왕복배송(2*SHIP) + 검수/재고폐기 손실(dome 의 RESTOCK_LOSS 비율)
+//       반품버퍼 = expectedReturnRate * 건당손실  (정상판매 1건당 안분)
+export const MAX_RETURN_RATE = 0.25   // score=100 → 반품률 25% 상한 가정 (의류 핏 최악 케이스)
+export const RESTOCK_LOSS = 0.5       // 반품품 1건당 도매원가의 50%는 회수 불가(재판매 불가/감가)로 가정
+
+export function computeMarginWithReturnBuffer(
+  listPrice: number,
+  dome: number,
+  returnRiskScore: number,
+  shipping: number = SHIP,
+) {
+  const base = computeMargin(listPrice, dome, shipping)
+  const score = Math.max(0, Math.min(100, returnRiskScore || 0))
+  const expectedReturnRate = (score / 100) * MAX_RETURN_RATE
+  // 반품 1건당 회수불가 비용 = 왕복 배송 + 도매원가 일부 손실
+  const lossPerReturn = shipping * 2 + Math.round(dome * RESTOCK_LOSS)
+  // 정상 판매 1건에 안분되는 반품 버퍼(기대 손실)
+  const returnBuffer = Math.round(expectedReturnRate * lossPerReturn)
+  const adjustedMargin = base.margin - returnBuffer
+  return {
+    ...base,
+    expectedReturnRate: +(expectedReturnRate * 100).toFixed(1), // %
+    lossPerReturn,
+    returnBuffer,
+    adjustedMargin,
+    adjustedMarginPct: listPrice ? +((adjustedMargin / listPrice) * 100).toFixed(2) : 0,
+  }
+}

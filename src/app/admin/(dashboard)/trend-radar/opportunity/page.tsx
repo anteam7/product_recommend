@@ -41,9 +41,22 @@ async function fetchData() {
     .in('id', ids)
   const byId = new Map((prods ?? []).map((p: any) => [p.id, p]))
 
+  // 반품 리스크 오버레이 (최신 row 만). 새 테이블이라 타입 미생성 → as any.
+  const { data: risks } = await (sb as any)
+    .from('jimscanner_return_risk')
+    .select('product_id, return_risk_score, gate, computed_at')
+    .in('product_id', ids)
+    .order('computed_at', { ascending: false })
+    .limit(5000)
+  const riskById = new Map<string, { return_risk_score: number; gate: string }>()
+  for (const r of (risks ?? []) as { product_id: string; return_risk_score: number; gate: string }[]) {
+    if (!riskById.has(r.product_id)) riskById.set(r.product_id, r)
+  }
+
   return {
     rows: latest.map((s) => {
       const p = byId.get(s.product_id) ?? {}
+      const risk = riskById.get(s.product_id)
       return {
         id: s.product_id,
         name: (p as any).canonical_name ?? '?',
@@ -53,6 +66,8 @@ async function fetchData() {
         size: Math.max(50, s.commerce_score * 4),
         final: s.final_score,
         supplier: s.supplier_score,
+        returnRisk: risk?.return_risk_score ?? null,
+        returnGate: risk?.gate ?? null,
       }
     }),
   }

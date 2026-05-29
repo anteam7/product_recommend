@@ -11,6 +11,15 @@ interface Row {
   size: number
   final: number
   supplier: number
+  returnRisk?: number | null
+  returnGate?: string | null
+}
+
+// 반품 리스크 게이트 → 점 테두리 색 오버레이
+const RISK_STROKE: Record<string, string> = {
+  high: '#dc2626',   // red-600
+  medium: '#f59e0b', // amber-500
+  low: '#10b981',    // emerald-500
 }
 
 const CATEGORY_COLORS: Record<string, string> = {
@@ -71,23 +80,29 @@ export default function OpportunityScatter({ rows }: { rows: Row[] }) {
             🎯 핀 후보 (트렌드↑·경쟁↓)
           </text>
 
-          {/* 점들 */}
-          {rows.map((r) => (
-            <a key={r.id} href={`/admin/trend-radar/products/${r.id}`}>
-              <circle
-                cx={xScale(r.x)}
-                cy={yScale(r.y)}
-                r={rScale(r.size)}
-                fill={CATEGORY_COLORS[r.category] ?? '#6b7280'}
-                fillOpacity={0.55}
-                stroke={CATEGORY_COLORS[r.category] ?? '#6b7280'}
-                strokeOpacity={0.9}
-                onMouseEnter={() => setHover(r)}
-                onMouseLeave={() => setHover(null)}
-                style={{ cursor: 'pointer' }}
-              />
-            </a>
-          ))}
+          {/* 점들 — 채움 = 카테고리색, 테두리 = 반품 리스크 게이트(점선) */}
+          {rows.map((r) => {
+            const riskStroke = r.returnGate ? RISK_STROKE[r.returnGate] : null
+            const catColor = CATEGORY_COLORS[r.category] ?? '#6b7280'
+            return (
+              <a key={r.id} href={`/admin/trend-radar/products/${r.id}`}>
+                <circle
+                  cx={xScale(r.x)}
+                  cy={yScale(r.y)}
+                  r={rScale(r.size)}
+                  fill={catColor}
+                  fillOpacity={0.55}
+                  stroke={riskStroke ?? catColor}
+                  strokeWidth={riskStroke ? 2.5 : 1}
+                  strokeDasharray={riskStroke ? '3,2' : ''}
+                  strokeOpacity={0.95}
+                  onMouseEnter={() => setHover(r)}
+                  onMouseLeave={() => setHover(null)}
+                  style={{ cursor: 'pointer' }}
+                />
+              </a>
+            )
+          })}
         </svg>
 
         {/* hover tooltip */}
@@ -96,6 +111,11 @@ export default function OpportunityScatter({ rows }: { rows: Row[] }) {
             <div className="font-semibold">{hover.name}</div>
             <div>category: {hover.category}</div>
             <div>final: {hover.final} · trend: {hover.y} · competition: {hover.x} · supplier: {hover.supplier}</div>
+            {hover.returnRisk != null && (
+              <div className="mt-1 border-t border-white/20 pt-1">
+                반품 리스크: <span className="font-semibold">{hover.returnRisk}</span> ({hover.returnGate})
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -106,6 +126,20 @@ export default function OpportunityScatter({ rows }: { rows: Row[] }) {
           <span key={cat} className="flex items-center gap-1">
             <span className="inline-block w-3 h-3 rounded-full" style={{ background: color, opacity: 0.6 }} />
             {cat}
+          </span>
+        ))}
+      </div>
+
+      {/* 반품 리스크 테두리 범례 */}
+      <div className="mt-2 flex flex-wrap items-center gap-3 text-xs text-gray-500">
+        <span>테두리(점선) = 반품 리스크:</span>
+        {Object.entries(RISK_STROKE).map(([gate, color]) => (
+          <span key={gate} className="flex items-center gap-1">
+            <span
+              className="inline-block w-3 h-3 rounded-full border-2 border-dashed"
+              style={{ borderColor: color }}
+            />
+            {gate}
           </span>
         ))}
       </div>
