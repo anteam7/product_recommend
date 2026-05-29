@@ -4,7 +4,7 @@ import { useState } from 'react'
 import { useRouter } from 'next/navigation'
 
 // 마진 공식 — src/lib/coupang/price.ts 와 동일하게 유지 (client는 node:crypto 의존 때문에 import 불가)
-const FEE_RATE = 0.13   // 쿠팡 카테고리 수수료 + 결제 수수료 근사
+const FEE_RATE = 0.106  // 쿠팡 판매수수료 — 기타 영양제(73137) 10.6% (결제비 포함). price.ts FEE_RATE와 동일 유지
 const VAT_DIVISOR = 11  // 부가세 = 판매가 / 11
 
 interface Props {

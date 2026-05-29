@@ -77,7 +77,7 @@ export async function changeProductPrice(sellerProductId: number, price: number)
 // FEE_RATE는 register/reprice/match 스크립트와 반드시 동일해야 함 (현재 0.13 = 카테고리 수수료 + 결제 수수료 근사).
 // 스크립트는 .mjs라 이 상수를 import할 수 없으므로, 값 변경 시 scripts/coupang-{register-*,reprice-ship3000,match-manual}.mjs도 같이 맞출 것.
 export const SHIP = 3000          // 위탁 dropship: 고객 출고 배송 1회분
-export const FEE_RATE = 0.13      // 쿠팡 카테고리 수수료 + 결제 수수료 근사
+export const FEE_RATE = 0.106     // 쿠팡 판매수수료 — 기타 영양제(73137) 카테고리 10.6% (결제비 포함). 카테고리 다르면 조정
 export const VAT_DIVISOR = 11     // 부가세 = 판매가 / 11
 
 export function computeMargin(listPrice: number, dome: number, shipping: number = SHIP) {
