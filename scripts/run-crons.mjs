@@ -43,6 +43,9 @@ const CRONS = [
   '/api/cron/collect-kca-press',
   '/api/cron/collect-gsc-daily',
   '/api/cron/collect-naver-tvtime',
+  // 등록 준비도 게이트: 메타 캐시 갱신 → readiness 산출 (순서 중요)
+  '/api/cron/refresh-coupang-category-meta',
+  '/api/cron/compute-listing-readiness',
 ]
 
 const SECRET = process.env.CRON_SECRET
