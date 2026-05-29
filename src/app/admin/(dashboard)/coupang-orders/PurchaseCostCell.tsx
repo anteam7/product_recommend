@@ -10,7 +10,8 @@ const VAT_DIVISOR = 11  // 부가세 = 판매가 / 11
 interface Props {
   id: string
   unitCost: number | null
-  shippingCost: number | null
+  /** 매입 합계(= 상품가×수량 + 운송비). 운송비는 별도 컬럼 없이 여기서 파생 */
+  totalCost: number | null
   shippingCount: number | null
   /** 이 주문 라인의 실제 매출(고객 결제액) — 실수익 계산용 */
   orderPrice: number | null
@@ -18,13 +19,16 @@ interface Props {
 
 /**
  * 매입 원가 인라인 입력(상품가+운송비) + 실수익 실시간 계산.
+ * 운송비는 DB 별도 컬럼 없이 purchase_total_cost 에 녹여 저장(운송비 = 합계 − 상품가×수량).
  * 실수익 = 주문금액 − 매입원가(상품가×수량+운송비) − 쿠팡수수료 − 부가세
  */
-export function PurchaseCostCell({ id, unitCost, shippingCost, shippingCount, orderPrice }: Props) {
+export function PurchaseCostCell({ id, unitCost, totalCost, shippingCount, orderPrice }: Props) {
   const router = useRouter()
   const qty = shippingCount ?? 1
+  // 운송비 초기값 = 합계 − 상품가×수량 (파생)
+  const initShip = totalCost == null ? '' : String(Math.max(0, totalCost - (unitCost ?? 0) * qty))
   const [unit, setUnit] = useState(unitCost == null ? '' : String(unitCost))
-  const [ship, setShip] = useState(shippingCost == null ? '' : String(shippingCost))
+  const [ship, setShip] = useState(initShip)
   const [saving, setSaving] = useState(false)
   const [err, setErr] = useState<string | null>(null)
 
@@ -37,18 +41,21 @@ export function PurchaseCostCell({ id, unitCost, shippingCost, shippingCount, or
   const vat = Math.round(revenue / VAT_DIVISOR)
   const net = revenue - cost - fee - vat
   const netPct = revenue > 0 ? (net / revenue) * 100 : 0
-  const hasCost = unitNum > 0 // 매입가 입력됨
+  const hasCost = unitNum > 0
 
-  async function save(field: 'purchase_unit_cost' | 'purchase_shipping_cost', raw: string, prev: number | null) {
-    const num = raw === '' ? 0 : Math.round(Number(raw))
-    if (!Number.isFinite(num) || num < 0) { setErr('숫자 오류'); return }
-    if (num === (prev ?? 0)) return // 변경 없음 → 저장 생략
+  // 상품가 또는 운송비 변경 시 → 상품가 + 합계(=상품가×수량+운송비) 함께 저장
+  async function save() {
+    if (!Number.isFinite(unitNum) || unitNum < 0 || !Number.isFinite(shipNum) || shipNum < 0) { setErr('숫자 오류'); return }
+    const newUnit = unitNum
+    const newTotal = unitNum * qty + shipNum
+    // 변경 없음 → 생략
+    if (newUnit === (unitCost ?? 0) && newTotal === (totalCost ?? 0)) return
     setSaving(true); setErr(null)
     try {
       const res = await fetch('/api/admin/coupang-orders/update', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id, [field]: num }),
+        body: JSON.stringify({ id, purchase_unit_cost: newUnit, purchase_total_cost: newTotal }),
       })
       const j = await res.json()
       setSaving(false)
@@ -65,7 +72,7 @@ export function PurchaseCostCell({ id, unitCost, shippingCost, shippingCount, or
           type="number" step={100} inputMode="numeric"
           value={unit} disabled={saving} placeholder="0"
           onChange={(e) => setUnit(e.target.value)}
-          onBlur={() => save('purchase_unit_cost', unit, unitCost)}
+          onBlur={save}
           onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur() }}
           className="w-20 px-1 py-0.5 text-right border border-gray-300 rounded tabular-nums focus:border-blue-400"
         />
@@ -76,7 +83,7 @@ export function PurchaseCostCell({ id, unitCost, shippingCost, shippingCount, or
           type="number" step={100} inputMode="numeric"
           value={ship} disabled={saving} placeholder="0"
           onChange={(e) => setShip(e.target.value)}
-          onBlur={() => save('purchase_shipping_cost', ship, shippingCost)}
+          onBlur={save}
           onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur() }}
           className="w-20 px-1 py-0.5 text-right border border-gray-300 rounded tabular-nums focus:border-blue-400"
         />

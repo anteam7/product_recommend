@@ -33,7 +33,6 @@ interface OrderRow {
   purchase_ordered_at: string | null
   purchase_received_at: string | null
   purchase_unit_cost: number | null
-  purchase_shipping_cost: number | null
   purchase_total_cost: number | null
   purchase_note: string | null
   shipping_status: ShippingStatus
@@ -297,7 +296,7 @@ export default async function CoupangOrdersPage({
                     <PurchaseCostCell
                       id={r.id}
                       unitCost={r.purchase_unit_cost}
-                      shippingCost={r.purchase_shipping_cost}
+                      totalCost={r.purchase_total_cost}
                       shippingCount={r.shipping_count}
                       orderPrice={r.order_price}
                     />
