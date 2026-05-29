@@ -1,8 +1,11 @@
 import Link from 'next/link'
 import { notFound } from 'next/navigation'
 import { createAdminClient } from '@/lib/auth/admin-supabase'
+import StageWidget from './StageWidget'
 
 export const dynamic = 'force-dynamic'
+
+type StageKey = 'discovered' | 'reviewing' | 'sourcing' | 'listed' | 'selling' | 'dropped'
 
 interface ProductRow {
   id: string
@@ -55,10 +58,19 @@ async function fetchProduct(id: string) {
 
   if (prodRes.error || !prodRes.data) return null
 
+  // 파이프라인 현재 단계 (테이블 미적용/미진입 시 null)
+  const pipeRes = await sb
+    .from('jimscanner_trends_pipeline' as never)
+    .select('stage, dropped_reason')
+    .eq('product_id', id)
+    .maybeSingle()
+  const pipe = (pipeRes.data ?? null) as { stage: StageKey; dropped_reason: string | null } | null
+
   return {
     product: prodRes.data as ProductRow,
     aliases: (aliasRes.data ?? []) as AliasRow[],
     scoreHistory: (scoreRes.data ?? []) as ScoreRow[],
+    pipeline: pipe,
   }
 }
 
@@ -70,7 +82,7 @@ export default async function ProductDetailPage({
   const { id } = await params
   const data = await fetchProduct(id)
   if (!data) notFound()
-  const { product, aliases, scoreHistory } = data
+  const { product, aliases, scoreHistory, pipeline } = data
   const latest = scoreHistory[0]
 
   return (
@@ -107,6 +119,13 @@ export default async function ProductDetailPage({
           )}
         </div>
       </header>
+
+      {/* 파이프라인 단계 위젯 */}
+      <StageWidget
+        productId={product.id}
+        initialStage={pipeline?.stage ?? null}
+        initialReason={pipeline?.dropped_reason ?? null}
+      />
 
       {/* 4점수 카드 */}
       {latest && (
