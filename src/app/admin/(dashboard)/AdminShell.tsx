@@ -69,6 +69,12 @@ const NAV_GROUPS: NavGroup[] = [
         match: (p) => p.startsWith('/admin/trend-radar/opportunity'),
       },
       {
+        href: '/admin/trend-radar/freshness',
+        label: '신선도 보정',
+        icon: '🧊',
+        match: (p) => p.startsWith('/admin/trend-radar/freshness'),
+      },
+      {
         href: '/admin/trend-radar/tv-pushes',
         label: 'TV 편성표',
         icon: '📡',
