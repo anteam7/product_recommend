@@ -1,7 +1,20 @@
 import Link from 'next/link'
 import { createAdminClient } from '@/lib/auth/admin-supabase'
+import SourceAlphaBoard, { type SourceAlphaRow } from './SourceAlphaBoard'
 
 export const dynamic = 'force-dynamic'
+
+const THRESHOLD_OPTIONS = [60, 70, 80] as const
+
+async function fetchAlpha(threshold: number): Promise<SourceAlphaRow[]> {
+  const sb = createAdminClient()
+  // RPC는 DB(supabase/trends_v4_source_backtest.sql)에 존재하나 generated 타입 미반영 — `npm run gen:types` 시 캐스팅 제거
+  const { data, error } = await sb.rpc('jimscanner_trends_source_backtest' as never, {
+    score_threshold: threshold,
+  } as never)
+  if (error) return []
+  return (data ?? []) as SourceAlphaRow[]
+}
 
 interface RunRow {
   source: string
@@ -113,8 +126,19 @@ function formatAge(min: number): string {
   return `${Math.floor(h / 24)}d 전`
 }
 
-export default async function SourcesPage() {
-  const { latestBySource, marketAgg, recentRuns } = await fetchData()
+export default async function SourcesPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ threshold?: string }>
+}) {
+  const sp = await searchParams
+  const threshold = THRESHOLD_OPTIONS.includes(Number(sp?.threshold) as never)
+    ? Number(sp!.threshold)
+    : 70
+  const [{ latestBySource, marketAgg, recentRuns }, alphaRows] = await Promise.all([
+    fetchData(),
+    fetchAlpha(threshold),
+  ])
 
   return (
     <div className="space-y-6 p-6">
@@ -129,6 +153,34 @@ export default async function SourcesPage() {
           ← 대시보드
         </Link>
       </header>
+
+      {/* 수집원 알파 백테스트 — 소스별 위너 적중률·선행일수 랭킹 */}
+      <section>
+        <div className="flex items-baseline justify-between mb-2">
+          <div>
+            <h2 className="text-sm font-semibold text-gray-700">
+              🎯 수집원 알파 백테스트 — 어느 수집원이 위너를 먼저·정확히 잡는가
+            </h2>
+            <p className="text-xs text-gray-500 mt-0.5">
+              alias 최초 등장 시점 vs final_score 임계 돌파 시점을 역추적해 소스를 &apos;예측 도구&apos;로 평가.
+              상단 ⭐ = 수집 빈도 증액 1순위.
+            </p>
+          </div>
+          <div className="text-xs text-gray-500">
+            임계:{' '}
+            {THRESHOLD_OPTIONS.map((t) => (
+              <Link
+                key={t}
+                href={`/admin/trend-radar/sources?threshold=${t}`}
+                className={`px-1 ${t === threshold ? 'font-bold text-black underline' : 'text-gray-400 hover:text-gray-700'}`}
+              >
+                {t}
+              </Link>
+            ))}
+          </div>
+        </div>
+        <SourceAlphaBoard rows={alphaRows} threshold={threshold} />
+      </section>
 
       {/* trends_runs 기반 collector 그룹 */}
       {TRENDS_RUNS_GROUPS.map((group) => (
