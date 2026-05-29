@@ -2,6 +2,7 @@ import Link from 'next/link'
 import { createAdminClient } from '@/lib/auth/admin-supabase'
 import { PurchaseStatusCell } from './PurchaseStatusCell'
 import { PurchaseCostCell } from './PurchaseCostCell'
+import { InvoiceCell } from './InvoiceCell'
 
 export const dynamic = 'force-dynamic'
 
@@ -312,14 +313,12 @@ export default async function CoupangOrdersPage({
                     <span className={`inline-block px-2 py-0.5 rounded text-xs ${ss.cls}`}>{ss.label}</span>
                   </td>
                   <td className="px-3 py-2 text-xs">
-                    {r.invoice_number ? (
-                      <div>
-                        <div>{r.invoice_number}</div>
-                        <div className="text-[10px] text-gray-400">{r.delivery_company}</div>
-                      </div>
-                    ) : (
-                      <span className="text-gray-300">—</span>
-                    )}
+                    <InvoiceCell
+                      id={r.id}
+                      invoiceNumber={r.invoice_number}
+                      deliveryCompany={r.delivery_company}
+                      shippedAt={r.shipped_at}
+                    />
                   </td>
                   <td className="px-3 py-2 text-center text-xs text-gray-500">{fmtDate(r.ordered_at)}</td>
                 </tr>
@@ -346,8 +345,9 @@ export default async function CoupangOrdersPage({
         </div>
       )}
 
-      <div className="text-xs text-gray-400 border-t pt-3">
-        ℹ️ 쿠팡 Open API의 주문 조회 / 송장 등록 API와 연동되면 자동으로 채워집니다. 현재는 수동 추적용 스켈레톤.
+      <div className="text-xs text-gray-400 border-t pt-3 leading-relaxed">
+        ℹ️ 흐름: 쿠팡 주문 자동 수집(매시간) → 🛒 건강산 매입 → 발주 상태/매입원가 입력(실수익 표시) → ggsan 직배송 후 받은 <strong>송장번호를 여기 입력하면 자동으로 &lsquo;발송완료&rsquo; 처리·발송일 기록</strong>됩니다.
+        <br />※ 송장의 <strong>쿠팡 등록은 자동이 아니라 Wing에서 직접</strong> 하세요. 이 화면은 발송 추적·관리용입니다.
       </div>
     </div>
   )

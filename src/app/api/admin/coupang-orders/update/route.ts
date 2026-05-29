@@ -26,6 +26,7 @@ interface OrderRow {
   purchase_unit_cost: number | null
   purchase_ordered_at: string | null
   purchase_received_at: string | null
+  shipped_at: string | null
 }
 
 /**
@@ -38,7 +39,7 @@ export async function POST(request: NextRequest) {
   const user = await requireAdmin()
   if (!user) return NextResponse.json({ error: '권한 없음' }, { status: 401 })
 
-  let body: { id?: string; purchase_status?: string; purchase_unit_cost?: unknown; purchase_total_cost?: unknown; purchase_note?: string }
+  let body: { id?: string; purchase_status?: string; purchase_unit_cost?: unknown; purchase_total_cost?: unknown; purchase_note?: string; delivery_company?: string; invoice_number?: string }
   try { body = await request.json() } catch { return NextResponse.json({ error: '잘못된 요청' }, { status: 400 }) }
   const { id } = body
   if (!id) return NextResponse.json({ error: 'id 누락' }, { status: 400 })
@@ -49,7 +50,7 @@ export async function POST(request: NextRequest) {
   // 운송비 저장은 아래 update 시도에서만 컬럼을 건드리며, 미적용이면 그 저장만 실패한다.
   const { data: row, error: e1 } = await admin
     .from('jimscanner_coupang_orders')
-    .select('id, order_id, product_name, shipping_count, purchase_status, purchase_unit_cost, purchase_ordered_at, purchase_received_at')
+    .select('id, order_id, product_name, shipping_count, purchase_status, purchase_unit_cost, purchase_ordered_at, purchase_received_at, shipped_at')
     .eq('id', id)
     .single()
   if (e1 || !row) return NextResponse.json({ error: '주문을 찾을 수 없음' }, { status: 404 })
@@ -94,6 +95,28 @@ export async function POST(request: NextRequest) {
     changes.push('메모')
   }
 
+  // 4) 송장 / 발송 추적 — 쿠팡 API 등록이 아니라 내부 기록만 (운송장은 Wing에서 직접 등록)
+  const hasCompany = body.delivery_company !== undefined
+  const hasInvoice = body.invoice_number !== undefined
+  if (hasCompany || hasInvoice) {
+    if (hasCompany) update.delivery_company = String(body.delivery_company).trim().slice(0, 40) || null
+    let invoiceVal: string | null = null
+    if (hasInvoice) {
+      invoiceVal = String(body.invoice_number).replace(/\s/g, '').slice(0, 40) || null
+      update.invoice_number = invoiceVal
+    }
+    // 송장번호가 채워지면 = 발송 처리: 발송시각 + 발주상태 '발송완료'(RECEIVED) 자동 (취소건 제외)
+    if (invoiceVal) {
+      if (!order.shipped_at) update.shipped_at = now
+      if (order.purchase_status !== 'CANCELLED' && order.purchase_status !== 'RECEIVED') {
+        update.purchase_status = 'RECEIVED'
+        if (!order.purchase_ordered_at) update.purchase_ordered_at = now
+        if (!order.purchase_received_at) update.purchase_received_at = now
+      }
+    }
+    changes.push(`송장 ${invoiceVal ?? '(삭제)'}${hasCompany && update.delivery_company ? ` ${update.delivery_company}` : ''}`)
+  }
+
   if (changes.length === 0) return NextResponse.json({ error: '변경 내용 없음' }, { status: 400 })
 
   const { error } = await admin.from('jimscanner_coupang_orders').update(update).eq('id', id)
@@ -115,5 +138,8 @@ export async function POST(request: NextRequest) {
     purchase_total_cost: update.purchase_total_cost,
     purchase_ordered_at: update.purchase_ordered_at,
     purchase_received_at: update.purchase_received_at,
+    delivery_company: update.delivery_company,
+    invoice_number: update.invoice_number,
+    shipped_at: update.shipped_at,
   })
 }
