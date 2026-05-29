@@ -78,12 +78,27 @@ type SortKey = (typeof SORT_OPTIONS)[number]['v']
 
 const PAGE_SIZE = 50
 
+// 실수익 = 매출 − 매입원가 − 수수료 − 부가세 (price.ts FEE_RATE와 동일 유지)
+const FEE_RATE = 0.106
+const VAT_DIVISOR = 11
+const PERIOD_OPTIONS = [
+  { v: 7, label: '7일' },
+  { v: 30, label: '30일' },
+  { v: 90, label: '90일' },
+  { v: 0, label: '전체' },
+] as const
+
+function periodCutoff(days: number): string | null {
+  return days > 0 ? new Date(Date.now() - days * 86400000).toISOString() : null
+}
+
 async function fetchData(opts: {
   purchase_status: PurchaseStatus | ''
   shipping_status: ShippingStatus | ''
   q: string
   sort: SortKey
   page: number
+  days: number
 }) {
   const sb = createAdminClient() as unknown as {
     from: (t: string) => ReturnType<ReturnType<typeof createAdminClient>['from']>
@@ -92,6 +107,8 @@ async function fetchData(opts: {
   if (opts.purchase_status) query = query.eq('purchase_status', opts.purchase_status)
   if (opts.shipping_status) query = query.eq('shipping_status', opts.shipping_status)
   if (opts.q) query = query.ilike('product_name', `%${opts.q}%`)
+  const cutoff = periodCutoff(opts.days)
+  if (cutoff) query = query.gte('ordered_at', cutoff)
 
   switch (opts.sort) {
     case 'oldest': query = query.order('ordered_at', { ascending: true }); break
@@ -141,6 +158,30 @@ async function fetchMeta() {
   return { total: total ?? 0, byPurchase }
 }
 
+/** 지정 기간 실수익 합산 (취소 제외). 실수익 = 매출 − 매입원가 − 수수료(10.6%) − 부가세(÷11) */
+async function fetchSummary(days: number) {
+  const sb = createAdminClient() as unknown as {
+    from: (t: string) => ReturnType<ReturnType<typeof createAdminClient>['from']>
+  }
+  let q = sb.from('jimscanner_coupang_orders').select('order_price, purchase_total_cost, purchase_status')
+  const cutoff = periodCutoff(days)
+  if (cutoff) q = q.gte('ordered_at', cutoff)
+  const { data } = await q
+  const rows = (data ?? []) as unknown as Array<{ order_price: number | null; purchase_total_cost: number | null; purchase_status: string }>
+  let count = 0, revenue = 0, cost = 0, fee = 0, vat = 0, costMissing = 0
+  for (const r of rows) {
+    if (r.purchase_status === 'CANCELLED') continue
+    count++
+    const rev = r.order_price ?? 0
+    revenue += rev
+    fee += Math.round(rev * FEE_RATE)
+    vat += Math.round(rev / VAT_DIVISOR)
+    if (r.purchase_total_cost != null) cost += r.purchase_total_cost
+    else costMissing++
+  }
+  return { count, revenue, cost, fee, vat, net: revenue - cost - fee - vat, costMissing }
+}
+
 function buildHref(current: Record<string, string>, override: Record<string, string | null>) {
   const params = new URLSearchParams()
   for (const [k, v] of Object.entries(current)) if (v) params.set(k, v)
@@ -161,7 +202,7 @@ function fmtDate(s: string | null) {
 export default async function CoupangOrdersPage({
   searchParams,
 }: {
-  searchParams: Promise<{ purchase?: string; shipping?: string; q?: string; sort?: string; page?: string }>
+  searchParams: Promise<{ purchase?: string; shipping?: string; q?: string; sort?: string; page?: string; days?: string }>
 }) {
   const sp = await searchParams
   const purchase_status = (Object.keys(PURCHASE_STATUS_LABELS).includes(sp.purchase ?? '') ? sp.purchase : '') as PurchaseStatus | ''
@@ -169,11 +210,14 @@ export default async function CoupangOrdersPage({
   const q = sp.q ?? ''
   const sort = (SORT_OPTIONS.some((s) => s.v === sp.sort) ? sp.sort : 'recent') as SortKey
   const page = Math.max(1, parseInt(sp.page ?? '1', 10) || 1)
-  const current: Record<string, string> = { purchase: purchase_status, shipping: shipping_status, q, sort, page: String(page) }
+  const daysRaw = parseInt(sp.days ?? '30', 10)
+  const days = PERIOD_OPTIONS.some((p) => p.v === daysRaw) ? daysRaw : 30
+  const current: Record<string, string> = { purchase: purchase_status, shipping: shipping_status, q, sort, page: String(page), days: String(days) }
 
-  const [{ rows, total }, meta] = await Promise.all([
-    fetchData({ purchase_status, shipping_status, q, sort, page }),
+  const [{ rows, total }, meta, summary] = await Promise.all([
+    fetchData({ purchase_status, shipping_status, q, sort, page, days }),
     fetchMeta(),
+    fetchSummary(days),
   ])
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE))
 
@@ -188,6 +232,34 @@ export default async function CoupangOrdersPage({
           </p>
         </div>
       </header>
+
+      {/* 기간별 실수익 요약 */}
+      <section className="space-y-2">
+        <div className="flex items-center gap-2">
+          <span className="text-xs text-gray-500">기간</span>
+          {PERIOD_OPTIONS.map((p) => (
+            <Link
+              key={p.v}
+              href={buildHref(current, { days: String(p.v), page: null })}
+              className={`px-2.5 py-1 text-xs rounded ${days === p.v ? 'bg-amber-100 text-amber-700 font-semibold' : 'text-gray-500 hover:bg-gray-100'}`}
+            >
+              {p.label}
+            </Link>
+          ))}
+          <span className="text-xs text-gray-400 ml-1">· 주문 {summary.count.toLocaleString()}건 (취소 제외)</span>
+        </div>
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+          <Kpi label="총 매출" value={`${summary.revenue.toLocaleString()}원`} />
+          <Kpi label="총 매입원가" value={`${summary.cost.toLocaleString()}원`} />
+          <Kpi label="수수료+부가세" value={`${(summary.fee + summary.vat).toLocaleString()}원`} sub={`수수료 ${summary.fee.toLocaleString()} + 부가세 ${summary.vat.toLocaleString()}`} />
+          <Kpi label="총 실수익" value={`${summary.net.toLocaleString()}원`} highlight positive={summary.net >= 0} />
+        </div>
+        {summary.costMissing > 0 && (
+          <p className="text-[11px] text-amber-600">
+            ⚠ 매입원가 미입력 <strong>{summary.costMissing}건</strong>은 원가 0으로 계산되어 실수익이 과대 표시됩니다. 매입가를 입력하면 정확해집니다.
+          </p>
+        )}
+      </section>
 
       {/* 매입 상태 필터 */}
       <nav className="flex flex-wrap gap-1 border-b border-gray-200">
@@ -349,6 +421,16 @@ export default async function CoupangOrdersPage({
         ℹ️ 흐름: 쿠팡 주문 자동 수집(매시간) → 🛒 건강산 매입 → 발주 상태/매입원가 입력(실수익 표시) → ggsan 직배송 후 받은 <strong>송장번호를 여기 입력하면 자동으로 &lsquo;발송완료&rsquo; 처리·발송일 기록</strong>됩니다.
         <br />※ 송장의 <strong>쿠팡 등록은 자동이 아니라 Wing에서 직접</strong> 하세요. 이 화면은 발송 추적·관리용입니다.
       </div>
+    </div>
+  )
+}
+
+function Kpi({ label, value, sub, highlight = false, positive = true }: { label: string; value: string; sub?: string; highlight?: boolean; positive?: boolean }) {
+  return (
+    <div className={`rounded border p-3 ${highlight ? (positive ? 'border-emerald-300 bg-emerald-50' : 'border-rose-300 bg-rose-50') : 'border-gray-200 bg-white'}`}>
+      <div className="text-xs text-gray-500">{label}</div>
+      <div className={`text-lg font-bold mt-1 tabular-nums ${highlight ? (positive ? 'text-emerald-700' : 'text-rose-600') : 'text-gray-900'}`}>{value}</div>
+      {sub && <div className="text-[10px] text-gray-400 mt-0.5 tabular-nums">{sub}</div>}
     </div>
   )
 }
