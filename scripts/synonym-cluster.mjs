@@ -74,6 +74,38 @@ function normalize(s) {
   return String(s).toLowerCase().replace(/\s+/g, '').replace(/[^\p{L}\p{N}]+/gu, '').slice(0, 60)
 }
 
+// ── 협찬·체험단 노이즈 필터 (룰 기반 ad_probability) ─────────────────
+// naver_blog/news 의 표면형 텍스트에서 sponsored 마커를 찾아 0~1 광고성 확률 부여.
+// LLM 패스 전 1차 룰 스코어. 빈도가 '실수요'가 아닌 '셀러 마케팅 강도'로
+// 부풀려지는 역설을 (1 - ad_probability) organic 가중치로 디스카운트한다.
+const AD_MARKERS = [
+  '협찬', '체험단', '제공받', '제공 받', '원고료', '소정의', '대가를', '대가성',
+  '쿠팡파트너스', '파트너스', '제휴', '서포터즈', '무상으로', '무상 제공',
+  '광고포함', '광고 포함', 'sponsored', '#광고', '[광고]', '(광고)', 'ad)',
+]
+// organic 신호 (내돈내산 등) — 광고 확률을 끌어내림
+const ORGANIC_MARKERS = ['내돈내산', '내 돈 내산', '솔직후기', '내돈주고']
+// 소스별 기본 광고성 prior (blog 가 가장 높음)
+const SOURCE_AD_PRIOR = {
+  naver_blog: 0.45,
+  naver_news: 0.2,
+}
+
+function ruleAdProbability(surface, source) {
+  const text = String(surface || '').toLowerCase()
+  let p = SOURCE_AD_PRIOR[source] ?? 0
+  let hits = 0
+  for (const m of AD_MARKERS) {
+    if (text.includes(m.toLowerCase())) hits++
+  }
+  // 마커 1개당 +0.3, 누적
+  p += hits * 0.3
+  for (const m of ORGANIC_MARKERS) {
+    if (text.includes(m.toLowerCase())) p -= 0.35
+  }
+  return Math.max(0, Math.min(1, Number(p.toFixed(3))))
+}
+
 async function fetchMarketRaw(sinceIso) {
   const { data, error } = await sb
     .from('jimscanner_market_raw')
@@ -246,13 +278,24 @@ async function upsertClusters(clusters) {
   for (const c of clusters) {
     const member_terms = [...new Set(c.member_signals.map((s) => s.surface))].slice(0, 50)
     const sources = new Set(c.member_signals.map((s) => s.source).filter(Boolean))
+    // 시그널별 광고성 확률 → organic 가중치 (1 - ad_probability) 합산
+    const adProbBySignal = c.member_signals.map((s) => ruleAdProbability(s.surface, s.source))
+    const total_frequency = c.member_signals.length
+    const organic_frequency = Number(
+      adProbBySignal.reduce((sum, p) => sum + (1 - p), 0).toFixed(2),
+    )
+    const organic_ratio = total_frequency > 0
+      ? Number((organic_frequency / total_frequency).toFixed(3))
+      : 1
     const payload = {
       canonical_label: c.canonical_label,
       member_terms,
       category_hint: c.category_hint,
       member_count: member_terms.length,
       source_count: sources.size,
-      total_frequency: c.member_signals.length,
+      total_frequency,
+      organic_frequency,
+      organic_ratio,
       llm_model: MODEL,
       refreshed_at: new Date().toISOString(),
     }
@@ -286,6 +329,7 @@ async function upsertClusters(clusters) {
       surface_term: s.surface.slice(0, 200),
       source: s.source ?? null,
       similarity: 1.0,
+      ad_probability: ruleAdProbability(s.surface, s.source),
       observed_at: s.observed_at ?? new Date().toISOString(),
     }))
     if (rows.length === 0) continue
