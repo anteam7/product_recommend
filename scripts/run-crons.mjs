@@ -144,4 +144,24 @@ if (!skipClassify) {
   if (classifyExit !== 0) failCount++
 }
 
+// ggsan-repeat-engine: 재구매 엔진 점수 적재 (로컬 node 단계).
+//   filter / --no-classify 시엔 건너뜀 (수집 데이터가 갱신된 전체 실행 때만).
+const skipRepeat = args.includes('--no-repeat') || skipClassify
+if (!skipRepeat) {
+  console.log(`[${new Date().toISOString()}] launching ggsan-repeat-engine`)
+  const repeatPath = resolvePath(__dirname, 'ggsan-repeat-engine.mjs')
+  const repeatExit = await new Promise((resolve) => {
+    const child = spawn(process.execPath, [repeatPath], {
+      stdio: 'inherit',
+      env: process.env,
+    })
+    child.on('exit', (code) => resolve(code ?? 0))
+    child.on('error', (err) => {
+      console.error(`  repeat-engine spawn error: ${err.message}`)
+      resolve(1)
+    })
+  })
+  if (repeatExit !== 0) failCount++
+}
+
 process.exit(failCount > 0 ? 1 : 0)

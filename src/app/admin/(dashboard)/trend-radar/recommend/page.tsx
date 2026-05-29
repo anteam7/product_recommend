@@ -26,6 +26,10 @@ interface RecommendRow {
   search_match_count: number
   search_top_keyword: string
   search_sources: string[]
+
+  // 재구매 엔진 (jimscanner_ggsan_repeat 조인 — 정기매출 배지)
+  repeat_engine_score?: number | null
+  est_monthly_reorder?: number | null
 }
 
 const DAYS_OPTIONS = [
@@ -61,6 +65,26 @@ async function fetchRecommend(opts: {
   let rows = (data ?? []) as RecommendRow[]
   if (opts.imminentOnly) rows = rows.filter((r) => r.is_imminent)
   if (opts.cate) rows = rows.filter((r) => r.cate_cd === opts.cate)
+
+  // 재구매 엔진 점수 조인 — '정기매출' 배지용 (jimscanner_ggsan_repeat, 타입 미반영 → 캐스팅)
+  if (rows.length > 0) {
+    const { data: repeats } = await (sb as any)
+      .from('jimscanner_ggsan_repeat')
+      .select('goods_no, repeat_engine_score, est_monthly_reorder')
+      .in('goods_no', rows.map((r) => r.goods_no))
+    const byId = new Map(
+      ((repeats ?? []) as { goods_no: string; repeat_engine_score: number | null; est_monthly_reorder: number | null }[]).map(
+        (x) => [x.goods_no, x],
+      ),
+    )
+    rows = rows.map((r) => {
+      const rep = byId.get(r.goods_no)
+      return rep
+        ? { ...r, repeat_engine_score: rep.repeat_engine_score, est_monthly_reorder: rep.est_monthly_reorder }
+        : r
+    })
+  }
+
   return { rows, error: null as string | null }
 }
 
@@ -271,8 +295,17 @@ export default async function RecommendPage({
                   <div className="text-sm font-medium leading-snug" title={r.title}>
                     {r.title}
                   </div>
-                  <div className="text-xs text-gray-500">
-                    {r.cate_label ?? r.cate_cd} · {r.goods_no}
+                  <div className="text-xs text-gray-500 flex items-center gap-2">
+                    <span>{r.cate_label ?? r.cate_cd} · {r.goods_no}</span>
+                    {r.repeat_engine_score != null && r.repeat_engine_score > 0 && (
+                      <span
+                        className="bg-indigo-100 text-indigo-800 px-2 py-0.5 rounded font-medium"
+                        title={`재구매 엔진 점수 ${Number(r.repeat_engine_score).toFixed(2)}`}
+                      >
+                        💰 정기매출 {Number(r.repeat_engine_score).toFixed(1)}
+                        {r.est_monthly_reorder ? ` · 월 ${Number(r.est_monthly_reorder).toFixed(1)}회` : ''}
+                      </span>
+                    )}
                   </div>
                   {/* 매칭 근거 */}
                   <div className="flex flex-wrap gap-2 text-xs pt-1">
