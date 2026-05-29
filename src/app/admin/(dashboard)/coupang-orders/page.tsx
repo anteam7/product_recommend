@@ -1,6 +1,7 @@
 import Link from 'next/link'
 import { createAdminClient } from '@/lib/auth/admin-supabase'
 import { PurchaseStatusCell } from './PurchaseStatusCell'
+import { PurchaseCostCell } from './PurchaseCostCell'
 
 export const dynamic = 'force-dynamic'
 
@@ -32,6 +33,7 @@ interface OrderRow {
   purchase_ordered_at: string | null
   purchase_received_at: string | null
   purchase_unit_cost: number | null
+  purchase_shipping_cost: number | null
   purchase_total_cost: number | null
   purchase_note: string | null
   shipping_status: ShippingStatus
@@ -49,10 +51,11 @@ interface OrderRow {
   ggsan_url?: string | null
 }
 
+// 드롭십(ggsan 직배송): 미발주 → 발주완료 → 발송완료(운송장 등록) → 취소 ("입고" 단계 없음)
 const PURCHASE_STATUS_LABELS: Record<PurchaseStatus, { label: string; cls: string }> = {
   PENDING: { label: '미발주', cls: 'bg-rose-100 text-rose-700' },
-  ORDERED: { label: '매입 발주', cls: 'bg-amber-100 text-amber-700' },
-  RECEIVED: { label: '매입 입고', cls: 'bg-emerald-100 text-emerald-700' },
+  ORDERED: { label: '발주완료', cls: 'bg-amber-100 text-amber-700' },
+  RECEIVED: { label: '발송완료', cls: 'bg-emerald-100 text-emerald-700' },
   CANCELLED: { label: '취소', cls: 'bg-zinc-200 text-zinc-600' },
 }
 
@@ -290,18 +293,18 @@ export default async function CoupangOrdersPage({
                   </td>
                   <td className="px-3 py-2 text-center tabular-nums">{r.shipping_count}</td>
                   <td className="px-3 py-2 text-right tabular-nums font-semibold">{fmt(r.order_price)}</td>
-                  <td className="px-3 py-2 text-right tabular-nums">
-                    <div>{fmt(r.purchase_total_cost)}</div>
-                    {r.purchase_unit_cost != null && (
-                      <div className="text-[10px] text-gray-400">단가 {fmt(r.purchase_unit_cost)}</div>
-                    )}
+                  <td className="px-3 py-2 text-right">
+                    <PurchaseCostCell
+                      id={r.id}
+                      unitCost={r.purchase_unit_cost}
+                      shippingCost={r.purchase_shipping_cost}
+                      shippingCount={r.shipping_count}
+                    />
                   </td>
                   <td className="px-3 py-2 text-center">
                     <PurchaseStatusCell
                       id={r.id}
                       status={r.purchase_status}
-                      unitCost={r.purchase_unit_cost}
-                      shippingCount={r.shipping_count}
                       orderedAt={r.purchase_ordered_at}
                     />
                   </td>

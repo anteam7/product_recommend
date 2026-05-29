@@ -24,6 +24,7 @@ interface OrderRow {
   shipping_count: number | null
   purchase_status: string
   purchase_unit_cost: number | null
+  purchase_shipping_cost: number | null
   purchase_ordered_at: string | null
   purchase_received_at: string | null
 }
@@ -38,7 +39,7 @@ export async function POST(request: NextRequest) {
   const user = await requireAdmin()
   if (!user) return NextResponse.json({ error: '권한 없음' }, { status: 401 })
 
-  let body: { id?: string; purchase_status?: string; purchase_unit_cost?: unknown; purchase_note?: string }
+  let body: { id?: string; purchase_status?: string; purchase_unit_cost?: unknown; purchase_shipping_cost?: unknown; purchase_note?: string }
   try { body = await request.json() } catch { return NextResponse.json({ error: '잘못된 요청' }, { status: 400 }) }
   const { id } = body
   if (!id) return NextResponse.json({ error: 'id 누락' }, { status: 400 })
@@ -47,7 +48,7 @@ export async function POST(request: NextRequest) {
   const admin = createAdminClient() as any
   const { data: row, error: e1 } = await admin
     .from('jimscanner_coupang_orders')
-    .select('id, order_id, product_name, shipping_count, purchase_status, purchase_unit_cost, purchase_ordered_at, purchase_received_at')
+    .select('id, order_id, product_name, shipping_count, purchase_status, purchase_unit_cost, purchase_shipping_cost, purchase_ordered_at, purchase_received_at')
     .eq('id', id)
     .single()
   if (e1 || !row) return NextResponse.json({ error: '주문을 찾을 수 없음' }, { status: 404 })
@@ -71,14 +72,25 @@ export async function POST(request: NextRequest) {
     changes.push(`상태 ${order.purchase_status}→${ps}`)
   }
 
-  // 2) 매입 단가 → 합계 자동 계산
-  if (body.purchase_unit_cost !== undefined) {
-    const unit = Math.round(Number(body.purchase_unit_cost))
-    if (!Number.isFinite(unit) || unit < 0) return NextResponse.json({ error: '매입 단가가 올바르지 않음' }, { status: 400 })
+  // 2) 매입 상품가 / 운송비 → 합계 자동 (= 상품가 × 수량 + 운송비)
+  const hasUnit = body.purchase_unit_cost !== undefined
+  const hasShip = body.purchase_shipping_cost !== undefined
+  if (hasUnit || hasShip) {
     const qty = order.shipping_count ?? 1
-    update.purchase_unit_cost = unit
-    update.purchase_total_cost = unit * qty
-    changes.push(`매입단가 ${unit.toLocaleString()}×${qty}`)
+    let unit = order.purchase_unit_cost ?? 0
+    let ship = order.purchase_shipping_cost ?? 0
+    if (hasUnit) {
+      unit = Math.round(Number(body.purchase_unit_cost))
+      if (!Number.isFinite(unit) || unit < 0) return NextResponse.json({ error: '매입 상품가가 올바르지 않음' }, { status: 400 })
+      update.purchase_unit_cost = unit
+    }
+    if (hasShip) {
+      ship = Math.round(Number(body.purchase_shipping_cost))
+      if (!Number.isFinite(ship) || ship < 0) return NextResponse.json({ error: '매입 운송비가 올바르지 않음' }, { status: 400 })
+      update.purchase_shipping_cost = ship
+    }
+    update.purchase_total_cost = unit * qty + ship
+    changes.push(`매입 상품가 ${unit.toLocaleString()}×${qty} + 운송 ${ship.toLocaleString()} = ${(unit * qty + ship).toLocaleString()}`)
   }
 
   // 3) 메모
@@ -105,6 +117,7 @@ export async function POST(request: NextRequest) {
     ok: true,
     purchase_status: update.purchase_status ?? order.purchase_status,
     purchase_unit_cost: update.purchase_unit_cost ?? order.purchase_unit_cost,
+    purchase_shipping_cost: update.purchase_shipping_cost ?? order.purchase_shipping_cost,
     purchase_total_cost: update.purchase_total_cost,
     purchase_ordered_at: update.purchase_ordered_at,
     purchase_received_at: update.purchase_received_at,
