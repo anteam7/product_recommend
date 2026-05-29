@@ -299,6 +299,7 @@ export default async function CoupangOrdersPage({
                       unitCost={r.purchase_unit_cost}
                       shippingCost={r.purchase_shipping_cost}
                       shippingCount={r.shipping_count}
+                      orderPrice={r.order_price}
                     />
                   </td>
                   <td className="px-3 py-2 text-center">

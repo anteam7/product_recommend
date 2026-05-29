@@ -46,9 +46,11 @@ export async function POST(request: NextRequest) {
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const admin = createAdminClient() as any
+  // 주의: purchase_shipping_cost 컬럼이 아직 없을 수 있어 SELECT에 넣지 않음(있어도 없어도 동작).
+  // 운송비 저장은 아래 update 시도에서만 컬럼을 건드리며, 미적용이면 그 저장만 실패한다.
   const { data: row, error: e1 } = await admin
     .from('jimscanner_coupang_orders')
-    .select('id, order_id, product_name, shipping_count, purchase_status, purchase_unit_cost, purchase_shipping_cost, purchase_ordered_at, purchase_received_at')
+    .select('id, order_id, product_name, shipping_count, purchase_status, purchase_unit_cost, purchase_ordered_at, purchase_received_at')
     .eq('id', id)
     .single()
   if (e1 || !row) return NextResponse.json({ error: '주문을 찾을 수 없음' }, { status: 404 })
