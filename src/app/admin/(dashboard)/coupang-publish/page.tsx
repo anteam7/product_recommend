@@ -1,5 +1,6 @@
 import Link from 'next/link'
 import { createAdminClient } from '@/lib/auth/admin-supabase'
+import { PriceCell } from './PriceCell'
 
 export const dynamic = 'force-dynamic'
 
@@ -353,22 +354,37 @@ export default async function CoupangPublishPage({
               return (
                 <tr key={r.id} className="border-t hover:bg-amber-50/30">
                   <td className="px-3 py-2">
-                    <div className="font-medium text-gray-900 line-clamp-2">{r.registered_title}</div>
+                    <div className="font-medium text-gray-900 line-clamp-2 flex items-center gap-1.5">
+                      {r.source === 'manual' && (
+                        <span className="inline-block px-1.5 py-0.5 rounded text-[10px] bg-violet-100 text-violet-700 font-semibold flex-none">수동</span>
+                      )}
+                      <span>{r.registered_title}</span>
+                    </div>
                     <div className="text-[11px] text-gray-500 mt-0.5 flex flex-wrap gap-x-2">
                       {r.brand && <span>{r.brand}</span>}
                       {r.display_category_name && <span>· {r.display_category_name}</span>}
-                      <span>· goods_no={r.source_goods_no}</span>
+                      {r.source !== 'manual' && r.source_goods_no && <span>· goods_no={r.source_goods_no}</span>}
                       {r.seller_product_id && <span>· sellerPID={r.seller_product_id}</span>}
                     </div>
                   </td>
                   <td className="px-3 py-2 text-right tabular-nums">
-                    <div>{fmt(r.dome_price_krw)}</div>
-                    <div className="text-[10px] text-gray-400">
-                      +배송 {fmt((r.source_shipping_fee_krw ?? 0) + (r.outbound_shipping_fee_krw ?? 0))}
-                    </div>
+                    <PriceCell
+                      id={r.id}
+                      field="dome"
+                      value={r.dome_price_krw}
+                      shipping={(r.source_shipping_fee_krw ?? 0) + (r.outbound_shipping_fee_krw ?? 0)}
+                    />
                   </td>
                   <td className="px-3 py-2 text-right tabular-nums text-rose-600 font-medium">{fmt(r.msp_price_krw)}</td>
-                  <td className="px-3 py-2 text-right tabular-nums font-semibold text-gray-900">{fmt(r.list_price_krw)}</td>
+                  <td className="px-3 py-2 text-right tabular-nums">
+                    <PriceCell
+                      id={r.id}
+                      field="list"
+                      value={r.list_price_krw}
+                      msp={r.msp_price_krw}
+                      canPushCoupang={r.seller_product_id != null && (r.status === 'APPROVED' || r.status === 'SELLING')}
+                    />
+                  </td>
                   <td className="px-3 py-2 text-right tabular-nums">
                     {r.estimated_margin_pct != null ? (
                       <span className={r.estimated_margin_pct >= 40 ? 'text-emerald-700 font-semibold' : 'text-gray-700'}>
