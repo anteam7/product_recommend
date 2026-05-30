@@ -51,10 +51,18 @@ const NAV_GROUPS: NavGroup[] = [
         match: (p) => p.startsWith('/admin/trend-radar/recommend'),
       },
       {
+        href: '/admin/trend-radar/ggsan-arrivals',
+        label: '📦 신상 입고 레이더',
+        icon: '📦',
+        match: (p) => p.startsWith('/admin/trend-radar/ggsan-arrivals'),
+      },
+      {
         href: '/admin/trend-radar/ggsan',
         label: 'ggsan 카탈로그',
         icon: '🛒',
-        match: (p) => p.startsWith('/admin/trend-radar/ggsan'),
+        match: (p) =>
+          p.startsWith('/admin/trend-radar/ggsan') &&
+          !p.startsWith('/admin/trend-radar/ggsan-arrivals'),
       },
       {
         href: '/admin/trend-radar/tv-ggsan-match',
