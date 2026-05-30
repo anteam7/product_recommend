@@ -57,6 +57,107 @@ const SYSTEM_PROMPT = `한국 위탁 판매 상품 분류기. 입력 리스트�
 예시 입력: - id="abc" name="닥터린 초임계 알티지 오메가3 60캡슐" cur_top=health aliases=2 samples=[종근당 오메가3 | 일양 오메가3] sources=[naver_shopping_hot,musinsa_best]
 예시 출력: [{"id":"abc","canonical_name":"오메가3","brand":"닥터린","category_top":"health","category_mid":"오메가3","intent_label":"예방건강","description":"혈행건강 영양제"}]`
 
+// ── 구매의도 라벨링 (키워드 단위) ──────────────────────────
+// jimscanner_trends_keywords.classified_intent 활성화. 상품 intent_label 과 별개.
+const INTENT_VALUES = ['informational', 'commercial', 'transactional', 'navigational']
+const INTENT_SYSTEM_PROMPT = `한국 검색어 구매의도 분류기. 입력 키워드 리스트를 JSON 배열로 변환.
+
+❗ 절대 규칙:
+- 응답 첫 글자는 '[', 마지막 글자는 ']'
+- 설명·코드펜스·markdown 금지
+- 입력 id 그대로 유지
+
+각 항목 필드:
+- id: 입력 id 그대로
+- intent: 다음 중 하나
+  · informational: 정보탐색 (예: "오메가3 효능", "무릎 통증 원인")
+  · commercial: 비교·구매검토 (예: "오메가3 추천", "rtg 차이")
+  · transactional: 구매직전 (예: "오메가3 최저가", "닥터린 오메가3 구매")
+  · navigational: 특정 브랜드/사이트 지향 (예: "쿠팡 오메가3", "아이허브")
+
+예시 입력: - id="k1" kw="오메가3 최저가" cat=건강
+예시 출력: [{"id":"k1","intent":"transactional"}]`
+
+const KW_BATCH_SIZE = 40
+const KW_MAX_REQ_PER_RUN = 15
+
+function buildIntentPrompt(items) {
+  const lines = items.map((it) => `- id="${it.id}" kw="${it.keyword}" cat=${it.category_top ?? '?'}`)
+  return `다음 ${items.length}개 검색어의 구매의도를 분류해서 JSON 배열로 응답:\n\n${lines.join('\n')}`
+}
+
+async function fetchIntentCandidates() {
+  const { data } = await sb
+    .from('jimscanner_trends_keywords')
+    .select('id, keyword, category_top')
+    .is('classified_intent', null)
+    .order('collected_at', { ascending: false })
+    .limit(KW_BATCH_SIZE * KW_MAX_REQ_PER_RUN)
+  return data ?? []
+}
+
+async function applyIntents(results) {
+  if (results.length === 0) return
+  await Promise.all(
+    results.map((r) =>
+      sb
+        .from('jimscanner_trends_keywords')
+        .update({ classified_intent: r.intent })
+        .eq('id', r.id),
+    ),
+  )
+}
+
+// 키워드 인텐트 패스. 상품 분류와 동일한 daily 카운터를 공유한다.
+async function classifyKeywordIntents(counter, alreadyReq) {
+  const candidates = await fetchIntentCandidates()
+  if (candidates.length === 0) {
+    console.log('  intent: 분류 대상 키워드 없음 (0)')
+    return { req: 0, classified: 0, inputTokens: 0, outputTokens: 0, costUsd: 0 }
+  }
+  console.log(`  intent candidates: ${candidates.length}`)
+
+  const applied = []
+  let req = 0
+  let totalIn = 0
+  let totalOut = 0
+  let totalCost = 0
+
+  for (let i = 0; i < candidates.length; i += KW_BATCH_SIZE) {
+    if (req >= KW_MAX_REQ_PER_RUN) break
+    if (counter.requestCount + alreadyReq + req >= DAILY_REQ_HARD_CAP) break
+
+    const batch = candidates.slice(i, i + KW_BATCH_SIZE)
+    const fullPrompt = `${INTENT_SYSTEM_PROMPT}\n\n---\n\n${buildIntentPrompt(batch)}`
+    try {
+      const out = await callClaudeCli(fullPrompt)
+      req++
+      totalIn += out.inputTokens
+      totalOut += out.outputTokens
+      totalCost += out.costUsd
+      const arr = tryParseJsonArray(out.text) ?? []
+      const byId = new Map()
+      for (const o of arr) {
+        if (!o || typeof o !== 'object') continue
+        const id = String(o.id ?? '').trim()
+        const intent = INTENT_VALUES.includes(o.intent) ? o.intent : null
+        if (id && intent) byId.set(id, intent)
+      }
+      for (const it of batch) {
+        const intent = byId.get(it.id)
+        if (intent) applied.push({ id: it.id, intent })
+      }
+      console.log(`  intent batch ${req}: ${batch.length} in → ${byId.size} labeled`)
+    } catch (e) {
+      console.error(`  intent batch ${req + 1} failed: ${e instanceof Error ? e.message : e}`)
+      break
+    }
+  }
+
+  if (applied.length > 0) await applyIntents(applied)
+  return { req, classified: applied.length, inputTokens: totalIn, outputTokens: totalOut, costUsd: totalCost }
+}
+
 function buildUserPrompt(items) {
   const lines = items.map(
     (it) =>
@@ -336,12 +437,24 @@ async function main() {
 
   if (allResults.length > 0) await applyResults(allResults)
 
-  if (reqCount > 0) {
+  // 키워드 인텐트 라벨링 패스 (classified_intent 활성화) — 동일 daily 카운터 공유
+  let intentRes = { req: 0, classified: 0, inputTokens: 0, outputTokens: 0, costUsd: 0 }
+  if (counter.requestCount + reqCount < DAILY_REQ_HARD_CAP) {
+    try {
+      intentRes = await classifyKeywordIntents(counter, reqCount)
+      totalCostUsd += intentRes.costUsd
+    } catch (e) {
+      console.error(`  intent pass failed: ${e instanceof Error ? e.message : e}`)
+    }
+  }
+
+  const totalReq = reqCount + intentRes.req
+  if (totalReq > 0) {
     await bumpCounter(counter.day, {
-      req: reqCount,
+      req: totalReq,
       products: allResults.length,
-      inputTokens: totalIn,
-      outputTokens: totalOut,
+      inputTokens: totalIn + intentRes.inputTokens,
+      outputTokens: totalOut + intentRes.outputTokens,
     })
   }
 
@@ -354,7 +467,7 @@ async function main() {
   })
 
   console.log(
-    `[${new Date().toISOString()}] done — ${reqCount} req, ${allResults.length} classified, $${totalCostUsd.toFixed(4)}, ${Date.now() - t0}ms`,
+    `[${new Date().toISOString()}] done — ${totalReq} req, ${allResults.length} products + ${intentRes.classified} keyword-intents, $${totalCostUsd.toFixed(4)}, ${Date.now() - t0}ms`,
   )
 }
 
