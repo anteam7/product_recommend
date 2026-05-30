@@ -51,6 +51,12 @@ const NAV_GROUPS: NavGroup[] = [
         match: (p) => p.startsWith('/admin/trend-radar/recommend'),
       },
       {
+        href: '/admin/trend-radar/bundle-rescue',
+        label: '📦 번들 흑자전환',
+        icon: '📦',
+        match: (p) => p.startsWith('/admin/trend-radar/bundle-rescue'),
+      },
+      {
         href: '/admin/trend-radar/ggsan',
         label: 'ggsan 카탈로그',
         icon: '🛒',
