@@ -44,13 +44,30 @@ export async function GET(request: NextRequest) {
     if (!title || !looksRelevant(title)) continue
     if (seen.has(id)) continue
     seen.add(id)
+
+    // 제목 prefix 의 [라벨] 제거 → clean_title (핫딜 수요 보드 군집화용, quasarzone 과 동일 규약)
+    const labelMatch = title.match(/^\[([^\]]+)\]\s*(.*)$/)
+    const cleanTitle = labelMatch ? labelMatch[2] : title
+
+    // 댓글/조회 카운트는 같은 list_item 블록 안의 후행 마크업에 있음 — best-effort 윈도우 파싱.
+    // 못 찾으면 생략(보드는 0 으로 처리). 메인 regex 는 건드리지 않아 수집 안정성 유지.
+    const window = html.slice(m.index, m.index + 1200)
+    const replyM = window.match(/rSymph05[^>]*>\s*([\d,]+)/)
+    const viewM = window.match(/(?:view_count|hit)[^>]*>\s*([\d,]+)/)
+    const replyCnt = replyM ? Number(replyM[1].replace(/,/g, '')) : null
+    const viewCnt = viewM ? Number(viewM[1].replace(/,/g, '')) : null
+
+    const metadata: Record<string, unknown> = { board: 'park', clean_title: cleanTitle }
+    if (replyCnt != null && Number.isFinite(replyCnt)) metadata.reply_cnt = replyCnt
+    if (viewCnt != null && Number.isFinite(viewCnt)) metadata.view_cnt = viewCnt
+
     rows.push({
       source: 'clien_park',
       dedup_key: id,
       source_url: `https://www.clien.net${hrefRel}`,
       title,
       external_id: id,
-      metadata: { board: 'park' },
+      metadata,
     })
   }
 
