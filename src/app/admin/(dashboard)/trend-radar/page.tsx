@@ -30,6 +30,17 @@ interface ScoreRow {
   computed_at: string
   score_components?: any
 }
+interface ShrinkRow {
+  product_id: string
+  category_top: string
+  n: number
+  raw_score: number
+  mean_score: number
+  prior_mean: number
+  shrunk_score: number
+  shrink_factor: number
+  ci_width: number
+}
 
 async function fetchTvGgsanMatchSummary() {
   const sb = createAdminClient()
@@ -94,8 +105,16 @@ async function fetchData(category: Category) {
     latestMap.set(s.product_id, s)
   }
 
+  // 표본수 베이지안 수축 — product 별 n·shrunk·shrink_factor 맵
+  const { data: shrinkRows } = await sb.rpc('jimscanner_trends_score_shrinkage' as any, {
+    p_category: category,
+    p_k: 3,
+  })
+  const shrinkMap = new Map<string, ShrinkRow>()
+  for (const r of ((shrinkRows ?? []) as ShrinkRow[])) shrinkMap.set(r.product_id, r)
+
   const productIds = [...latestMap.keys()]
-  if (productIds.length === 0) return { products: [], scores: latestMap, kpis: { products: 0, top: 0, supplier: 0, tv: 0, llmClassified: 0 } }
+  if (productIds.length === 0) return { products: [], scores: latestMap, shrink: shrinkMap, kpis: { products: 0, top: 0, supplier: 0, tv: 0, llmClassified: 0 } }
 
   const prodQuery = sb
     .from('jimscanner_trends_products')
@@ -120,6 +139,7 @@ async function fetchData(category: Category) {
   return {
     products: (products ?? []) as ProductRow[],
     scores: latestMap,
+    shrink: shrinkMap,
     kpis: { products: allCount, top: topCount, supplier: supplierCount, tv: tvCount, llmClassified: llmClassifiedCount },
   }
 }
@@ -132,16 +152,23 @@ export default async function TrendRadarPage({
   const sp = await searchParams
   const category = (CATEGORIES.includes(sp.cat as Category) ? sp.cat : 'all') as Category
 
-  const [{ products, scores, kpis }, tvPushes, tvGgsan] = await Promise.all([
+  const [{ products, scores, shrink, kpis }, tvPushes, tvGgsan] = await Promise.all([
     fetchData(category),
     fetchTvPushes(),
     fetchTvGgsanMatchSummary(),
   ])
 
   const sorted = products
-    .map((p) => ({ p, s: scores.get(p.id) }))
+    .map((p) => ({ p, s: scores.get(p.id), sh: shrink.get(p.id) }))
     .filter((x) => x.s)
     .sort((a, b) => (b.s!.final_score - a.s!.final_score))
+
+  // 신뢰보정 순위: shrunk_score(없으면 raw final_score) 내림차순
+  const relSorted = [...sorted].sort(
+    (a, b) => ((b.sh?.shrunk_score ?? b.s!.final_score) - (a.sh?.shrunk_score ?? a.s!.final_score)),
+  )
+  const relRankMap = new Map<string, number>()
+  relSorted.forEach((x, i) => relRankMap.set(x.p.id, i + 1))
 
   return (
     <div className="space-y-6 p-6">
@@ -152,12 +179,20 @@ export default async function TrendRadarPage({
             위탁 판매 상품 발굴 · 30일 누적 후 4점수 정확도 ↑
           </p>
         </div>
-        <Link
-          href="/admin/trend-radar/sources"
-          className="text-sm text-gray-700 hover:text-black underline"
-        >
-          소스 헬스 →
-        </Link>
+        <div className="flex items-center gap-4">
+          <Link
+            href={`/admin/trend-radar/reliability?cat=${category}`}
+            className="text-sm text-gray-700 hover:text-black underline"
+          >
+            신뢰 산점도 →
+          </Link>
+          <Link
+            href="/admin/trend-radar/sources"
+            className="text-sm text-gray-700 hover:text-black underline"
+          >
+            소스 헬스 →
+          </Link>
+        </div>
       </header>
 
       {/* KPI 5종 */}
@@ -271,39 +306,85 @@ export default async function TrendRadarPage({
           <EmptyState category={category} />
         ) : (
           <div className="grid gap-3">
+            <div className="flex items-center justify-between px-3 text-xs text-gray-500">
+              <span>
+                raw순위(final) → <span className="text-gray-700 font-medium">신뢰보정순위(shrunk)</span> ·
+                k=3 베이지안 수축 · n&lt;3 은 <span className="text-amber-700">얇은 증거</span>
+              </span>
+            </div>
             <div className="grid grid-cols-12 text-xs text-gray-500 px-3 py-1">
               <div className="col-span-1">#</div>
-              <div className="col-span-5">상품명</div>
+              <div className="col-span-4">상품명</div>
+              <div className="col-span-1 text-right">Δ순위</div>
               <div className="col-span-1 text-right">final</div>
+              <div className="col-span-1 text-right">보정</div>
+              <div className="col-span-1 text-right">n</div>
               <div className="col-span-1 text-right">trend</div>
               <div className="col-span-1 text-right">commerce</div>
               <div className="col-span-1 text-right">supplier</div>
-              <div className="col-span-1 text-right">competition</div>
-              <div className="col-span-1 text-right">aliases</div>
             </div>
-            {sorted.slice(0, 50).map(({ p, s }, i) => (
-              <Link
-                key={p.id}
-                href={`/admin/trend-radar/products/${p.id}`}
-                className="grid grid-cols-12 px-3 py-2 rounded border border-gray-200 hover:bg-gray-50 transition-colors"
-              >
-                <div className="col-span-1 text-gray-400 font-mono">{i + 1}</div>
-                <div className="col-span-5">
-                  <div className="font-medium">{p.canonical_name}</div>
-                  <div className="text-xs text-gray-500">{p.category_top}</div>
-                </div>
-                <div className="col-span-1 text-right font-mono font-bold">{s!.final_score}</div>
-                <div className="col-span-1 text-right font-mono text-gray-600">{s!.trend_score}</div>
-                <div className="col-span-1 text-right font-mono text-gray-600">{s!.commerce_score}</div>
-                <div className="col-span-1 text-right font-mono text-gray-600">{s!.supplier_score}</div>
-                <div className="col-span-1 text-right font-mono text-gray-600">{s!.competition_score}</div>
-                <div className="col-span-1 text-right text-xs text-gray-500">{p.alias_count}</div>
-              </Link>
-            ))}
+            {sorted.slice(0, 50).map(({ p, s, sh }, i) => {
+              const rawRank = i + 1
+              const relRank = relRankMap.get(p.id) ?? rawRank
+              const delta = rawRank - relRank // +면 보정 후 상승, -면 강등
+              const n = sh?.n ?? null
+              const thin = n !== null && n < 3
+              return (
+                <Link
+                  key={p.id}
+                  href={`/admin/trend-radar/products/${p.id}`}
+                  className={`grid grid-cols-12 px-3 py-2 rounded border transition-colors hover:bg-gray-50 ${
+                    thin && s!.final_score >= 50 ? 'border-amber-300 bg-amber-50/40' : 'border-gray-200'
+                  }`}
+                >
+                  <div className="col-span-1 text-gray-400 font-mono">{rawRank}</div>
+                  <div className="col-span-4">
+                    <div className="font-medium flex items-center gap-1.5">
+                      <span className="truncate">{p.canonical_name}</span>
+                      {thin && s!.final_score >= 50 && (
+                        <span
+                          title={`관측 ${n}회 — 표본이 얇아 단발 스파이크일 수 있음`}
+                          className="shrink-0 rounded bg-amber-200 px-1.5 py-0.5 text-[10px] font-semibold text-amber-900"
+                        >
+                          얇은 증거
+                        </span>
+                      )}
+                    </div>
+                    <div className="text-xs text-gray-500">{p.category_top}</div>
+                  </div>
+                  <div className="col-span-1 text-right font-mono text-xs">
+                    <DeltaBadge delta={delta} relRank={relRank} hasShrink={sh != null} />
+                  </div>
+                  <div className="col-span-1 text-right font-mono font-bold">{s!.final_score}</div>
+                  <div className="col-span-1 text-right font-mono text-gray-700">
+                    {sh ? sh.shrunk_score : '–'}
+                  </div>
+                  <div className="col-span-1 text-right font-mono text-xs text-gray-500">{n ?? '–'}</div>
+                  <div className="col-span-1 text-right font-mono text-gray-600">{s!.trend_score}</div>
+                  <div className="col-span-1 text-right font-mono text-gray-600">{s!.commerce_score}</div>
+                  <div className="col-span-1 text-right font-mono text-gray-600">{s!.supplier_score}</div>
+                </Link>
+              )
+            })}
           </div>
         )}
       </section>
     </div>
+  )
+}
+
+function DeltaBadge({ delta, relRank, hasShrink }: { delta: number; relRank: number; hasShrink: boolean }) {
+  if (!hasShrink) return <span className="text-gray-300">–</span>
+  if (delta === 0) return <span className="text-gray-400">→{relRank}</span>
+  const up = delta > 0
+  return (
+    <span
+      title={`신뢰보정 순위 ${relRank}위 (raw 대비 ${up ? '상승' : '하락'} ${Math.abs(delta)})`}
+      className={up ? 'text-emerald-600' : 'text-red-600'}
+    >
+      {up ? '▲' : '▼'}
+      {Math.abs(delta)} →{relRank}
+    </span>
   )
 }
 
