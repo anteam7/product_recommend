@@ -83,7 +83,7 @@ AS $$
   ord AS (
     SELECT
       m.cluster_id,
-      COALESCE(SUM(o.quantity), 0)::int AS order_qty,
+      COALESCE(SUM(o.shipping_count), 0)::int AS order_qty,
       COALESCE(SUM(o.order_price), 0)::numeric AS order_revenue
     FROM (SELECT DISTINCT cluster_id, seller_product_id FROM matched) m
     JOIN jimscanner_coupang_orders o
