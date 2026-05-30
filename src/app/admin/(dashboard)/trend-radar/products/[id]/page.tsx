@@ -1,6 +1,8 @@
 import Link from 'next/link'
 import { notFound } from 'next/navigation'
 import { createAdminClient } from '@/lib/auth/admin-supabase'
+import { classifyKeywords } from '@/lib/query-modifier'
+import { IntentChips } from '@/components/intent-chips'
 
 export const dynamic = 'force-dynamic'
 
@@ -72,6 +74,10 @@ export default async function ProductDetailPage({
   if (!data) notFound()
   const { product, aliases, scoreHistory } = data
   const latest = scoreHistory[0]
+  const intent = classifyKeywords([
+    product.canonical_name,
+    ...aliases.map((a) => a.alias),
+  ])
 
   return (
     <div className="space-y-6 p-6">
@@ -107,6 +113,22 @@ export default async function ProductDetailPage({
           )}
         </div>
       </header>
+
+      {/* 인텐트 구성 (alias 수식어 기반) */}
+      {intent.chips.length > 0 && (
+        <section>
+          <h2 className="text-sm font-semibold mb-2">
+            인텐트 구성{' '}
+            <Link
+              href="/admin/trend-radar/modifier-map"
+              className="text-xs font-normal text-gray-400 hover:text-black"
+            >
+              (수식어 트리 →)
+            </Link>
+          </h2>
+          <IntentChips chips={intent.chips} max={24} />
+        </section>
+      )}
 
       {/* 4점수 카드 */}
       {latest && (
