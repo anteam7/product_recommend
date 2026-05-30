@@ -140,9 +140,14 @@ export default async function RecommendPage({
             ggsan 도매 카탈로그 × TV 편성 시그널 × 검색·쇼핑 시그널 — 임박특가 보너스 적용
           </p>
         </div>
-        <Link href="/admin/trend-radar" className="text-sm text-gray-700 hover:text-black underline">
-          ← 대시보드
-        </Link>
+        <div className="flex items-center gap-3">
+          <Link href="/admin/trend-radar/coverage" className="text-sm text-indigo-700 hover:text-indigo-900 underline">
+            🗺 커버리지·자기잠식 맵 →
+          </Link>
+          <Link href="/admin/trend-radar" className="text-sm text-gray-700 hover:text-black underline">
+            ← 대시보드
+          </Link>
+        </div>
       </header>
 
       {/* 알림: V0 한계 */}
