@@ -193,13 +193,33 @@ async function bumpCounter(day, delta) {
 }
 
 async function fetchCandidates() {
-  const { data } = await sb
+  // 트리아지 RPC — 교차소스 빈도 × 최근 출현 기울기 × 커머스 어휘 매칭 으로
+  // 미분류 신호를 기대가치(EV) 순 랭킹. 희소한 토큰 예산을 고가치 신호부터 태운다.
+  const { data, error } = await sb.rpc('jimscanner_classification_triage', {
+    p_limit: PRODUCT_FETCH_LIMIT,
+  })
+  if (!error && Array.isArray(data) && data.length > 0) {
+    return data.map((r) => ({
+      id: r.product_id,
+      canonical_name: r.canonical_name,
+      category_top: r.category_top,
+      alias_count: r.alias_count,
+      ev_score: r.ev_score,
+      source_count: r.source_count,
+      commerce_hits: r.commerce_hits,
+    }))
+  }
+  if (error) {
+    console.warn(`  triage RPC 미적용 (${error.message}) — updated_at 시간순 폴백`)
+  }
+  // 폴백: RPC 미배포 시 기존 시간순
+  const { data: fb } = await sb
     .from('jimscanner_trends_products')
     .select('id, canonical_name, category_top, alias_count, llm_classified_at, updated_at')
     .is('llm_classified_at', null)
     .order('updated_at', { ascending: false })
     .limit(PRODUCT_FETCH_LIMIT)
-  return data ?? []
+  return fb ?? []
 }
 
 async function fetchSampleAliases(productIds) {
@@ -277,7 +297,15 @@ async function main() {
     return
   }
 
-  console.log(`  candidates: ${candidates.length}`)
+  const hasEv = typeof candidates[0]?.ev_score === 'number'
+  console.log(`  candidates: ${candidates.length}${hasEv ? ' (EV 트리아지 순)' : ' (시간순 폴백)'}`)
+  if (hasEv) {
+    const top = candidates
+      .slice(0, 3)
+      .map((c) => `${c.canonical_name}(EV=${c.ev_score})`)
+      .join(', ')
+    console.log(`  top EV: ${top}`)
+  }
 
   const aliasMap = await fetchSampleAliases(candidates.map((c) => c.id))
 
@@ -352,6 +380,17 @@ async function main() {
     duration_ms: Date.now() - t0,
     error_message: lastError,
   })
+
+  // 기회비용: 이번 실행에서 닿지 못한(예산 소진) 상위 EV 신호
+  const reached = reqCount * BATCH_SIZE
+  const unreached = candidates.slice(reached)
+  if (hasEv && unreached.length > 0) {
+    const topMissed = unreached
+      .slice(0, 3)
+      .map((c) => `${c.canonical_name}(EV=${c.ev_score})`)
+      .join(', ')
+    console.log(`  미처리(예산 소진) ${unreached.length}건 — 상위: ${topMissed}`)
+  }
 
   console.log(
     `[${new Date().toISOString()}] done — ${reqCount} req, ${allResults.length} classified, $${totalCostUsd.toFixed(4)}, ${Date.now() - t0}ms`,
