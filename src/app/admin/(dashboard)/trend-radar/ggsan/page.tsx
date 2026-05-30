@@ -50,6 +50,38 @@ type SortKey = (typeof SORT_OPTIONS)[number]['v']
 
 const PAGE_SIZE = 60
 
+// ── 소싱 안정성 (셀스루 회전율 보드) ─────────────────────────────
+interface SellthroughRow {
+  goods_no: string
+  title: string
+  cate_cd: string | null
+  cate_label: string | null
+  price_krw: number | null
+  image_url: string | null
+  detail_url: string | null
+  current_status: string | null
+  observation_days: number
+  observation_count: number
+  soldout_entries: number
+  avg_stock_days: number | null
+  sellthrough_velocity: number
+  restock_count: number
+  avg_restock_lead_days: number | null
+  is_removed: boolean
+  restock_reliability: number
+}
+
+async function fetchSellthrough(): Promise<{ rows: SellthroughRow[]; error: string | null }> {
+  const sb = createAdminClient()
+  // RPC는 DB(supabase/ggsan_sellthrough_rpc.sql)에 존재하나 generated 타입 미반영 — gen:types 시 캐스팅 제거
+  const { data, error } = await sb.rpc('jimscanner_ggsan_sellthrough_rpc' as never, {
+    days_window: 90,
+    result_limit: 300,
+  } as never)
+  if (error) return { rows: [], error: error.message }
+  return { rows: (data ?? []) as SellthroughRow[], error: null }
+}
+
 async function fetchData(opts: {
   cat: string
   imminent: boolean
@@ -112,7 +144,7 @@ function buildHref(current: Record<string, string>, override: Record<string, str
 export default async function GgsanPage({
   searchParams,
 }: {
-  searchParams: Promise<{ cat?: string; imminent?: string; q?: string; sort?: string; page?: string }>
+  searchParams: Promise<{ cat?: string; imminent?: string; q?: string; sort?: string; page?: string; view?: string }>
 }) {
   const sp = await searchParams
   const cat = sp.cat ?? ''
@@ -120,12 +152,14 @@ export default async function GgsanPage({
   const q = sp.q ?? ''
   const sort = (SORT_OPTIONS.some((s) => s.v === sp.sort) ? sp.sort : 'recent') as SortKey
   const page = Math.max(1, parseInt(sp.page ?? '1', 10) || 1)
+  const view = sp.view === 'sourcing' ? 'sourcing' : 'catalog'
 
-  const current: Record<string, string> = { cat, imminent: imminent ? '1' : '', q, sort, page: String(page) }
+  const current: Record<string, string> = { cat, imminent: imminent ? '1' : '', q, sort, page: String(page), view: view === 'sourcing' ? 'sourcing' : '' }
 
-  const [{ products, total }, meta] = await Promise.all([
+  const [{ products, total }, meta, sell] = await Promise.all([
     fetchData({ cat, imminent, q, sort, page }),
     fetchMeta(),
+    view === 'sourcing' ? fetchSellthrough() : Promise.resolve({ rows: [] as SellthroughRow[], error: null as string | null }),
   ])
 
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE))
@@ -159,6 +193,26 @@ export default async function GgsanPage({
         </div>
       )}
 
+      {/* 뷰 토글: 카탈로그 ↔ 소싱 안정성 */}
+      <nav className="flex gap-1 border-b border-gray-200">
+        <Link
+          href={buildHref(current, { view: null, page: null })}
+          className={`px-4 py-2 text-sm border-b-2 ${view === 'catalog' ? 'border-amber-500 font-semibold' : 'border-transparent text-gray-500 hover:text-black'}`}
+        >
+          카탈로그
+        </Link>
+        <Link
+          href={buildHref(current, { view: 'sourcing', page: null })}
+          className={`px-4 py-2 text-sm border-b-2 ${view === 'sourcing' ? 'border-amber-500 font-semibold' : 'border-transparent text-gray-500 hover:text-black'}`}
+        >
+          소싱 안정성 <span className="text-[10px] text-amber-600">셀스루×재입고</span>
+        </Link>
+      </nav>
+
+      {view === 'sourcing' ? (
+        <SourcingBoard rows={sell.rows} error={sell.error} />
+      ) : (
+      <>
       {/* 필터: 카테고리 탭 */}
       <nav className="flex flex-wrap gap-1 border-b border-gray-200">
         <Link
@@ -297,6 +351,139 @@ export default async function GgsanPage({
             </Link>
           )}
         </nav>
+      )}
+      </>
+      )}
+    </div>
+  )
+}
+
+// ── 소싱 안정성 2D 보드 ─────────────────────────────────────────
+// X축 = 셀스루 속도(빠른 소진 = 실수요), Y축 = 재입고 신뢰도(안정 재입고)
+// 우상단: 빠른 소진 + 안정 재입고 = 최우선 소싱
+// 우하단: 빠른 소진 + 불안정 재입고 = 주문폭주 시 미발송 리스크 (경고)
+function SourcingBoard({ rows, error }: { rows: SellthroughRow[]; error: string | null }) {
+  if (error) {
+    return (
+      <div className="rounded border border-red-200 bg-red-50 p-4 text-sm text-red-700">
+        RPC 오류: {error}
+        <p className="mt-1 text-xs text-red-500">
+          supabase/ggsan_sellthrough_rpc.sql 을 DB에 적용했는지 확인하세요.
+        </p>
+      </div>
+    )
+  }
+  if (rows.length === 0) {
+    return (
+      <div className="rounded border border-dashed border-gray-300 p-12 text-center text-gray-500">
+        품절 이력이 있는 상품이 아직 없습니다 (price_history 누적 대기 중).
+      </div>
+    )
+  }
+
+  const maxVel = Math.max(1, ...rows.map((r) => r.sellthrough_velocity))
+  const VEL_MID = maxVel / 2
+
+  // 분류: 우상단(최우선) / 우하단(미발송 리스크) / 좌측(저회전)
+  const priority = rows.filter((r) => r.sellthrough_velocity >= VEL_MID && r.restock_reliability >= 50)
+  const risky = rows.filter((r) => r.sellthrough_velocity >= VEL_MID && r.restock_reliability < 50)
+
+  const xPct = (v: number) => Math.min(98, Math.max(2, (v / maxVel) * 100))
+  const yPct = (r: number) => Math.min(98, Math.max(2, 100 - r)) // reliability 100 → top
+
+  return (
+    <div className="space-y-4">
+      <div className="grid grid-cols-3 gap-3 text-sm">
+        <div className="rounded border border-emerald-200 bg-emerald-50 p-3">
+          <div className="text-xs text-emerald-600">우상단 · 최우선 소싱</div>
+          <div className="text-2xl font-bold text-emerald-700">{priority.length}</div>
+          <div className="text-[11px] text-emerald-600">빠른 소진 + 안정 재입고</div>
+        </div>
+        <div className="rounded border border-red-200 bg-red-50 p-3">
+          <div className="text-xs text-red-600">우하단 · 미발송 리스크</div>
+          <div className="text-2xl font-bold text-red-700">{risky.length}</div>
+          <div className="text-[11px] text-red-600">빠른 소진 + 불안정 재입고</div>
+        </div>
+        <div className="rounded border border-gray-200 bg-gray-50 p-3">
+          <div className="text-xs text-gray-500">관측 대상</div>
+          <div className="text-2xl font-bold text-gray-700">{rows.length}</div>
+          <div className="text-[11px] text-gray-500">최근 90일 품절 이력 SKU</div>
+        </div>
+      </div>
+
+      {/* 2D 산점도 보드 */}
+      <div className="relative w-full rounded border border-gray-200 bg-white" style={{ height: 420 }}>
+        {/* 사분면 배경 */}
+        <div className="absolute inset-0 grid grid-cols-2 grid-rows-2 pointer-events-none">
+          <div className="border-r border-b border-dashed border-gray-200" />
+          <div className="border-b border-dashed border-gray-200 bg-emerald-50/40" />
+          <div className="border-r border-dashed border-gray-200" />
+          <div className="bg-red-50/40" />
+        </div>
+        {/* 축 라벨 */}
+        <span className="absolute top-1 right-2 text-[11px] font-semibold text-emerald-600">↑ 최우선 소싱</span>
+        <span className="absolute bottom-1 right-2 text-[11px] font-semibold text-red-600">⚠ 미발송 리스크</span>
+        <span className="absolute bottom-1 left-2 text-[11px] text-gray-400">셀스루 속도 →</span>
+        <span className="absolute top-1 left-2 text-[11px] text-gray-400">재입고 신뢰도 ↑</span>
+
+        {rows.map((r) => {
+          const isRisk = r.sellthrough_velocity >= VEL_MID && r.restock_reliability < 50
+          const isTop = r.sellthrough_velocity >= VEL_MID && r.restock_reliability >= 50
+          const color = r.is_removed
+            ? 'bg-gray-400'
+            : isRisk
+              ? 'bg-red-500'
+              : isTop
+                ? 'bg-emerald-500'
+                : 'bg-amber-400'
+          return (
+            <a
+              key={r.goods_no}
+              href={r.detail_url ?? '#'}
+              target="_blank"
+              rel="noopener"
+              title={`${r.title}\n셀스루 ${r.sellthrough_velocity}/30일 · 재입고신뢰도 ${r.restock_reliability}\n품절진입 ${r.soldout_entries}회 · 복귀 ${r.restock_count}회 · 리드 ${r.avg_restock_lead_days ?? '-'}일${r.is_removed ? '\n⚠ 영구이탈(removed)' : ''}`}
+              className={`absolute -translate-x-1/2 -translate-y-1/2 w-2.5 h-2.5 rounded-full ${color} hover:ring-2 hover:ring-black/30 hover:scale-150 transition-transform`}
+              style={{ left: `${xPct(r.sellthrough_velocity)}%`, top: `${yPct(r.restock_reliability)}%` }}
+            />
+          )
+        })}
+      </div>
+
+      {/* 미발송 리스크 경고 테이블 */}
+      {risky.length > 0 && (
+        <div className="rounded border border-red-200 overflow-hidden">
+          <div className="bg-red-50 px-3 py-2 text-sm font-semibold text-red-700">
+            ⚠ 미발송 리스크 — 주문 폭주 시 발송 불가 가능 ({risky.length})
+          </div>
+          <table className="w-full text-xs">
+            <thead className="bg-gray-50 text-gray-500">
+              <tr>
+                <th className="px-2 py-1 text-left">상품</th>
+                <th className="px-2 py-1 text-right">셀스루/30일</th>
+                <th className="px-2 py-1 text-right">재입고신뢰도</th>
+                <th className="px-2 py-1 text-right">품절/복귀</th>
+                <th className="px-2 py-1 text-right">평균리드</th>
+              </tr>
+            </thead>
+            <tbody>
+              {risky.slice(0, 30).map((r) => (
+                <tr key={r.goods_no} className="border-t border-gray-100 hover:bg-red-50/50">
+                  <td className="px-2 py-1">
+                    <a href={r.detail_url ?? '#'} target="_blank" rel="noopener" className="hover:underline line-clamp-1" title={r.title}>
+                      {r.is_removed && <span className="text-gray-400">[이탈] </span>}
+                      {r.title}
+                    </a>
+                  </td>
+                  <td className="px-2 py-1 text-right font-mono">{r.sellthrough_velocity}</td>
+                  <td className="px-2 py-1 text-right font-mono text-red-600">{r.restock_reliability}</td>
+                  <td className="px-2 py-1 text-right font-mono">{r.soldout_entries}/{r.restock_count}</td>
+                  <td className="px-2 py-1 text-right font-mono">{r.avg_restock_lead_days ?? '—'}일</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       )}
     </div>
   )
