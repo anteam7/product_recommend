@@ -86,6 +86,12 @@ const NAV_GROUPS: NavGroup[] = [
         icon: '📌',
         match: (p) => p.startsWith('/admin/trend-radar/pins'),
       },
+      {
+        href: '/admin/trend-radar/scoring-lab',
+        label: '점수 What-if 랩',
+        icon: '🎚️',
+        match: (p) => p.startsWith('/admin/trend-radar/scoring-lab'),
+      },
     ],
   },
   {

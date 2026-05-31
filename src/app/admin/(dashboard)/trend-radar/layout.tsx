@@ -14,6 +14,7 @@ const NAV = [
   { href: '/admin/trend-radar/synonyms', label: '의미군' },
   { href: '/admin/trend-radar/pins', label: '핀' },
   { href: '/admin/trend-radar/sources', label: '소스 헬스' },
+  { href: '/admin/trend-radar/scoring-lab', label: '점수 What-if 랩' },
 ]
 
 export default function TrendRadarLayout({ children }: { children: React.ReactNode }) {
