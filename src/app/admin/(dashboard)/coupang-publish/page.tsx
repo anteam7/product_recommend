@@ -111,10 +111,16 @@ async function fetchData(opts: {
 async function fetchCronStatus() {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const sb = createAdminClient() as any
-  const [stockRun, ordersAggResp, ordersCountResp] = await Promise.all([
+  const [stockRun, ordersRun, ordersAggResp, ordersCountResp] = await Promise.all([
     sb
       .from('jimscanner_coupang_stock_sync_runs')
       .select('started_at, status, total_checked, sold_out_count, resumed_count, error_count, duration_ms')
+      .order('started_at', { ascending: false })
+      .limit(1)
+      .maybeSingle(),
+    sb
+      .from('jimscanner_coupang_orders_sync_runs')
+      .select('started_at, status, total_fetched, inserted_count, error_count, duration_ms')
       .order('started_at', { ascending: false })
       .limit(1)
       .maybeSingle(),
@@ -128,6 +134,8 @@ async function fetchCronStatus() {
   ])
   return {
     stock: stockRun.data,
+    // orders_sync_runs 테이블 생성 전이면 null → 위젯이 최근주문시각 fallback
+    ordersRun: ordersRun.data ?? null,
     ordersLastSync: ordersAggResp.data?.last_synced_at ?? null,
     ordersTotal: ordersCountResp.count ?? 0,
   }
@@ -235,14 +243,23 @@ export default async function CoupangPublishPage({
         <div className="bg-white border rounded p-3">
           <div className="flex items-baseline justify-between mb-2">
             <span className="text-xs font-semibold text-gray-500">📦 Orders-Sync (시간당)</span>
-            {cronStatus.ordersLastSync ? (
+            {cronStatus.ordersRun?.status === 'error' ? (
+              <span className="text-[10px] bg-rose-100 text-rose-700 px-1.5 py-0.5 rounded">에러</span>
+            ) : cronStatus.ordersRun || cronStatus.ordersLastSync ? (
               <span className="text-[10px] bg-emerald-100 text-emerald-700 px-1.5 py-0.5 rounded">정상</span>
             ) : (
               <span className="text-[10px] bg-gray-100 text-gray-500 px-1.5 py-0.5 rounded">대기</span>
             )}
           </div>
           <div className="text-xs text-gray-700 space-y-0.5">
-            <div>마지막 sync: <strong>{fmtDate(cronStatus.ordersLastSync)}</strong></div>
+            {cronStatus.ordersRun ? (
+              <>
+                <div>마지막 실행: <strong>{fmtDate(cronStatus.ordersRun.started_at)}</strong> ({((cronStatus.ordersRun.duration_ms ?? 0) / 1000).toFixed(1)}s)</div>
+                <div>조회 <strong>{cronStatus.ordersRun.total_fetched ?? 0}</strong> · 신규 {cronStatus.ordersRun.inserted_count ?? 0} · 에러 {cronStatus.ordersRun.error_count ?? 0}</div>
+              </>
+            ) : (
+              <div>최근 주문 동기화: <strong>{fmtDate(cronStatus.ordersLastSync)}</strong></div>
+            )}
             <div>누적 주문: <strong>{cronStatus.ordersTotal.toLocaleString()}</strong> · <a href="/admin/coupang-orders" className="text-blue-600 hover:underline">→ 주문 관리</a></div>
           </div>
         </div>
