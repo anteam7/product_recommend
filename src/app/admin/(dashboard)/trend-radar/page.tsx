@@ -216,6 +216,27 @@ export default async function TrendRadarPage({
         </div>
       </Link>
 
+      {/* 🕸️ 수요 공출현 네트워크 callout */}
+      <Link
+        href="/admin/trend-radar/cooccurrence"
+        className="block rounded border border-gray-200 px-4 py-3 transition-colors hover:bg-gray-50"
+      >
+        <div className="flex items-center justify-between flex-wrap gap-2">
+          <div>
+            <div className="text-sm font-semibold">
+              🕸️ 수요 공출현 네트워크{' '}
+              <span className="text-xs font-normal text-gray-500 ml-1">
+                한 글 안에서 함께 언급된 상품 — 번들·인접수요 발굴
+              </span>
+            </div>
+            <div className="text-xs text-gray-600 mt-0.5">
+              뉴스·커뮤니티·트렌드 텍스트 동시언급(PMI 보정) → 번들 구성 후보 + 인접수요 신규 큐
+            </div>
+          </div>
+          <span className="text-xs text-gray-500">네트워크 보러가기 →</span>
+        </div>
+      </Link>
+
       {/* TV 편성 push Top 20 */}
       <section className="rounded border border-gray-200 p-4 bg-amber-50/40">
         <div className="flex items-baseline justify-between mb-3">
