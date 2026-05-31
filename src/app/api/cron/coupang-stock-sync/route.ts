@@ -92,11 +92,12 @@ async function checkStock(goodsNo: string): Promise<'in_stock' | 'sold_out' | 'u
   const r = await ggsanFetch(`${BASE}/goods/goods_view.php?goodsNo=${goodsNo}`)
   if (!r.ok) return 'unknown'
   const html = await r.text()
-  // 품절 마커: 메인 상품 영역의 "품절", "soldout", "재고없음" 표시
-  // godo5 케이스: 가격 영역이 사라지고 "재입고 알림" 버튼 노출
-  if (/재입고\s*알림|품절|매진|일시품절|판매\s*중지/.test(html.slice(0, 30000))) return 'sold_out'
-  // 정상: set_goods_price hidden input 존재 + 가격 표시
-  if (/name=["']set_goods_price["'][^>]*value=["'](\d+)/.test(html)) return 'in_stock'
+  // set_goods_price 양수 = 구매가능 = 재고 있음. 품절시 가격영역이 사라지므로(godo5) 가장 신뢰성 높은 신호 → 품절 마커보다 먼저 평가.
+  const pm = /name=["']set_goods_price["'][^>]*value=["'](\d+)/.exec(html)
+  if (pm && parseInt(pm[1], 10) > 0) return 'in_stock'
+  // 가격 없음 → 품절 마커(재입고 알림 버튼 등). 단, 네비 "입고&품절제품" 게시판 링크의 "품절" 오탐 제거(ggsan 메뉴, 2026-05-31 추가).
+  const body = html.replace(/입고\s*&[^<]{0,12}품절[^<]{0,8}/g, ' ')
+  if (/재입고\s*알림|품절|매진|일시품절|판매\s*중지/.test(body.slice(0, 40000))) return 'sold_out'
   return 'unknown'
 }
 
