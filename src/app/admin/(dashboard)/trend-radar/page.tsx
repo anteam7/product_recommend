@@ -152,12 +152,20 @@ export default async function TrendRadarPage({
             위탁 판매 상품 발굴 · 30일 누적 후 4점수 정확도 ↑
           </p>
         </div>
-        <Link
-          href="/admin/trend-radar/sources"
-          className="text-sm text-gray-700 hover:text-black underline"
-        >
-          소스 헬스 →
-        </Link>
+        <div className="flex gap-3 text-sm">
+          <Link
+            href="/admin/trend-radar/market-size"
+            className="text-gray-700 hover:text-black underline"
+          >
+            💰 예상 시장규모(원)
+          </Link>
+          <Link
+            href="/admin/trend-radar/sources"
+            className="text-gray-700 hover:text-black underline"
+          >
+            소스 헬스 →
+          </Link>
+        </div>
       </header>
 
       {/* KPI 5종 */}
