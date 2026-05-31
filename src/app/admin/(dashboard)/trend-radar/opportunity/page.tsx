@@ -33,7 +33,7 @@ async function fetchData() {
   }
 
   const ids = latest.map((s) => s.product_id)
-  if (ids.length === 0) return { rows: [] }
+  if (ids.length === 0) return { rows: [], risk: { red: [], opportunity: [] } }
 
   const { data: prods } = await sb
     .from('jimscanner_trends_products')
@@ -41,25 +41,44 @@ async function fetchData() {
     .in('id', ids)
   const byId = new Map((prods ?? []).map((p: any) => [p.id, p]))
 
+  // 규제·리콜 리스크 오버레이 (compliance_flags)
+  const { data: flags } = await (sb as any)
+    .from('jimscanner_compliance_flags')
+    .select('product_id, risk_flag, opportunity, top_risk_type')
+    .in('product_id', ids)
+  const riskById = new Map(
+    ((flags ?? []) as any[]).map((f) => [f.product_id, f]),
+  )
+
+  const rows = latest.map((s) => {
+    const p = byId.get(s.product_id) ?? {}
+    const f = riskById.get(s.product_id)
+    return {
+      id: s.product_id,
+      name: (p as any).canonical_name ?? '?',
+      category: (p as any).category_top ?? 'all',
+      x: s.competition_score,        // 경쟁 약함 → 점수 높음 → 오른쪽
+      y: s.trend_score,              // 트렌드 강함 → 위
+      size: Math.max(50, s.commerce_score * 4),
+      final: s.final_score,
+      supplier: s.supplier_score,
+      risk_flag: (f?.risk_flag ?? 'green') as 'green' | 'yellow' | 'red',
+      opportunity: !!f?.opportunity,
+      top_risk_type: (f?.top_risk_type ?? null) as string | null,
+    }
+  })
+
   return {
-    rows: latest.map((s) => {
-      const p = byId.get(s.product_id) ?? {}
-      return {
-        id: s.product_id,
-        name: (p as any).canonical_name ?? '?',
-        category: (p as any).category_top ?? 'all',
-        x: s.competition_score,        // 경쟁 약함 → 점수 높음 → 오른쪽
-        y: s.trend_score,              // 트렌드 강함 → 위
-        size: Math.max(50, s.commerce_score * 4),
-        final: s.final_score,
-        supplier: s.supplier_score,
-      }
-    }),
+    rows,
+    risk: {
+      red: rows.filter((r) => r.risk_flag === 'red'),
+      opportunity: rows.filter((r) => r.opportunity),
+    },
   }
 }
 
 export default async function OpportunityPage() {
-  const { rows } = await fetchData()
+  const { rows, risk } = await fetchData()
 
   return (
     <div className="space-y-6 p-6">
@@ -74,6 +93,26 @@ export default async function OpportunityPage() {
           ← 대시보드
         </Link>
       </header>
+
+      {(risk.red.length > 0 || risk.opportunity.length > 0) && (
+        <div className="flex flex-wrap gap-3 text-sm">
+          {risk.red.length > 0 && (
+            <div className="rounded border border-rose-200 bg-rose-50 px-3 py-2 text-rose-800">
+              ⚠️ 규제·리콜 격리 {risk.red.length}건 —{' '}
+              {risk.red.slice(0, 4).map((r) => r.name).join(', ')}
+              {risk.red.length > 4 && ' …'}
+              {'  '}
+              <Link href="/admin/trend-radar/compliance" className="underline">자세히</Link>
+            </div>
+          )}
+          {risk.opportunity.length > 0 && (
+            <div className="rounded border border-emerald-200 bg-emerald-50 px-3 py-2 text-emerald-800">
+              🎯 리콜 공백 선점 {risk.opportunity.length}건{'  '}
+              <Link href="/admin/trend-radar/compliance" className="underline">자세히</Link>
+            </div>
+          )}
+        </div>
+      )}
 
       {rows.length === 0 ? (
         <div className="rounded border border-dashed border-gray-300 p-12 text-center text-gray-500">

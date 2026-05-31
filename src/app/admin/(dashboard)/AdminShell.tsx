@@ -86,6 +86,12 @@ const NAV_GROUPS: NavGroup[] = [
         icon: '📌',
         match: (p) => p.startsWith('/admin/trend-radar/pins'),
       },
+      {
+        href: '/admin/trend-radar/compliance',
+        label: '규제·리콜 리스크',
+        icon: '⚠️',
+        match: (p) => p.startsWith('/admin/trend-radar/compliance'),
+      },
     ],
   },
   {
