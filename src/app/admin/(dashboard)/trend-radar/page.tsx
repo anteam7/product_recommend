@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react'
 import Link from 'next/link'
 import { createAdminClient } from '@/lib/auth/admin-supabase'
 
@@ -29,6 +30,38 @@ interface ScoreRow {
   final_score: number
   computed_at: string
   score_components?: any
+}
+
+interface BriefingPayload {
+  movers?: {
+    up?: { product_id: string; name: string; prev: number; curr: number; delta: number }[]
+    down?: { product_id: string; name: string; prev: number; curr: number; delta: number }[]
+  }
+  entries?: {
+    entered?: { product_id: string; name: string; score: number }[]
+    exited?: { product_id: string; name: string }[]
+  }
+  ggsan?: { goods_no: string; title: string; final_score: number; is_imminent: boolean; detail_url: string | null }[]
+  alerts?: { kind: string; severity: string; message: string }[]
+  backlog?: { unclassified: number; delta: number | null }
+}
+interface BriefingRow {
+  briefing_date: string
+  payload: BriefingPayload
+  narrative: string | null
+  computed_at: string
+}
+
+async function fetchBriefing(): Promise<BriefingRow | null> {
+  const sb = createAdminClient()
+  // jimscanner_trends_briefings 는 generated 타입 미반영 — supabase/trends_briefings.sql 적용 후 `as any` 캐스팅.
+  const { data } = await (sb as any)
+    .from('jimscanner_trends_briefings')
+    .select('briefing_date, payload, narrative, computed_at')
+    .order('briefing_date', { ascending: false })
+    .limit(1)
+    .maybeSingle()
+  return (data as BriefingRow | null) ?? null
 }
 
 async function fetchTvGgsanMatchSummary() {
@@ -132,10 +165,11 @@ export default async function TrendRadarPage({
   const sp = await searchParams
   const category = (CATEGORIES.includes(sp.cat as Category) ? sp.cat : 'all') as Category
 
-  const [{ products, scores, kpis }, tvPushes, tvGgsan] = await Promise.all([
+  const [{ products, scores, kpis }, tvPushes, tvGgsan, briefing] = await Promise.all([
     fetchData(category),
     fetchTvPushes(),
     fetchTvGgsanMatchSummary(),
+    fetchBriefing(),
   ])
 
   const sorted = products
@@ -159,6 +193,9 @@ export default async function TrendRadarPage({
           소스 헬스 →
         </Link>
       </header>
+
+      {/* 🌅 오늘의 브리핑 — 24h Δ 다이제스트 */}
+      <BriefingCard briefing={briefing} />
 
       {/* KPI 5종 */}
       <section className="grid grid-cols-2 md:grid-cols-5 gap-4">
@@ -303,6 +340,119 @@ export default async function TrendRadarPage({
           </div>
         )}
       </section>
+    </div>
+  )
+}
+
+function BriefingCard({ briefing }: { briefing: BriefingRow | null }) {
+  if (!briefing) {
+    return (
+      <section className="rounded border border-dashed border-gray-300 px-4 py-3 text-sm text-gray-500">
+        🌅 오늘의 브리핑 — 아직 생성 전. 다음 로컬 cron(<code className="px-1 bg-gray-100 rounded text-xs">run-crons.mjs</code>)에서 자동 합성됩니다.
+      </section>
+    )
+  }
+  const p = briefing.payload ?? {}
+  const up = p.movers?.up ?? []
+  const down = p.movers?.down ?? []
+  const entered = p.entries?.entered ?? []
+  const exited = p.entries?.exited ?? []
+  const ggsan = p.ggsan ?? []
+  const alerts = p.alerts ?? []
+  const backlog = p.backlog
+  const prodHref = (id: string) => `/admin/trend-radar/products/${id}`
+
+  return (
+    <section className="rounded-lg border border-indigo-200 bg-indigo-50/40 p-4 space-y-3">
+      <div className="flex items-baseline justify-between flex-wrap gap-2">
+        <h2 className="text-sm font-semibold text-indigo-900">
+          🌅 오늘의 브리핑{' '}
+          <span className="text-xs font-normal text-gray-500 ml-1">{briefing.briefing_date} · 24h Δ 자동 감지</span>
+        </h2>
+        <span className="text-xs text-gray-400">합성 {briefing.computed_at.slice(5, 16).replace('T', ' ')}</span>
+      </div>
+
+      {briefing.narrative && (
+        <p className="text-sm text-gray-800 leading-relaxed whitespace-pre-line">{briefing.narrative}</p>
+      )}
+
+      {alerts.length > 0 && (
+        <Link href="/admin/trend-radar/sources" className="block rounded border border-red-300 bg-red-50 px-3 py-2 hover:bg-red-100">
+          {alerts.map((a, i) => (
+            <div key={i} className="text-xs text-red-800">
+              ⚠ {a.message}
+            </div>
+          ))}
+          <div className="text-[10px] text-red-500 mt-1">소스 헬스 보기 →</div>
+        </Link>
+      )}
+
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+        {/* 상승 무버 */}
+        <BriefingColumn title="📈 상승 무버" empty={up.length === 0}>
+          {up.map((m) => (
+            <Link key={m.product_id} href={prodHref(m.product_id)} className="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-white text-xs">
+              <span className="truncate">{m.name}</span>
+              <span className="font-mono font-bold text-emerald-700 flex-shrink-0">+{m.delta}</span>
+            </Link>
+          ))}
+        </BriefingColumn>
+
+        {/* 하락 무버 */}
+        <BriefingColumn title="📉 하락 무버" empty={down.length === 0}>
+          {down.map((m) => (
+            <Link key={m.product_id} href={prodHref(m.product_id)} className="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-white text-xs">
+              <span className="truncate">{m.name}</span>
+              <span className="font-mono font-bold text-red-700 flex-shrink-0">{m.delta}</span>
+            </Link>
+          ))}
+        </BriefingColumn>
+
+        {/* 신규 진입 / 이탈 */}
+        <BriefingColumn title={`🆕 Top 진입 ${entered.length} / 이탈 ${exited.length}`} empty={entered.length === 0 && exited.length === 0}>
+          {entered.slice(0, 5).map((m) => (
+            <Link key={m.product_id} href={prodHref(m.product_id)} className="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-white text-xs">
+              <span className="truncate text-indigo-800">↑ {m.name}</span>
+              <span className="font-mono text-gray-500 flex-shrink-0">{m.score}</span>
+            </Link>
+          ))}
+          {exited.slice(0, 3).map((m) => (
+            <Link key={m.product_id} href={prodHref(m.product_id)} className="px-2 py-1 rounded hover:bg-white text-xs text-gray-400 truncate block">
+              ↓ {m.name}
+            </Link>
+          ))}
+        </BriefingColumn>
+      </div>
+
+      {/* ggsan 교차 매치 + 적체 */}
+      <div className="flex flex-wrap items-center gap-2 pt-1 border-t border-indigo-100">
+        {ggsan.length > 0 && (
+          <Link href="/admin/trend-radar/recommend" className="text-xs bg-amber-100 text-amber-800 px-2 py-1 rounded hover:bg-amber-200">
+            🛒 ggsan 교차 후보 {ggsan.length}건
+            {ggsan[0] && <span className="ml-1 text-amber-700">· 최상위 {ggsan[0].title.slice(0, 14)} ({ggsan[0].final_score})</span>}
+            <span className="ml-1">→</span>
+          </Link>
+        )}
+        {backlog && (
+          <span className="text-xs text-gray-500">
+            미분류 적체 {backlog.unclassified.toLocaleString()}건
+            {backlog.delta != null && backlog.delta !== 0 && (
+              <span className={backlog.delta > 0 ? 'text-red-600 ml-1' : 'text-emerald-600 ml-1'}>
+                ({backlog.delta > 0 ? '+' : ''}{backlog.delta})
+              </span>
+            )}
+          </span>
+        )}
+      </div>
+    </section>
+  )
+}
+
+function BriefingColumn({ title, empty, children }: { title: string; empty: boolean; children: ReactNode }) {
+  return (
+    <div className="rounded border border-indigo-100 bg-white/60 p-2">
+      <div className="text-xs font-semibold text-gray-600 mb-1 px-1">{title}</div>
+      {empty ? <div className="text-xs text-gray-400 px-2 py-1">변화 없음</div> : <div className="space-y-0.5">{children}</div>}
     </div>
   )
 }

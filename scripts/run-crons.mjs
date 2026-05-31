@@ -144,4 +144,25 @@ if (!skipClassify) {
   if (classifyExit !== 0) failCount++
 }
 
+// build-daily-briefing: 아침 발굴 브리핑 빌더 (24h Δ 다이제스트).
+//   classify 와 동일하게 filter / --no-classify 시 건너뜀.
+//   --no-briefing 플래그도 지원.
+const skipBriefing = args.includes('--no-briefing') || !!filter
+if (!skipBriefing) {
+  console.log(`[${new Date().toISOString()}] launching build-daily-briefing`)
+  const briefingPath = resolvePath(__dirname, 'build-daily-briefing.mjs')
+  const briefingExit = await new Promise((resolve) => {
+    const child = spawn(process.execPath, [briefingPath], {
+      stdio: 'inherit',
+      env: process.env,
+    })
+    child.on('exit', (code) => resolve(code ?? 0))
+    child.on('error', (err) => {
+      console.error(`  briefing spawn error: ${err.message}`)
+      resolve(1)
+    })
+  })
+  if (briefingExit !== 0) failCount++
+}
+
 process.exit(failCount > 0 ? 1 : 0)
