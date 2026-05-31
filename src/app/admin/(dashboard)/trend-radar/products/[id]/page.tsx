@@ -36,9 +36,15 @@ interface ScoreRow {
   computed_at: string
 }
 
+interface GapToken {
+  tok: string
+  vol: number
+  src: string[]
+}
+
 async function fetchProduct(id: string) {
   const sb = createAdminClient()
-  const [prodRes, aliasRes, scoreRes] = await Promise.all([
+  const [prodRes, aliasRes, scoreRes, gapRes] = await Promise.all([
     sb.from('jimscanner_trends_products').select('*').eq('id', id).single(),
     sb
       .from('jimscanner_trends_aliases')
@@ -51,14 +57,25 @@ async function fetchProduct(id: string) {
       .eq('product_id', id)
       .order('computed_at', { ascending: false })
       .limit(30),
+    // 제목 화이트스페이스: 이 상품의 검색어 토큰 ∖ 경쟁사 제목 토큰
+    (sb as any).rpc('jimscanner_title_keyword_gap', {
+      min_volume: 0,
+      result_limit: 200,
+      target_product: id,
+    }),
   ])
 
   if (prodRes.error || !prodRes.data) return null
+
+  const gapTokens: GapToken[] = ((gapRes?.data ?? []) as any[])
+    .map((r) => ({ tok: r.gap_token, vol: Number(r.volume) || 0, src: r.source_keywords ?? [] }))
+    .sort((a, b) => b.vol - a.vol)
 
   return {
     product: prodRes.data as ProductRow,
     aliases: (aliasRes.data ?? []) as AliasRow[],
     scoreHistory: (scoreRes.data ?? []) as ScoreRow[],
+    gapTokens,
   }
 }
 
@@ -70,8 +87,9 @@ export default async function ProductDetailPage({
   const { id } = await params
   const data = await fetchProduct(id)
   if (!data) notFound()
-  const { product, aliases, scoreHistory } = data
+  const { product, aliases, scoreHistory, gapTokens } = data
   const latest = scoreHistory[0]
+  const gapTotal = gapTokens.reduce((s, t) => s + t.vol, 0)
 
   return (
     <div className="space-y-6 p-6">
@@ -161,6 +179,44 @@ export default async function ProductDetailPage({
           </pre>
         </section>
       )}
+
+      {/* 제목 화이트스페이스 (추천 제목 토큰) */}
+      <section>
+        <h2 className="text-sm font-semibold mb-2">
+          추천 제목 토큰 — 제목 화이트스페이스 ({gapTokens.length})
+          {gapTotal > 0 && (
+            <span className="ml-2 text-xs font-normal text-gray-500">
+              총검색량 {gapTotal.toFixed(0)}
+            </span>
+          )}
+        </h2>
+        <p className="text-xs text-gray-500 mb-2">
+          실제 검색어엔 있으나 경쟁사 제목엔 빠진 토큰. 제목에 끼워 넣으면 저비용 상위노출 여지.{' '}
+          <Link href="/admin/trend-radar/title-gap" className="underline hover:text-black">
+            전체 보드 →
+          </Link>
+        </p>
+        {gapTokens.length === 0 ? (
+          <div className="rounded border border-dashed border-gray-300 p-4 text-center text-xs text-gray-400">
+            화이트스페이스 토큰 없음 (검색어/제목 alias 부족 또는 마이그레이션 미적용).
+          </div>
+        ) : (
+          <div className="flex flex-wrap gap-1.5">
+            {gapTokens.map((t) => (
+              <span
+                key={t.tok}
+                title={t.src.length ? `검색어: ${t.src.join(', ')}` : undefined}
+                className="inline-flex items-center gap-1 rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-xs text-amber-800"
+              >
+                {t.tok}
+                {t.vol > 0 && (
+                  <span className="text-[10px] font-mono text-amber-500">{t.vol.toFixed(0)}</span>
+                )}
+              </span>
+            ))}
+          </div>
+        )}
+      </section>
 
       {/* aliases */}
       <section>
