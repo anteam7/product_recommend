@@ -35,10 +35,18 @@ interface ScoreRow {
   score_components: any
   computed_at: string
 }
+interface SentimentRow {
+  polarity: 'positive' | 'negative' | 'neutral'
+  defect_terms: string[] | null
+  evidence_snippet: string | null
+  source: string | null
+  mention_count: number
+  computed_at: string
+}
 
 async function fetchProduct(id: string) {
   const sb = createAdminClient()
-  const [prodRes, aliasRes, scoreRes] = await Promise.all([
+  const [prodRes, aliasRes, scoreRes, sentimentRes] = await Promise.all([
     sb.from('jimscanner_trends_products').select('*').eq('id', id).single(),
     sb
       .from('jimscanner_trends_aliases')
@@ -51,6 +59,13 @@ async function fetchProduct(id: string) {
       .eq('product_id', id)
       .order('computed_at', { ascending: false })
       .limit(30),
+    // jimscanner_trends_sentiment 은 마이그레이션 후 생성 (as any 로 타입 우회)
+    (sb as any)
+      .from('jimscanner_trends_sentiment')
+      .select('polarity, defect_terms, evidence_snippet, source, mention_count, computed_at')
+      .eq('product_id', id)
+      .order('computed_at', { ascending: false })
+      .limit(1),
   ])
 
   if (prodRes.error || !prodRes.data) return null
@@ -59,7 +74,14 @@ async function fetchProduct(id: string) {
     product: prodRes.data as ProductRow,
     aliases: (aliasRes.data ?? []) as AliasRow[],
     scoreHistory: (scoreRes.data ?? []) as ScoreRow[],
+    sentiment: ((sentimentRes.data ?? [])[0] ?? null) as SentimentRow | null,
   }
+}
+
+const POLARITY_STYLE: Record<string, { label: string; cls: string }> = {
+  positive: { label: '✅ 입소문 구동', cls: 'bg-emerald-100 text-emerald-700' },
+  negative: { label: '⛔ 하자·불만 구동', cls: 'bg-red-100 text-red-700' },
+  neutral: { label: 'ℹ️ 정보·중립', cls: 'bg-gray-100 text-gray-600' },
 }
 
 export default async function ProductDetailPage({
@@ -70,8 +92,9 @@ export default async function ProductDetailPage({
   const { id } = await params
   const data = await fetchProduct(id)
   if (!data) notFound()
-  const { product, aliases, scoreHistory } = data
+  const { product, aliases, scoreHistory, sentiment } = data
   const latest = scoreHistory[0]
+  const polarityStyle = sentiment ? POLARITY_STYLE[sentiment.polarity] : null
 
   return (
     <div className="space-y-6 p-6">
@@ -107,6 +130,37 @@ export default async function ProductDetailPage({
           )}
         </div>
       </header>
+
+      {/* 커뮤니티 감성 극성 */}
+      {sentiment && polarityStyle && (
+        <section className="rounded border border-gray-200 p-4">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className={`text-sm px-2 py-0.5 rounded font-medium ${polarityStyle.cls}`}>
+              {polarityStyle.label}
+            </span>
+            <span className="text-xs text-gray-500">
+              커뮤니티 언급 {sentiment.mention_count}건
+              {sentiment.source ? ` · ${sentiment.source}` : ''}
+            </span>
+          </div>
+          {(sentiment.defect_terms?.length ?? 0) > 0 && (
+            <div className="mt-2 flex items-center gap-1 flex-wrap">
+              <span className="text-xs text-gray-500">하자 키워드:</span>
+              {sentiment.defect_terms!.map((t, i) => (
+                <span key={i} className="text-xs px-1.5 py-0.5 rounded bg-red-50 text-red-600 font-mono">
+                  {t}
+                </span>
+              ))}
+            </div>
+          )}
+          {sentiment.evidence_snippet && (
+            <p className="mt-2 text-sm text-gray-700 italic">“{sentiment.evidence_snippet}”</p>
+          )}
+          <p className="text-[10px] text-gray-400 mt-2 font-mono">
+            감성 분류: {sentiment.computed_at.slice(0, 19).replace('T', ' ')}
+          </p>
+        </section>
+      )}
 
       {/* 4점수 카드 */}
       {latest && (

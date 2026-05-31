@@ -34,6 +34,34 @@ const MAX_REQ_PER_RUN = 60
 const PRODUCT_FETCH_LIMIT = MAX_REQ_PER_RUN * BATCH_SIZE
 const DAILY_REQ_HARD_CAP = 800
 
+// 커뮤니티 출처 — 게시글 제목의 감정 극성을 읽어야 하는 소스
+const COMMUNITY_SOURCES = ['natepan_ranking', '82cook_talk', 'dcinside_realtime', 'ppomppu_main']
+// sentiment 패스 한도 (메인 분류 패스와 별도로 소비)
+const SENTIMENT_BATCH_SIZE = 15
+const SENTIMENT_MAX_REQ = 20
+// 같은 상품을 N시간 내 재분류하지 않음
+const SENTIMENT_TTL_HOURS = 24
+
+const SENTIMENT_SYSTEM_PROMPT = `한국 커뮤니티(82쿡·네이트판·디시·뽐뿌) 게시글 제목으로 상품 감정 극성을 판정. 입력 리스트를 JSON 배열로 변환.
+
+❗ 절대 규칙:
+- 응답 첫 글자는 '['
+- 응답 마지막 글자는 ']'
+- 분석 과정·설명·코드펜스(\`\`\`)·markdown 출력 금지
+- 입력 id 그대로 유지
+
+각 항목 필드:
+- id: 입력 id 그대로
+- polarity: positive | negative | neutral
+  · positive: 추천·만족·입소문·재구매·가성비 호평
+  · negative: 불만·하자·고장·반품·환불·AS지연·악성리뷰
+  · neutral : 정보·질문·단순 언급
+- defect_terms: 하자/문제 키워드 배열 (예: ["고장","반품","터짐","환불","AS"]). 없으면 []
+- evidence_snippet: 극성 판정 근거가 된 제목 1개 인용 (30자 이내)
+
+예시 입력: - id="x1" name="무선 청소기" mentions=[샤오미 핸디 샀는데 한달만에 고장 환불받음 | 무선청소기 추천좀]
+예시 출력: [{"id":"x1","polarity":"negative","defect_terms":["고장","환불"],"evidence_snippet":"한달만에 고장 환불받음"}]`
+
 const SYSTEM_PROMPT = `한국 위탁 판매 상품 분류기. 입력 리스트를 JSON 배열로 변환.
 
 ❗ 절대 규칙:
@@ -254,6 +282,154 @@ async function logRun(payload) {
   }
 }
 
+// ── 커뮤니티 감성 극성 패스 ──────────────────────────────────
+
+function buildSentimentPrompt(items) {
+  const lines = items.map(
+    (it) => `- id="${it.id}" name="${it.name}" mentions=[${it.mentions.slice(0, 6).join(' | ')}]`,
+  )
+  return `다음 ${items.length}개 상품의 커뮤니티 언급을 극성 판정해서 JSON 배열로 응답:\n\n${lines.join('\n')}`
+}
+
+function normalizeSentiment(o, fallbackId) {
+  if (!o || typeof o !== 'object') return null
+  const id = String(o.id ?? fallbackId).trim()
+  if (!id) return null
+  const polarity = ['positive', 'negative', 'neutral'].includes(o.polarity) ? o.polarity : 'neutral'
+  const defect = Array.isArray(o.defect_terms)
+    ? o.defect_terms.map((t) => String(t).trim()).filter(Boolean).slice(0, 8)
+    : []
+  const snippet =
+    typeof o.evidence_snippet === 'string' ? o.evidence_snippet.trim().slice(0, 120) : ''
+  return { id, polarity, defect_terms: defect, evidence_snippet: snippet }
+}
+
+// 커뮤니티 alias 가 있고 아직(또는 오래전) sentiment 가 없는 상품 후보.
+async function fetchSentimentCandidates() {
+  const { data: aliasRows } = await sb
+    .from('jimscanner_trends_aliases')
+    .select('product_id, alias, source')
+    .in('source', COMMUNITY_SOURCES)
+    .order('created_at', { ascending: false })
+    .limit(SENTIMENT_MAX_REQ * SENTIMENT_BATCH_SIZE * 4)
+  if (!aliasRows || aliasRows.length === 0) return []
+
+  // product_id → 언급(제목) 리스트
+  const byProduct = new Map()
+  for (const r of aliasRows) {
+    const e = byProduct.get(r.product_id) ?? { mentions: [], sources: new Set() }
+    if (e.mentions.length < 8) e.mentions.push(r.alias)
+    if (r.source) e.sources.add(r.source)
+    byProduct.set(r.product_id, e)
+  }
+
+  const ids = [...byProduct.keys()]
+  // 최근 sentiment 가 있는 상품 제외 (TTL)
+  const cutoff = new Date(Date.now() - SENTIMENT_TTL_HOURS * 3600 * 1000).toISOString()
+  const { data: recent } = await sb
+    .from('jimscanner_trends_sentiment')
+    .select('product_id, computed_at')
+    .in('product_id', ids)
+    .gte('computed_at', cutoff)
+  const fresh = new Set((recent ?? []).map((r) => r.product_id))
+
+  const { data: prods } = await sb
+    .from('jimscanner_trends_products')
+    .select('id, canonical_name')
+    .in('id', ids)
+  const nameById = new Map((prods ?? []).map((p) => [p.id, p.canonical_name]))
+
+  const candidates = []
+  for (const [pid, e] of byProduct) {
+    if (fresh.has(pid)) continue
+    const name = nameById.get(pid)
+    if (!name) continue
+    candidates.push({
+      id: pid,
+      name,
+      mentions: e.mentions,
+      source: [...e.sources][0] ?? null,
+    })
+  }
+  return candidates
+}
+
+async function runSentimentPass(counter, reqBudget) {
+  const candidates = await fetchSentimentCandidates()
+  if (candidates.length === 0) {
+    console.log('  sentiment: 대상 없음 (0 community candidates)')
+    return { req: 0, inserted: 0, inputTokens: 0, outputTokens: 0, costUsd: 0, error: null }
+  }
+  console.log(`  sentiment candidates: ${candidates.length}`)
+
+  const rows = []
+  let req = 0
+  let totalIn = 0
+  let totalOut = 0
+  let totalCost = 0
+  let lastError = null
+  const now = new Date().toISOString()
+
+  for (let i = 0; i < candidates.length; i += SENTIMENT_BATCH_SIZE) {
+    if (req >= SENTIMENT_MAX_REQ) break
+    if (counter.requestCount + reqBudget + req >= DAILY_REQ_HARD_CAP) break
+
+    const batch = candidates.slice(i, i + SENTIMENT_BATCH_SIZE)
+    const prompt = `${SENTIMENT_SYSTEM_PROMPT}\n\n---\n\n${buildSentimentPrompt(batch)}`
+    try {
+      const out = await callClaudeCli(prompt)
+      req++
+      totalIn += out.inputTokens
+      totalOut += out.outputTokens
+      totalCost += out.costUsd
+      const arr = tryParseJsonArray(out.text) ?? []
+      const byId = new Map()
+      for (let j = 0; j < arr.length; j++) {
+        const r = normalizeSentiment(arr[j], batch[j]?.id ?? '')
+        if (r) byId.set(r.id, r)
+      }
+      for (const it of batch) {
+        const r = byId.get(it.id)
+        if (!r) continue
+        rows.push({
+          product_id: it.id,
+          polarity: r.polarity,
+          defect_terms: r.defect_terms,
+          evidence_snippet: r.evidence_snippet,
+          source: it.source,
+          mention_count: it.mentions.length,
+          classified_by: MODEL,
+          computed_at: now,
+        })
+      }
+      console.log(
+        `  sentiment batch ${req}: ${batch.length} in → ${byId.size} labeled (${out.inputTokens}/${out.outputTokens} tok)`,
+      )
+    } catch (e) {
+      lastError = e instanceof Error ? e.message : String(e)
+      console.error(`  sentiment batch ${req + 1} failed: ${lastError}`)
+      break
+    }
+  }
+
+  if (rows.length > 0) {
+    const { error } = await sb.from('jimscanner_trends_sentiment').insert(rows)
+    if (error) {
+      lastError = lastError ?? error.message
+      console.error(`  sentiment insert failed: ${error.message}`)
+    }
+  }
+
+  return {
+    req,
+    inserted: rows.length,
+    inputTokens: totalIn,
+    outputTokens: totalOut,
+    costUsd: totalCost,
+    error: lastError,
+  }
+}
+
 async function main() {
   const t0 = Date.now()
   const stamp = new Date().toISOString()
@@ -336,12 +512,27 @@ async function main() {
 
   if (allResults.length > 0) await applyResults(allResults)
 
-  if (reqCount > 0) {
+  // ── 커뮤니티 감성 극성 패스 (메인 분류와 별도 한도) ──
+  let sentiment = { req: 0, inserted: 0, inputTokens: 0, outputTokens: 0, costUsd: 0, error: null }
+  if (counter.requestCount + reqCount < DAILY_REQ_HARD_CAP) {
+    try {
+      sentiment = await runSentimentPass(counter, reqCount)
+      totalCostUsd += sentiment.costUsd
+      if (sentiment.error && !lastError) lastError = sentiment.error
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      console.error(`  sentiment pass failed: ${msg}`)
+      if (!lastError) lastError = msg
+    }
+  }
+
+  const totalReq = reqCount + sentiment.req
+  if (totalReq > 0) {
     await bumpCounter(counter.day, {
-      req: reqCount,
-      products: allResults.length,
-      inputTokens: totalIn,
-      outputTokens: totalOut,
+      req: totalReq,
+      products: allResults.length + sentiment.inserted,
+      inputTokens: totalIn + sentiment.inputTokens,
+      outputTokens: totalOut + sentiment.outputTokens,
     })
   }
 
@@ -354,7 +545,9 @@ async function main() {
   })
 
   console.log(
-    `[${new Date().toISOString()}] done — ${reqCount} req, ${allResults.length} classified, $${totalCostUsd.toFixed(4)}, ${Date.now() - t0}ms`,
+    `[${new Date().toISOString()}] done — ${reqCount} req, ${allResults.length} classified, ` +
+      `${sentiment.req} sentiment req, ${sentiment.inserted} sentiment labeled, ` +
+      `$${totalCostUsd.toFixed(4)}, ${Date.now() - t0}ms`,
   )
 }
 
