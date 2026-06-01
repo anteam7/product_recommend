@@ -92,3 +92,20 @@ export function computeMargin(listPrice: number, dome: number, shipping: number 
     marginPct: listPrice ? +((margin / listPrice) * 100).toFixed(2) : 0,
   }
 }
+
+// 위탁 셀러가 손해 안 보고 들어갈 수 있는 쿠팡 최소 판매가(바닥가).
+// computeMargin 을 거꾸로 푼 것: margin = list*(1 - FEE - 1/11) - (dome+ship) 에서
+// margin 이 list 의 minMarginPct 이상이 되는 가장 낮은 list 를 구함.
+//   list*(1 - FEE - 1/11 - minMarginPct) = dome + ship
+// 이 floor 가 '직구 덤핑 위협 게이트'의 비교 기준(내 바닥가)이다.
+export const MIN_MARGIN_PCT = 0.1 // 위탁 운영 최소 마진율 (판매가 대비)
+
+export function computeViableFloor(
+  dome: number,
+  shipping: number = SHIP,
+  minMarginPct: number = MIN_MARGIN_PCT,
+): number | null {
+  const denom = 1 - FEE_RATE - 1 / VAT_DIVISOR - minMarginPct
+  if (denom <= 0) return null
+  return Math.ceil((dome + shipping) / denom)
+}
