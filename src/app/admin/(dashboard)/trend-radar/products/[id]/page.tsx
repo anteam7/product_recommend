@@ -1,6 +1,7 @@
 import Link from 'next/link'
 import { notFound } from 'next/navigation'
 import { createAdminClient } from '@/lib/auth/admin-supabase'
+import { barrierMeta, COST_BAND_LABEL } from '../../regulatory/barrier-meta'
 
 export const dynamic = 'force-dynamic'
 
@@ -17,6 +18,11 @@ interface ProductRow {
   alias_count: number
   first_seen_at: string
   last_seen_at: string
+  barrier_type: string | null
+  barrier_est_cost_band: string | null
+  barrier_est_days: number | null
+  barrier_evidence: string | null
+  barrier_classified_at: string | null
 }
 interface AliasRow {
   alias: string
@@ -56,7 +62,8 @@ async function fetchProduct(id: string) {
   if (prodRes.error || !prodRes.data) return null
 
   return {
-    product: prodRes.data as ProductRow,
+    // barrier_* 컬럼은 generated 타입 미반영 (마이그레이션 후 `npm run gen:types` 시 unknown 제거)
+    product: prodRes.data as unknown as ProductRow,
     aliases: (aliasRes.data ?? []) as AliasRow[],
     scoreHistory: (scoreRes.data ?? []) as ScoreRow[],
   }
@@ -96,6 +103,27 @@ export default async function ProductDetailPage({
               )}
               {product.description && (
                 <span className="text-sm text-gray-700">{product.description}</span>
+              )}
+            </div>
+          )}
+          {/* 규제 진입장벽 게이트 배지 */}
+          {product.barrier_type && (
+            <div className="mt-2 flex items-center gap-2 flex-wrap">
+              <span
+                className={`text-xs px-2 py-0.5 rounded border font-semibold ${barrierMeta(product.barrier_type).badgeClass}`}
+              >
+                🛡 {barrierMeta(product.barrier_type).label}
+              </span>
+              {product.barrier_type !== 'none' && product.barrier_est_cost_band && (
+                <span className="text-xs text-gray-500">
+                  인증비용 {COST_BAND_LABEL[product.barrier_est_cost_band] ?? product.barrier_est_cost_band}
+                  {typeof product.barrier_est_days === 'number' && product.barrier_est_days > 0
+                    ? ` · ~${product.barrier_est_days}일`
+                    : ''}
+                </span>
+              )}
+              {product.barrier_evidence && (
+                <span className="text-xs text-gray-400">{product.barrier_evidence}</span>
               )}
             </div>
           )}
