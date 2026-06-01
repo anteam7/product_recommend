@@ -1,6 +1,14 @@
 import Link from 'next/link'
 import { notFound } from 'next/navigation'
 import { createAdminClient } from '@/lib/auth/admin-supabase'
+import {
+  computeUnitEconomics,
+  estimateSellPrice,
+  gateColor,
+  gateLabel,
+  won,
+  type UnitEconomics,
+} from '@/lib/trend-radar/unit-economics'
 
 export const dynamic = 'force-dynamic'
 
@@ -38,7 +46,7 @@ interface ScoreRow {
 
 async function fetchProduct(id: string) {
   const sb = createAdminClient()
-  const [prodRes, aliasRes, scoreRes] = await Promise.all([
+  const [prodRes, aliasRes, scoreRes, supRes] = await Promise.all([
     sb.from('jimscanner_trends_products').select('*').eq('id', id).single(),
     sb
       .from('jimscanner_trends_aliases')
@@ -51,14 +59,36 @@ async function fetchProduct(id: string) {
       .eq('product_id', id)
       .order('computed_at', { ascending: false })
       .limit(30),
+    sb
+      .from('jimscanner_trends_supplier')
+      .select('supplier_source, price_krw, raw_payload')
+      .eq('product_id', id)
+      .order('price_krw', { ascending: true }),
   ])
 
   if (prodRes.error || !prodRes.data) return null
 
+  const scoreHistory = (scoreRes.data ?? []) as ScoreRow[]
+  const suppliers = (supRes.data ?? []) as any[]
+  const best = suppliers.find((s) => Number(s.price_krw) > 0)
+
+  let econ: (UnitEconomics & { sellSource: 'observed' | 'heuristic' }) | null = null
+  if (best) {
+    const landed = Number(best.price_krw)
+    const sell = estimateSellPrice({
+      scoreComponents: scoreHistory[0]?.score_components,
+      supplierRaw: best.raw_payload,
+      landedCost: landed,
+    })
+    const u = sell ? computeUnitEconomics(sell.value, landed) : null
+    if (u && sell) econ = { ...u, sellSource: sell.source }
+  }
+
   return {
     product: prodRes.data as ProductRow,
     aliases: (aliasRes.data ?? []) as AliasRow[],
-    scoreHistory: (scoreRes.data ?? []) as ScoreRow[],
+    scoreHistory,
+    econ,
   }
 }
 
@@ -70,7 +100,7 @@ export default async function ProductDetailPage({
   const { id } = await params
   const data = await fetchProduct(id)
   if (!data) notFound()
-  const { product, aliases, scoreHistory } = data
+  const { product, aliases, scoreHistory, econ } = data
   const latest = scoreHistory[0]
 
   return (
@@ -118,6 +148,9 @@ export default async function ProductDetailPage({
           <ScoreCard label="competition" value={latest.competition_score} />
         </section>
       )}
+
+      {/* 단위경제성 워터폴 */}
+      {econ && <UnitEconomicsWaterfall econ={econ} />}
 
       {/* score 시계열 (최근 30 row) */}
       {scoreHistory.length > 1 && (
@@ -183,6 +216,67 @@ export default async function ProductDetailPage({
         first_seen: {product.first_seen_at} · last_seen: {product.last_seen_at}
       </section>
     </div>
+  )
+}
+
+function UnitEconomicsWaterfall({
+  econ,
+}: {
+  econ: UnitEconomics & { sellSource: 'observed' | 'heuristic' }
+}) {
+  const steps: { label: string; value: number; sign: '+' | '-' }[] = [
+    { label: '추정 판매가', value: econ.estimatedSellPrice, sign: '+' },
+    { label: '판매수수료 (10.6%)', value: -econ.fee, sign: '-' },
+    { label: '부가세 (÷11)', value: -econ.vat, sign: '-' },
+    { label: '출고 배송비', value: -econ.ship, sign: '-' },
+    { label: '랜디드 원가', value: -econ.landedCost, sign: '-' },
+  ]
+  const max = econ.estimatedSellPrice || 1
+
+  return (
+    <section>
+      <h2 className="text-sm font-semibold mb-2">
+        단위경제성 워터폴{' '}
+        <span className={`ml-1 text-xs font-medium ${gateColor(econ.gateStatus)}`}>
+          · {gateLabel(econ.gateStatus)}
+        </span>
+        {econ.sellSource === 'heuristic' && (
+          <span className="ml-1 text-[10px] font-normal text-amber-500" title="관찰 판매가 없음 — 랜디드원가 ×2.2 추정">
+            (판매가 추정치)
+          </span>
+        )}
+      </h2>
+      <div className="rounded border border-gray-200 p-4 space-y-2">
+        {steps.map((s) => (
+          <div key={s.label} className="flex items-center gap-3 text-sm">
+            <div className="w-32 shrink-0 text-gray-600">{s.label}</div>
+            <div className="flex-1">
+              <div
+                className={`h-4 rounded ${s.sign === '+' ? 'bg-gray-300' : 'bg-rose-200'}`}
+                style={{ width: `${Math.min(100, (Math.abs(s.value) / max) * 100)}%` }}
+              />
+            </div>
+            <div className={`w-28 shrink-0 text-right font-mono ${s.sign === '-' ? 'text-rose-600' : 'text-gray-700'}`}>
+              {s.sign === '-' ? '−' : ''}
+              {won(Math.abs(s.value))}
+            </div>
+          </div>
+        ))}
+        <div className="flex items-center gap-3 border-t border-gray-200 pt-2 text-sm">
+          <div className="w-32 shrink-0 font-semibold">기대 순이익</div>
+          <div className="flex-1">
+            <div
+              className={`h-5 rounded ${econ.expectedNetUnit >= 0 ? 'bg-emerald-300' : 'bg-rose-400'}`}
+              style={{ width: `${Math.min(100, (Math.abs(econ.expectedNetUnit) / max) * 100)}%` }}
+            />
+          </div>
+          <div className={`w-28 shrink-0 text-right font-mono font-bold ${gateColor(econ.gateStatus)}`}>
+            {won(econ.expectedNetUnit)}
+          </div>
+        </div>
+        <p className="pt-1 text-right text-xs text-gray-500">순마진 {econ.netMarginPct}%</p>
+      </div>
+    </section>
   )
 }
 
