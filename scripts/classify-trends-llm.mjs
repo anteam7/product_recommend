@@ -54,13 +54,20 @@ const SYSTEM_PROMPT = `한국 위탁 판매 상품 분류기. 입력 리스트�
 - intent_label: 5-7자 (예: "예방건강", "문제해결", "소모품")
 - description: 15자 이내 1문장 (위탁 판매 의사결정 단서)
 
-예시 입력: - id="abc" name="닥터린 초임계 알티지 오메가3 60캡슐" cur_top=health aliases=2 samples=[종근당 오메가3 | 일양 오메가3] sources=[naver_shopping_hot,musinsa_best]
-예시 출력: [{"id":"abc","canonical_name":"오메가3","brand":"닥터린","category_top":"health","category_mid":"오메가3","intent_label":"예방건강","description":"혈행건강 영양제"}]`
+❗ 구매의도(bottom-of-funnel) 추출 — samples 원문(커뮤니티 글제목)을 분석:
+- purchase_intent_count: samples 중 "능동 구매의도 발화" 개수 (정수).
+  능동 구매의도 = 어디서 사요/사고싶다/추천 좀/링크 좀/품번·모델명 질문/대체템 뭐 있어요/얼마예요/구매처/직구 가능?
+  단순 후기·자랑·뉴스·정보 공유는 제외 (구매하려는 의지가 드러나야 함).
+- intent_quotes: 구매의도 발화 최대 2개를 인용. 각 {"quote": 원문(30자 이내), "type": where_to_buy|recommend_request|link_request|model_query|alternative|price_query}
+  구매의도 발화가 없으면 빈 배열 [].
+
+예시 입력: - id="abc" name="닥터린 초임계 알티지 오메가3 60캡슐" cur_top=health aliases=2 samples=[오메가3 어디서 사요? | 종근당 오메가3 후기 | 알티지 추천 좀요] sources=[natepan,musinsa_best]
+예시 출력: [{"id":"abc","canonical_name":"오메가3","brand":"닥터린","category_top":"health","category_mid":"오메가3","intent_label":"예방건강","description":"혈행건강 영양제","purchase_intent_count":2,"intent_quotes":[{"quote":"오메가3 어디서 사요?","type":"where_to_buy"},{"quote":"알티지 추천 좀요","type":"recommend_request"}]}]`
 
 function buildUserPrompt(items) {
   const lines = items.map(
     (it) =>
-      `- id="${it.id}" name="${it.name}" cur_top=${it.category_top} aliases=${it.alias_count} samples=[${it.sample_aliases.slice(0, 3).join(' | ')}] sources=[${it.sample_sources.join(',')}]`,
+      `- id="${it.id}" name="${it.name}" cur_top=${it.category_top} aliases=${it.alias_count} samples=[${it.sample_aliases.join(' | ')}] sources=[${it.sample_sources.join(',')}]`,
   )
   return `다음 ${items.length}개 상품 후보를 분류·정제해서 JSON 배열로 응답:\n\n${lines.join('\n')}`
 }
@@ -98,6 +105,27 @@ function normalizeResult(o, fallbackId) {
   const top = ['health', 'living', 'digital', 'other'].includes(o.category_top)
     ? o.category_top
     : 'other'
+  // 구매의도 발화 추출 (samples 표본 기준) — sampleCount 로 density 계산
+  const intentCount = Number.isFinite(o.purchase_intent_count)
+    ? Math.max(0, Math.round(o.purchase_intent_count))
+    : 0
+  const VALID_TYPES = [
+    'where_to_buy',
+    'recommend_request',
+    'link_request',
+    'model_query',
+    'alternative',
+    'price_query',
+  ]
+  const quotes = Array.isArray(o.intent_quotes)
+    ? o.intent_quotes
+        .filter((q) => q && typeof q.quote === 'string' && q.quote.trim())
+        .slice(0, 2)
+        .map((q) => ({
+          quote: q.quote.trim().slice(0, 60),
+          type: VALID_TYPES.includes(q.type) ? q.type : 'where_to_buy',
+        }))
+    : []
   return {
     id,
     canonical_name: cn,
@@ -106,6 +134,8 @@ function normalizeResult(o, fallbackId) {
     category_mid: typeof o.category_mid === 'string' ? o.category_mid.trim().slice(0, 30) : '',
     intent_label: typeof o.intent_label === 'string' ? o.intent_label.trim().slice(0, 20) : '',
     description: typeof o.description === 'string' ? o.description.trim().slice(0, 80) : '',
+    purchase_intent_count: intentCount,
+    intent_quotes: quotes,
   }
 }
 
@@ -209,11 +239,12 @@ async function fetchSampleAliases(productIds) {
     .select('product_id, alias, source')
     .in('product_id', productIds)
     .order('confidence', { ascending: false })
-    .limit(productIds.length * 5)
+    .limit(productIds.length * 8)
   const map = new Map()
   for (const r of data ?? []) {
     const list = map.get(r.product_id) ?? []
-    if (list.length < 3) list.push(r)
+    // 구매의도 밀도 표본 — alias 원문 최대 8개까지 본다.
+    if (list.length < 8) list.push(r)
     map.set(r.product_id, list)
   }
   return map
@@ -233,6 +264,10 @@ async function applyResults(results) {
           category_mid: r.category_mid,
           intent_label: r.intent_label,
           description: r.description,
+          purchase_intent_count: r.purchase_intent_count,
+          intent_density: r.intent_density,
+          intent_quotes: r.intent_quotes,
+          intent_classified_at: now,
           llm_classified_at: now,
           llm_model: MODEL,
         })
@@ -322,7 +357,12 @@ async function main() {
       }
       for (const it of inputs) {
         const r = byId.get(it.id)
-        if (r) allResults.push(r)
+        if (!r) continue
+        // intent_density: 본 표본(sample_aliases) 대비 구매의도 발화 비율 (0~1)
+        const base = it.sample_aliases.length
+        const density = base > 0 ? Math.min(1, r.purchase_intent_count / base) : 0
+        r.intent_density = Math.round(density * 1000) / 1000
+        allResults.push(r)
       }
       console.log(
         `  batch ${reqCount}: ${batch.length} in → ${byId.size} classified (${out.inputTokens}/${out.outputTokens} tok, $${out.costUsd.toFixed(4)})`,
