@@ -37,13 +37,15 @@ async function fetchData() {
 
   const { data: prods } = await sb
     .from('jimscanner_trends_products')
-    .select('id, canonical_name, category_top')
+    // logistics_suitability/reasons 는 trends_v4_logistics_gate.sql 적용 후 컬럼 — generated 타입 미반영
+    .select('id, canonical_name, category_top, logistics_suitability, logistics_reasons')
     .in('id', ids)
   const byId = new Map((prods ?? []).map((p: any) => [p.id, p]))
 
   return {
     rows: latest.map((s) => {
       const p = byId.get(s.product_id) ?? {}
+      const suit = (p as any).logistics_suitability
       return {
         id: s.product_id,
         name: (p as any).canonical_name ?? '?',
@@ -53,13 +55,27 @@ async function fetchData() {
         size: Math.max(50, s.commerce_score * 4),
         final: s.final_score,
         supplier: s.supplier_score,
+        logistics: (suit === 'fit' || suit === 'caution' || suit === 'unfit' ? suit : null) as
+          | 'fit'
+          | 'caution'
+          | 'unfit'
+          | null,
+        logisticsReasons: Array.isArray((p as any).logistics_reasons) ? ((p as any).logistics_reasons as string[]) : [],
       }
     }),
   }
 }
 
-export default async function OpportunityPage() {
-  const { rows } = await fetchData()
+export default async function OpportunityPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ lg?: string }>
+}) {
+  const sp = await searchParams
+  const excludeUnfit = sp.lg === '1'
+  const { rows: allRows } = await fetchData()
+  const unfitCount = allRows.filter((r) => r.logistics === 'unfit').length
+  const rows = excludeUnfit ? allRows.filter((r) => r.logistics !== 'unfit') : allRows
 
   return (
     <div className="space-y-6 p-6">
@@ -74,6 +90,21 @@ export default async function OpportunityPage() {
           ← 대시보드
         </Link>
       </header>
+
+      {/* 위탁 물류 적합성 게이트 필터 */}
+      <div className="flex items-center gap-3 text-xs">
+        <span className="text-gray-500">위탁 물류:</span>
+        <Link
+          href={excludeUnfit ? '/admin/trend-radar/opportunity' : '/admin/trend-radar/opportunity?lg=1'}
+          className={`px-3 py-1 rounded ${excludeUnfit ? 'bg-red-100 text-red-700 font-semibold' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}
+          title="리튬배터리·냉장/냉동·가구급 대형 등 위탁 부적합 후보 숨김"
+        >
+          {excludeUnfit ? '✓ ' : ''}부적합 제외{unfitCount > 0 ? ` (${unfitCount})` : ''}
+        </Link>
+        <span className="text-gray-400">
+          분류 패스(classify-trends-llm) 누적 후 등급 채워짐 · 적합/주의/부적합
+        </span>
+      </div>
 
       {rows.length === 0 ? (
         <div className="rounded border border-dashed border-gray-300 p-12 text-center text-gray-500">

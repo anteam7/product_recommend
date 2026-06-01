@@ -53,9 +53,90 @@ const SYSTEM_PROMPT = `한국 위탁 판매 상품 분류기. 입력 리스트�
 - category_mid: 5-10자 한국어 (예: "오메가3", "수납용품")
 - intent_label: 5-7자 (예: "예방건강", "문제해결", "소모품")
 - description: 15자 이내 1문장 (위탁 판매 의사결정 단서)
+- logistics: 위탁(드롭십) 물리적 운영 난이도 객체
+  · dim_class: small | medium | large | furniture (가구급 대형)
+  · fragility: 유리·세라믹 등 파손 위험 (true/false)
+  · cold_chain: 냉장/냉동 필요 (true/false)
+  · liquid: 액체·누액 위험 (true/false)
+  · hazmat_battery: 리튬배터리 포함·항공불가 (true/false)
+  · oversize_surcharge: 부피무게 할증 대상 (true/false)
 
 예시 입력: - id="abc" name="닥터린 초임계 알티지 오메가3 60캡슐" cur_top=health aliases=2 samples=[종근당 오메가3 | 일양 오메가3] sources=[naver_shopping_hot,musinsa_best]
-예시 출력: [{"id":"abc","canonical_name":"오메가3","brand":"닥터린","category_top":"health","category_mid":"오메가3","intent_label":"예방건강","description":"혈행건강 영양제"}]`
+예시 출력: [{"id":"abc","canonical_name":"오메가3","brand":"닥터린","category_top":"health","category_mid":"오메가3","intent_label":"예방건강","description":"혈행건강 영양제","logistics":{"dim_class":"small","fragility":false,"cold_chain":false,"liquid":false,"hazmat_battery":false,"oversize_surcharge":false}}]`
+
+// ── 위탁 물류 적합성 게이트 (src/lib/trend-radar/logistics.ts JS 미러) ──
+// 카테고리 키워드 룰을 1차, LLM 결과를 2차로 합쳐 suitability 도출.
+const LG_RULES = [
+  { key: 'hazmat_battery', words: ['리튬', '배터리', '보조배터리', '충전지', '건전지', '파워뱅크', '전동', '드론', '스쿠터', '킥보드'] },
+  { key: 'cold_chain', words: ['냉장', '냉동', '신선', '아이스', '밀키트', '생물', '회', '육류', '해산물', '아이스크림'] },
+  { key: 'liquid', words: ['액상', '액체', '음료', '세제', '워시', '샴푸', '오일', '스프레이', '토너', '에센스', '주스', '워터', '클렌징'] },
+  { key: 'fragility', words: ['유리', '세라믹', '도자기', '거울', '액자', '유리병', '머그', '와인잔', '전구', '도기', '크리스탈'] },
+]
+const LG_FURNITURE = ['가구', '소파', '침대', '매트리스', '책상', '식탁', '옷장', '장롱', '서랍장', '책장', '수납장']
+const LG_LARGE = ['대형', '캐리어', '텐트', '러그', '카페트', '카펫', '안마의자', '자전거', '러닝머신', '트램폴린', '선반', '행거', '의자']
+const LG_OVERSIZE = ['대용량', '점보', '특대', '롤매트', '플레이매트', '범퍼침대', '에어매트']
+
+function lgHas(text, words) {
+  return words.some((w) => text.includes(w))
+}
+
+function lgRuleFlags(name, description, categoryMid) {
+  const text = [name ?? '', description ?? '', categoryMid ?? ''].join(' ')
+  const flags = {
+    dim_class: 'small',
+    fragility: false,
+    cold_chain: false,
+    liquid: false,
+    hazmat_battery: false,
+    oversize_surcharge: false,
+  }
+  for (const r of LG_RULES) if (lgHas(text, r.words)) flags[r.key] = true
+  if (lgHas(text, LG_FURNITURE)) {
+    flags.dim_class = 'furniture'
+    flags.oversize_surcharge = true
+  } else if (lgHas(text, LG_LARGE)) {
+    flags.dim_class = 'large'
+    flags.oversize_surcharge = true
+  } else if (lgHas(text, LG_OVERSIZE)) {
+    flags.dim_class = 'medium'
+    flags.oversize_surcharge = true
+  }
+  return flags
+}
+
+function lgFinalize(flags) {
+  const reasons = []
+  if (flags.hazmat_battery) reasons.push('🔋 리튬배터리·항공불가')
+  if (flags.cold_chain) reasons.push('❄️ 냉장/냉동')
+  if (flags.dim_class === 'furniture') reasons.push('🛋 가구급 대형')
+  if (flags.liquid) reasons.push('💧 액체·누액')
+  if (flags.fragility) reasons.push('🥃 파손 위험')
+  if (flags.oversize_surcharge && flags.dim_class !== 'furniture') reasons.push('📦 부피무게 할증')
+  if (flags.dim_class === 'large') reasons.push('📐 대형')
+
+  const unfit = flags.hazmat_battery || flags.cold_chain || flags.dim_class === 'furniture'
+  const caution = flags.liquid || flags.fragility || flags.oversize_surcharge || flags.dim_class === 'large'
+  const suitability = unfit ? 'unfit' : caution ? 'caution' : 'fit'
+  if (suitability === 'fit') reasons.push('✅ 위탁 적합')
+  return { ...flags, suitability, reasons }
+}
+
+// 룰(1차) OR LLM(2차) — 어느 한쪽이라도 true 면 위험으로 본다 (보수적).
+function lgMerge(ruleFlags, llm) {
+  const out = { ...ruleFlags }
+  if (llm && typeof llm === 'object') {
+    const DIM = ['small', 'medium', 'large', 'furniture']
+    if (DIM.includes(llm.dim_class)) {
+      // 더 큰 등급 채택
+      if (DIM.indexOf(llm.dim_class) > DIM.indexOf(out.dim_class)) out.dim_class = llm.dim_class
+    }
+    for (const k of ['fragility', 'cold_chain', 'liquid', 'hazmat_battery', 'oversize_surcharge']) {
+      if (llm[k] === true) out[k] = true
+    }
+    if (out.dim_class === 'large' || out.dim_class === 'furniture') out.oversize_surcharge = true
+  }
+  return lgFinalize(out)
+}
 
 function buildUserPrompt(items) {
   const lines = items.map(
@@ -98,14 +179,23 @@ function normalizeResult(o, fallbackId) {
   const top = ['health', 'living', 'digital', 'other'].includes(o.category_top)
     ? o.category_top
     : 'other'
+  const category_mid = typeof o.category_mid === 'string' ? o.category_mid.trim().slice(0, 30) : ''
+  const description = typeof o.description === 'string' ? o.description.trim().slice(0, 80) : ''
+
+  // 물류 적합성: 키워드 룰(1차) + LLM logistics(2차) 병합
+  const ruleFlags = lgRuleFlags(cn, description, category_mid)
+  const logistics = lgMerge(ruleFlags, o.logistics)
+  logistics.source = o.logistics && typeof o.logistics === 'object' ? 'rule+llm' : 'rule'
+
   return {
     id,
     canonical_name: cn,
     brand: typeof o.brand === 'string' && o.brand.trim() ? o.brand.trim() : null,
     category_top: top,
-    category_mid: typeof o.category_mid === 'string' ? o.category_mid.trim().slice(0, 30) : '',
+    category_mid,
     intent_label: typeof o.intent_label === 'string' ? o.intent_label.trim().slice(0, 20) : '',
-    description: typeof o.description === 'string' ? o.description.trim().slice(0, 80) : '',
+    description,
+    logistics,
   }
 }
 
@@ -235,6 +325,17 @@ async function applyResults(results) {
           description: r.description,
           llm_classified_at: now,
           llm_model: MODEL,
+          // 위탁 물류 적합성 게이트 (trends_v4_logistics_gate.sql)
+          dim_class: r.logistics.dim_class,
+          lg_fragility: r.logistics.fragility,
+          lg_cold_chain: r.logistics.cold_chain,
+          lg_liquid: r.logistics.liquid,
+          lg_hazmat_battery: r.logistics.hazmat_battery,
+          lg_oversize_surcharge: r.logistics.oversize_surcharge,
+          logistics_suitability: r.logistics.suitability,
+          logistics_reasons: r.logistics.reasons,
+          logistics_tagged_at: now,
+          logistics_source: r.logistics.source ?? 'rule',
         })
         .eq('id', r.id),
     ),

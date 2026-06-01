@@ -1,5 +1,6 @@
 import Link from 'next/link'
 import { createAdminClient } from '@/lib/auth/admin-supabase'
+import { deriveLogisticsFromText, SUITABILITY_META } from '@/lib/trend-radar/logistics'
 
 export const dynamic = 'force-dynamic'
 
@@ -105,7 +106,7 @@ function sourceLabel(s: string): string {
 export default async function RecommendPage({
   searchParams,
 }: {
-  searchParams: Promise<{ days?: string; sim?: string; imminent?: string; cate?: string }>
+  searchParams: Promise<{ days?: string; sim?: string; imminent?: string; cate?: string; lg?: string }>
 }) {
   const sp = await searchParams
   const days = parseInt(sp.days ?? '30', 10)
@@ -114,15 +115,25 @@ export default async function RecommendPage({
   const validSim = SIM_OPTIONS.some((s) => Math.abs(s.v - sim) < 0.001) ? sim : 0.2
   const imminentOnly = sp.imminent === '1'
   const cate = sp.cate ?? ''
+  const excludeUnfit = sp.lg === '1'
 
   const current: Record<string, string> = {
     days: String(validDays),
     sim: String(validSim),
     imminent: imminentOnly ? '1' : '',
     cate,
+    lg: excludeUnfit ? '1' : '',
   }
 
-  const { rows, error } = await fetchRecommend({ days: validDays, minSim: validSim, imminentOnly, cate })
+  const base = await fetchRecommend({ days: validDays, minSim: validSim, imminentOnly, cate })
+  const { error } = base
+  // 위탁 물류 적합성 게이트 — 상품명+카테고리 키워드 룰로 등급 산출
+  const scored = base.rows.map((r) => ({
+    ...r,
+    logistics: deriveLogisticsFromText(r.title, null, r.cate_label),
+  }))
+  const rows = excludeUnfit ? scored.filter((r) => r.logistics.suitability !== 'unfit') : scored
+  const unfitCount = scored.filter((r) => r.logistics.suitability === 'unfit').length
 
   // KPI
   const total = rows.length
@@ -183,6 +194,13 @@ export default async function RecommendPage({
             className={`px-3 py-1 text-xs rounded ${imminentOnly ? 'bg-red-100 text-red-700 font-semibold' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}
           >
             {imminentOnly ? '✓ ' : ''}임박특가만
+          </Link>
+          <Link
+            href={buildHref(current, { lg: excludeUnfit ? null : '1' })}
+            className={`px-3 py-1 text-xs rounded ${excludeUnfit ? 'bg-red-100 text-red-700 font-semibold' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}
+            title="리튬배터리·냉장/냉동·가구급 대형 등 위탁 부적합 후보 숨김"
+          >
+            {excludeUnfit ? '✓ ' : ''}위탁 부적합 제외{unfitCount > 0 ? ` (${unfitCount})` : ''}
           </Link>
         </div>
         <div className="flex flex-wrap gap-1 border-t border-gray-100 pt-2">
@@ -271,8 +289,22 @@ export default async function RecommendPage({
                   <div className="text-sm font-medium leading-snug" title={r.title}>
                     {r.title}
                   </div>
-                  <div className="text-xs text-gray-500">
-                    {r.cate_label ?? r.cate_cd} · {r.goods_no}
+                  <div className="text-xs text-gray-500 flex items-center gap-2 flex-wrap">
+                    <span>{r.cate_label ?? r.cate_cd} · {r.goods_no}</span>
+                    <span
+                      className={`inline-flex items-center px-1.5 py-0.5 rounded border text-[10px] font-semibold ${SUITABILITY_META[r.logistics.suitability].cls}`}
+                      title={r.logistics.reasons.join(' · ')}
+                    >
+                      위탁 {SUITABILITY_META[r.logistics.suitability].short}
+                    </span>
+                    {r.logistics.suitability !== 'fit' &&
+                      r.logistics.reasons
+                        .filter((x) => !x.includes('위탁 적합'))
+                        .map((reason) => (
+                          <span key={reason} className="text-[10px] text-gray-500 bg-gray-100 rounded px-1.5 py-0.5">
+                            {reason}
+                          </span>
+                        ))}
                   </div>
                   {/* 매칭 근거 */}
                   <div className="flex flex-wrap gap-2 text-xs pt-1">
