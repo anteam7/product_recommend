@@ -1,7 +1,26 @@
 import Link from 'next/link'
 import { createAdminClient } from '@/lib/auth/admin-supabase'
+import {
+  lookupFallbackPrior,
+  synthesizeOpsLoad,
+  opsLoadBadge,
+  OPS_LOAD_THRESHOLD,
+} from '@/lib/trend-radar/ops-load'
 
 export const dynamic = 'force-dynamic'
+
+// recommend 보드는 ggsan 건기식 카탈로그(goods) 기준이라 커뮤니티 텍스트 신호와
+// 직접 연결되지 않는다. 여기선 카테고리 prior 만으로 ops_load 를 추정해 게이트 표시.
+// (product 상세는 score_components.ops_load 의 실측값 사용)
+function opsLoadForRow(cateLabel: string | null, cateCd: string | null): number {
+  const prior = lookupFallbackPrior(cateLabel ?? cateCd)
+  const ops = synthesizeOpsLoad({
+    return_prior: prior.return_rate_prior,
+    inquiry_prior: prior.inquiry_rate_prior,
+    signal_density: 0,
+  })
+  return ops.score
+}
 
 interface RecommendRow {
   goods_no: string
@@ -46,6 +65,7 @@ async function fetchRecommend(opts: {
   minSim: number
   imminentOnly: boolean
   cate: string
+  lowOpsOnly: boolean
 }) {
   const sb = createAdminClient()
   // RPC는 DB(supabase/ggsan_recommend_rpc.sql)에 존재하나 generated 타입 미반영 — `npm run gen:types` 시 캐스팅 제거
@@ -61,6 +81,7 @@ async function fetchRecommend(opts: {
   let rows = (data ?? []) as RecommendRow[]
   if (opts.imminentOnly) rows = rows.filter((r) => r.is_imminent)
   if (opts.cate) rows = rows.filter((r) => r.cate_cd === opts.cate)
+  if (opts.lowOpsOnly) rows = rows.filter((r) => opsLoadForRow(r.cate_label, r.cate_cd) < OPS_LOAD_THRESHOLD)
   return { rows, error: null as string | null }
 }
 
@@ -105,7 +126,7 @@ function sourceLabel(s: string): string {
 export default async function RecommendPage({
   searchParams,
 }: {
-  searchParams: Promise<{ days?: string; sim?: string; imminent?: string; cate?: string }>
+  searchParams: Promise<{ days?: string; sim?: string; imminent?: string; cate?: string; lowops?: string }>
 }) {
   const sp = await searchParams
   const days = parseInt(sp.days ?? '30', 10)
@@ -113,16 +134,18 @@ export default async function RecommendPage({
   const sim = parseFloat(sp.sim ?? '0.2')
   const validSim = SIM_OPTIONS.some((s) => Math.abs(s.v - sim) < 0.001) ? sim : 0.2
   const imminentOnly = sp.imminent === '1'
+  const lowOpsOnly = sp.lowops === '1'
   const cate = sp.cate ?? ''
 
   const current: Record<string, string> = {
     days: String(validDays),
     sim: String(validSim),
     imminent: imminentOnly ? '1' : '',
+    lowops: lowOpsOnly ? '1' : '',
     cate,
   }
 
-  const { rows, error } = await fetchRecommend({ days: validDays, minSim: validSim, imminentOnly, cate })
+  const { rows, error } = await fetchRecommend({ days: validDays, minSim: validSim, imminentOnly, cate, lowOpsOnly })
 
   // KPI
   const total = rows.length
@@ -183,6 +206,14 @@ export default async function RecommendPage({
             className={`px-3 py-1 text-xs rounded ${imminentOnly ? 'bg-red-100 text-red-700 font-semibold' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}
           >
             {imminentOnly ? '✓ ' : ''}임박특가만
+          </Link>
+          {/* 위탁 운영부하 게이트 토글 — ops_load < 임계만 (손 덜 가는 상품) */}
+          <Link
+            href={buildHref(current, { lowops: lowOpsOnly ? null : '1' })}
+            className={`px-3 py-1 text-xs rounded ${lowOpsOnly ? 'bg-emerald-100 text-emerald-700 font-semibold' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}
+            title={`판매 후 인적 운영부하(반품·교환·CS 문의) ops_load < ${OPS_LOAD_THRESHOLD} 인 상품만`}
+          >
+            {lowOpsOnly ? '✓ ' : ''}🛠 운영부하 낮음만
           </Link>
         </div>
         <div className="flex flex-wrap gap-1 border-t border-gray-100 pt-2">
@@ -276,6 +307,17 @@ export default async function RecommendPage({
                   </div>
                   {/* 매칭 근거 */}
                   <div className="flex flex-wrap gap-2 text-xs pt-1">
+                    {(() => {
+                      const b = opsLoadBadge(opsLoadForRow(r.cate_label, r.cate_cd))
+                      return (
+                        <span
+                          className={`px-2 py-0.5 rounded font-medium ${b.className}`}
+                          title={`카테고리 prior 기반 추정 ops_load ${b.score}/100 (임계 ${OPS_LOAD_THRESHOLD})`}
+                        >
+                          🛠 {b.label}
+                        </span>
+                      )
+                    })()}
                     {r.tv_match_count > 0 && (
                       <span className="bg-amber-100 text-amber-800 px-2 py-0.5 rounded">
                         📺 TV {r.tv_match_count}건 · &quot;{r.tv_top_keyword}&quot; ({r.tv_total_pushes}회 편성)

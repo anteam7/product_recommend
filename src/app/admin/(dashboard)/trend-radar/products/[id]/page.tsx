@@ -1,6 +1,7 @@
 import Link from 'next/link'
 import { notFound } from 'next/navigation'
 import { createAdminClient } from '@/lib/auth/admin-supabase'
+import { opsLoadBadge, readOpsLoad, OPS_LOAD_THRESHOLD } from '@/lib/trend-radar/ops-load'
 
 export const dynamic = 'force-dynamic'
 
@@ -72,6 +73,8 @@ export default async function ProductDetailPage({
   if (!data) notFound()
   const { product, aliases, scoreHistory } = data
   const latest = scoreHistory[0]
+  const opsLoad = readOpsLoad(latest?.score_components)
+  const opsBadge = opsLoadBadge(opsLoad?.score)
 
   return (
     <div className="space-y-6 p-6">
@@ -87,18 +90,28 @@ export default async function ProductDetailPage({
             카테고리: {product.category_top}
             {product.category_mid ? ` / ${product.category_mid}` : ''} · alias {product.alias_count}건
           </p>
-          {(product.intent_label || product.description) && (
-            <div className="mt-2 flex items-center gap-2 flex-wrap">
-              {product.intent_label && (
-                <span className="text-xs px-2 py-0.5 rounded bg-amber-100 text-amber-700 font-medium">
-                  🏷 {product.intent_label}
-                </span>
-              )}
-              {product.description && (
-                <span className="text-sm text-gray-700">{product.description}</span>
-              )}
-            </div>
-          )}
+          <div className="mt-2 flex items-center gap-2 flex-wrap">
+            {product.intent_label && (
+              <span className="text-xs px-2 py-0.5 rounded bg-amber-100 text-amber-700 font-medium">
+                🏷 {product.intent_label}
+              </span>
+            )}
+            {/* 위탁 운영부하 게이트 배지 (낮음=초록) */}
+            <span
+              className={`text-xs px-2 py-0.5 rounded font-medium ${opsBadge.className}`}
+              title={
+                opsLoad
+                  ? `반품 prior ${((opsLoad.return_prior ?? 0) * 100).toFixed(0)}% · 문의 prior ${((opsLoad.inquiry_prior ?? 0) * 100).toFixed(0)}% · 텍스트 신호 ${opsLoad.signal_hits ?? 0}건 → ops_load ${opsLoad.score}/100 (임계 ${OPS_LOAD_THRESHOLD})`
+                  : 'ops_load 미산출 (enrich-ops-load 실행 전)'
+              }
+            >
+              🛠 {opsBadge.label}
+              {opsBadge.score != null ? ` (${opsBadge.score})` : ''}
+            </span>
+            {product.description && (
+              <span className="text-sm text-gray-700">{product.description}</span>
+            )}
+          </div>
           {product.llm_classified_at && (
             <p className="text-[10px] text-gray-400 mt-1 font-mono">
               LLM 분류: {product.llm_classified_at.slice(0, 19).replace('T', ' ')}
