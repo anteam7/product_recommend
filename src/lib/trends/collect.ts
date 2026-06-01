@@ -114,17 +114,22 @@ export async function collectNaverSearchTrends(
       })
 
       // keywords 정규화 — 각 그룹의 마지막 시점 ratio
+      // metadata.views 에 상대검색량(ratio)을 '도달 신호'로 담아 화제 열량(heat_weight)이
+      // 단순 빈도(COUNT) 대신 도달 깊이를 반영하도록 한다. (src/lib/trends/heat.ts)
       const rows: Array<Record<string, unknown>> = []
       for (const group of resp.results ?? []) {
         const last = group.data?.[group.data.length - 1]
+        const ratio = last?.ratio ?? null
         rows.push({
           keyword: group.title,
           source,
           category: null,
           category_top: null,
           rank: null,
-          volume_relative: last?.ratio ?? null,
-        })
+          volume_relative: ratio,
+          // jimscanner_trends_keywords.metadata (heat 가중 입력) — 마이그레이션 후 컬럼
+          metadata: ratio != null ? { views: ratio } : {},
+        } as Record<string, unknown>)
       }
       if (rows.length > 0) {
         const { error: insErr } = await admin.from('jimscanner_trends_keywords').insert(rows)
@@ -206,14 +211,17 @@ export async function collectNaverShoppingTrends(
       const rows: Array<Record<string, unknown>> = []
       for (const group of resp.results ?? []) {
         const last = group.data?.[group.data.length - 1]
+        const ratio = last?.ratio ?? null
         rows.push({
           keyword: group.title,
           source,
           category: group.title, // 카테고리 자체가 키워드
           category_top: group.title,
           rank: null,
-          volume_relative: last?.ratio ?? null,
-        })
+          volume_relative: ratio,
+          // heat 가중 입력 — 상대 쇼핑 검색량을 도달 신호로 (src/lib/trends/heat.ts)
+          metadata: ratio != null ? { views: ratio } : {},
+        } as Record<string, unknown>)
       }
       if (rows.length > 0) {
         const { error: insErr } = await admin.from('jimscanner_trends_keywords').insert(rows)

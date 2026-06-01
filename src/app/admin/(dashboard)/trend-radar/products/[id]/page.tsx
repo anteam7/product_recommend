@@ -152,6 +152,11 @@ export default async function ProductDetailPage({
         </section>
       )}
 
+      {/* 단순 빈도 vs 화제 열량 2축 비교 (도달 깊이) */}
+      {latest?.score_components && (
+        <HeatVsFrequencyPanel components={latest.score_components} />
+      )}
+
       {/* score breakdown */}
       {latest?.score_components && (
         <section>
@@ -183,6 +188,54 @@ export default async function ProductDetailPage({
         first_seen: {product.first_seen_at} · last_seen: {product.last_seen_at}
       </section>
     </div>
+  )
+}
+
+/**
+ * 단순 빈도(COUNT) vs 화제 열량(Σ heat_weight) 막대 오버레이.
+ * score_components 에 freq_score/heat_weighted_score(또는 frequency/heat)가
+ * 있을 때만 렌더. 댓글 0개 단발 글의 얕은 메아리와 깊은 토론 수요를 시각 분리.
+ * 산출 공식: src/lib/trends/heat.ts · supabase/trends_engagement_heat.sql
+ */
+function HeatVsFrequencyPanel({ components }: { components: any }) {
+  const c = components ?? {}
+  const freq = Number(c.freq_score ?? c.frequency ?? c.freq ?? NaN)
+  const heat = Number(c.heat_weighted_score ?? c.heat ?? NaN)
+  if (!Number.isFinite(freq) || !Number.isFinite(heat) || (freq <= 0 && heat <= 0)) {
+    return null
+  }
+  const max = Math.max(freq, heat, 1)
+  const depth = freq > 0 ? heat / freq : 0
+  const Bar = ({ label, value, color }: { label: string; value: number; color: string }) => (
+    <div className="flex items-center gap-2">
+      <div className="w-24 text-xs text-gray-500 shrink-0">{label}</div>
+      <div className="flex-1 h-5 bg-gray-100 rounded overflow-hidden">
+        <div
+          className={`h-full ${color} transition-all`}
+          style={{ width: `${Math.max(2, (value / max) * 100)}%` }}
+        />
+      </div>
+      <div className="w-16 text-right text-xs font-mono text-gray-700">{value.toFixed(2)}</div>
+    </div>
+  )
+  return (
+    <section>
+      <h2 className="text-sm font-semibold mb-2">
+        단순 빈도 vs 화제 열량{' '}
+        <span className="text-xs font-normal text-gray-400">(도달 깊이 ×{depth.toFixed(2)})</span>
+      </h2>
+      <div className="rounded border border-gray-200 p-3 space-y-2">
+        <Bar label="단순 빈도" value={freq} color="bg-gray-400" />
+        <Bar label="화제 열량" value={heat} color="bg-rose-500" />
+        <p className="text-[11px] text-gray-400 pt-1">
+          {depth >= 1.5
+            ? '깊은 토론형 — 댓글·추천이 폭발한 진짜 화제'
+            : depth <= 1.05
+              ? '얕은 메아리형 — 댓글 0 단발 언급의 거품 가능성'
+              : '혼합형'}
+        </p>
+      </div>
+    </section>
   )
 }
 
