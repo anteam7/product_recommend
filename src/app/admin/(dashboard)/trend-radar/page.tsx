@@ -124,13 +124,29 @@ async function fetchData(category: Category) {
   }
 }
 
+// 계절상품 판정 임계: 현재값의 65% 이상이 캘린더(같은-월 과거)로 설명되면 계절상품
+const SEASONAL_THRESHOLD = 0.65
+
+interface Seasonality {
+  seasonal_index: number
+  deseasonalized_novelty: number
+  trend_score_deseasonalized?: number
+  reliable: boolean
+}
+function readSeasonality(s?: ScoreRow): Seasonality | null {
+  const raw = (s?.score_components as any)?.seasonality
+  if (!raw || typeof raw.seasonal_index !== 'number') return null
+  return raw as Seasonality
+}
+
 export default async function TrendRadarPage({
   searchParams,
 }: {
-  searchParams: Promise<{ cat?: string }>
+  searchParams: Promise<{ cat?: string; hideSeasonal?: string }>
 }) {
   const sp = await searchParams
   const category = (CATEGORIES.includes(sp.cat as Category) ? sp.cat : 'all') as Category
+  const hideSeasonal = sp.hideSeasonal === '1'
 
   const [{ products, scores, kpis }, tvPushes, tvGgsan] = await Promise.all([
     fetchData(category),
@@ -139,8 +155,13 @@ export default async function TrendRadarPage({
   ])
 
   const sorted = products
-    .map((p) => ({ p, s: scores.get(p.id) }))
+    .map((p) => ({ p, s: scores.get(p.id), seasonality: readSeasonality(scores.get(p.id)) }))
     .filter((x) => x.s)
+    .filter((x) =>
+      hideSeasonal
+        ? !(x.seasonality?.reliable && x.seasonality.seasonal_index >= SEASONAL_THRESHOLD)
+        : true,
+    )
     .sort((a, b) => (b.s!.final_score - a.s!.final_score))
 
   return (
@@ -267,39 +288,80 @@ export default async function TrendRadarPage({
 
       {/* Top 카드 */}
       <section>
+        <div className="flex items-center justify-between mb-2">
+          <h2 className="text-sm font-semibold text-gray-700">
+            발굴 후보{' '}
+            <span className="text-xs font-normal text-gray-500 ml-1">
+              신규성(탈계절) = 캘린더로 설명되지 않는 잔차 수요
+            </span>
+          </h2>
+          <Link
+            href={`/admin/trend-radar?cat=${category}${hideSeasonal ? '' : '&hideSeasonal=1'}`}
+            className={`text-xs px-3 py-1 rounded border transition-colors ${
+              hideSeasonal
+                ? 'border-emerald-300 bg-emerald-50 text-emerald-700 font-semibold'
+                : 'border-gray-200 text-gray-600 hover:bg-gray-50'
+            }`}
+          >
+            {hideSeasonal ? '✓ 계절상품 숨김' : '계절상품 숨기기'}
+          </Link>
+        </div>
         {sorted.length === 0 ? (
           <EmptyState category={category} />
         ) : (
           <div className="grid gap-3">
             <div className="grid grid-cols-12 text-xs text-gray-500 px-3 py-1">
               <div className="col-span-1">#</div>
-              <div className="col-span-5">상품명</div>
+              <div className="col-span-4">상품명</div>
+              <div className="col-span-2 text-right">신규성(탈계절)</div>
               <div className="col-span-1 text-right">final</div>
               <div className="col-span-1 text-right">trend</div>
               <div className="col-span-1 text-right">commerce</div>
               <div className="col-span-1 text-right">supplier</div>
-              <div className="col-span-1 text-right">competition</div>
-              <div className="col-span-1 text-right">aliases</div>
+              <div className="col-span-1 text-right">comp.</div>
             </div>
-            {sorted.slice(0, 50).map(({ p, s }, i) => (
-              <Link
-                key={p.id}
-                href={`/admin/trend-radar/products/${p.id}`}
-                className="grid grid-cols-12 px-3 py-2 rounded border border-gray-200 hover:bg-gray-50 transition-colors"
-              >
-                <div className="col-span-1 text-gray-400 font-mono">{i + 1}</div>
-                <div className="col-span-5">
-                  <div className="font-medium">{p.canonical_name}</div>
-                  <div className="text-xs text-gray-500">{p.category_top}</div>
-                </div>
-                <div className="col-span-1 text-right font-mono font-bold">{s!.final_score}</div>
-                <div className="col-span-1 text-right font-mono text-gray-600">{s!.trend_score}</div>
-                <div className="col-span-1 text-right font-mono text-gray-600">{s!.commerce_score}</div>
-                <div className="col-span-1 text-right font-mono text-gray-600">{s!.supplier_score}</div>
-                <div className="col-span-1 text-right font-mono text-gray-600">{s!.competition_score}</div>
-                <div className="col-span-1 text-right text-xs text-gray-500">{p.alias_count}</div>
-              </Link>
-            ))}
+            {sorted.slice(0, 50).map(({ p, s, seasonality }, i) => {
+              const isSeasonal =
+                !!seasonality?.reliable && seasonality.seasonal_index >= SEASONAL_THRESHOLD
+              return (
+                <Link
+                  key={p.id}
+                  href={`/admin/trend-radar/products/${p.id}`}
+                  className="grid grid-cols-12 px-3 py-2 rounded border border-gray-200 hover:bg-gray-50 transition-colors items-center"
+                >
+                  <div className="col-span-1 text-gray-400 font-mono">{i + 1}</div>
+                  <div className="col-span-4">
+                    <div className="font-medium flex items-center gap-1.5">
+                      {p.canonical_name}
+                      {isSeasonal && (
+                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-100 text-amber-700 font-semibold">
+                          🗓 계절성 {Math.round(seasonality!.seasonal_index * 100)}%
+                        </span>
+                      )}
+                    </div>
+                    <div className="text-xs text-gray-500">{p.category_top}</div>
+                  </div>
+                  <div className="col-span-2 text-right">
+                    {seasonality?.reliable ? (
+                      <span
+                        className={`font-mono font-semibold ${
+                          isSeasonal ? 'text-amber-600' : 'text-emerald-600'
+                        }`}
+                      >
+                        {Math.round(seasonality.deseasonalized_novelty)}
+                      </span>
+                    ) : (
+                      <span className="text-xs text-gray-300">—</span>
+                    )}
+                  </div>
+                  <div className="col-span-1 text-right font-mono font-bold">{s!.final_score}</div>
+                  <div className="col-span-1 text-right font-mono text-gray-600">{s!.trend_score}</div>
+                  <div className="col-span-1 text-right font-mono text-gray-600">{s!.commerce_score}</div>
+                  <div className="col-span-1 text-right font-mono text-gray-600">{s!.supplier_score}</div>
+                  <div className="col-span-1 text-right font-mono text-gray-600">{s!.competition_score}</div>
+                </Link>
+              )
+            })}
           </div>
         )}
       </section>

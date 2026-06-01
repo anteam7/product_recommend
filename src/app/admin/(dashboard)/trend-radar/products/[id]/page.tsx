@@ -152,6 +152,68 @@ export default async function ProductDetailPage({
         </section>
       )}
 
+      {/* 계절성 분해 — 계절 vs 구조적(신규) 상승 */}
+      {(() => {
+        const sz = (latest?.score_components as any)?.seasonality
+        if (!sz || typeof sz.seasonal_index !== 'number') return null
+        const seasonalPct = Math.round(sz.seasonal_index * 100)
+        const noveltyPct = 100 - seasonalPct
+        const isSeasonal = sz.reliable && sz.seasonal_index >= 0.65
+        return (
+          <section>
+            <h2 className="text-sm font-semibold mb-2">
+              계절성 분해{' '}
+              <span className="text-xs font-normal text-gray-500 ml-1">
+                매년 이맘때 반복 수요 vs 진짜 신규 수요
+                {sz.keyword ? ` · 기준 키워드 "${sz.keyword}"` : ''}
+              </span>
+            </h2>
+            <div className="rounded border border-gray-200 p-4 space-y-3">
+              {!sz.reliable && (
+                <p className="text-xs text-amber-600">
+                  ⚠ 과거 같은-월 표본 부족 — 분해 신뢰도 낮음 (참고용)
+                </p>
+              )}
+              {/* 스택 막대 스파크라인 */}
+              <div className="flex h-6 w-full overflow-hidden rounded text-[10px] font-semibold text-white">
+                <div
+                  className="flex items-center justify-center bg-amber-400"
+                  style={{ width: `${seasonalPct}%` }}
+                  title={`계절성 ${seasonalPct}%`}
+                >
+                  {seasonalPct >= 12 ? `계절 ${seasonalPct}%` : ''}
+                </div>
+                <div
+                  className="flex items-center justify-center bg-emerald-500"
+                  style={{ width: `${noveltyPct}%` }}
+                  title={`신규성 ${noveltyPct}%`}
+                >
+                  {noveltyPct >= 12 ? `신규 ${noveltyPct}%` : ''}
+                </div>
+              </div>
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-center">
+                <SeasonStat label="현재값(ratio)" value={Math.round(sz.current ?? 0)} />
+                <SeasonStat label="같은-월 기준선" value={Math.round(sz.baseline ?? 0)} />
+                <SeasonStat
+                  label="탈계절 신규성"
+                  value={Math.round(sz.deseasonalized_novelty ?? 0)}
+                  accent={isSeasonal ? 'amber' : 'emerald'}
+                />
+                <SeasonStat
+                  label="보정 trend"
+                  value={Math.round(sz.trend_score_deseasonalized ?? latest!.trend_score)}
+                />
+              </div>
+              <p className="text-xs text-gray-500">
+                {isSeasonal
+                  ? `🗓 이번 상승의 ${seasonalPct}% 가 매년 반복되는 계절 패턴 — 레드오션·리드타임 주의.`
+                  : `✅ 상승의 ${noveltyPct}% 가 캘린더로 설명되지 않는 구조적 신규 수요.`}
+              </p>
+            </div>
+          </section>
+        )
+      })()}
+
       {/* score breakdown */}
       {latest?.score_components && (
         <section>
@@ -182,6 +244,25 @@ export default async function ProductDetailPage({
       <section className="text-xs text-gray-500">
         first_seen: {product.first_seen_at} · last_seen: {product.last_seen_at}
       </section>
+    </div>
+  )
+}
+
+function SeasonStat({
+  label,
+  value,
+  accent,
+}: {
+  label: string
+  value: number
+  accent?: 'amber' | 'emerald'
+}) {
+  const color =
+    accent === 'amber' ? 'text-amber-600' : accent === 'emerald' ? 'text-emerald-600' : 'text-gray-800'
+  return (
+    <div className="rounded border border-gray-100 bg-gray-50 p-2">
+      <div className="text-[10px] text-gray-500">{label}</div>
+      <div className={`text-lg font-bold font-mono ${color}`}>{value}</div>
     </div>
   )
 }
