@@ -1,7 +1,32 @@
 import Link from 'next/link'
 import { createAdminClient } from '@/lib/auth/admin-supabase'
+import DecisionButtons from './DecisionButtons'
 
 export const dynamic = 'force-dynamic'
+
+interface DecisionInfo {
+  decision: string
+  reason_code: string | null
+}
+
+/** goods_no → 최신 의사결정 1건. recommend 카드에 현재 상태 표시 + 회고 입력. */
+async function fetchLatestDecisions(): Promise<Record<string, DecisionInfo>> {
+  const sb = createAdminClient()
+  // 신규 테이블 — generated 타입 미반영(`as any`). gen:types 후 캐스팅 제거.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const { data } = await (sb as any)
+    .from('jimscanner_trends_decisions')
+    .select('goods_no, decision, reason_code, decided_at')
+    .order('decided_at', { ascending: false })
+    .limit(2000)
+  const map: Record<string, DecisionInfo> = {}
+  for (const row of (data ?? []) as { goods_no: string | null; decision: string; reason_code: string | null }[]) {
+    if (row.goods_no && !map[row.goods_no]) {
+      map[row.goods_no] = { decision: row.decision, reason_code: row.reason_code }
+    }
+  }
+  return map
+}
 
 interface RecommendRow {
   goods_no: string
@@ -123,6 +148,7 @@ export default async function RecommendPage({
   }
 
   const { rows, error } = await fetchRecommend({ days: validDays, minSim: validSim, imminentOnly, cate })
+  const decisions = await fetchLatestDecisions().catch(() => ({} as Record<string, DecisionInfo>))
 
   // KPI
   const total = rows.length
@@ -235,16 +261,15 @@ export default async function RecommendPage({
         </div>
       ) : (
         <div className="space-y-2">
-          {rows.map((r, i) => (
-            <a
+          {rows.map((r, i) => {
+            const dec = decisions[r.goods_no]
+            return (
+            <div
               key={r.goods_no}
-              href={r.detail_url ?? '#'}
-              target="_blank"
-              rel="noopener"
-              className={`block rounded border overflow-hidden hover:shadow-sm transition-all ${
+              className={`block rounded border overflow-hidden transition-all ${
                 r.is_imminent
-                  ? 'border-red-200 bg-red-50/40 hover:bg-red-50'
-                  : 'border-gray-200 hover:bg-gray-50'
+                  ? 'border-red-200 bg-red-50/40'
+                  : 'border-gray-200'
               }`}
             >
               <div className="flex items-start gap-3 p-3">
@@ -254,7 +279,12 @@ export default async function RecommendPage({
                 </div>
 
                 {/* 이미지 */}
-                <div className="w-20 h-20 bg-gray-100 rounded overflow-hidden flex-shrink-0 relative">
+                <a
+                  href={r.detail_url ?? '#'}
+                  target="_blank"
+                  rel="noopener"
+                  className="w-20 h-20 bg-gray-100 rounded overflow-hidden flex-shrink-0 relative block"
+                >
                   {r.image_url && (
                     // eslint-disable-next-line @next/next/no-img-element
                     <img src={r.image_url} alt="" loading="lazy" className="w-full h-full object-cover" />
@@ -264,13 +294,19 @@ export default async function RecommendPage({
                       임박
                     </span>
                   )}
-                </div>
+                </a>
 
                 {/* 본문 */}
                 <div className="flex-1 min-w-0 space-y-1">
-                  <div className="text-sm font-medium leading-snug" title={r.title}>
+                  <a
+                    href={r.detail_url ?? '#'}
+                    target="_blank"
+                    rel="noopener"
+                    className="text-sm font-medium leading-snug hover:underline block"
+                    title={r.title}
+                  >
                     {r.title}
-                  </div>
+                  </a>
                   <div className="text-xs text-gray-500">
                     {r.cate_label ?? r.cate_cd} · {r.goods_no}
                   </div>
@@ -292,6 +328,21 @@ export default async function RecommendPage({
                       </span>
                     )}
                   </div>
+                  {/* 의사결정 캡처 (회고 보드 입력) */}
+                  <div className="pt-2">
+                    <DecisionButtons
+                      goodsNo={r.goods_no}
+                      snapshot={{
+                        final_score: Number(r.final_score),
+                        tv_score: Number(r.tv_score),
+                        search_score: Number(r.search_score),
+                        price_krw: r.price_krw,
+                        is_imminent: r.is_imminent,
+                      }}
+                      initialDecision={dec?.decision ?? null}
+                      initialReason={dec?.reason_code ?? null}
+                    />
+                  </div>
                 </div>
 
                 {/* 점수 + 가격 */}
@@ -309,8 +360,9 @@ export default async function RecommendPage({
                   </div>
                 </div>
               </div>
-            </a>
-          ))}
+            </div>
+            )
+          })}
         </div>
       )}
 
