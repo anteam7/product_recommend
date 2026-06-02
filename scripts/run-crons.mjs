@@ -144,4 +144,21 @@ if (!skipClassify) {
   if (classifyExit !== 0) failCount++
 }
 
+// scan-supply-gap: 재입고 대란 레이더 룰 스캐너 (LLM 불필요, 빠름).
+//   market_raw 발화에서 공급실패 렉시콘 추출 → jimscanner_supply_gap_signals.
+//   classify 와 동일 게이팅(특정 cron 만 / --no-classify 시 생략).
+if (!skipClassify) {
+  console.log(`[${new Date().toISOString()}] launching scan-supply-gap (rule scanner)`)
+  const sgPath = resolvePath(__dirname, 'scan-supply-gap.mjs')
+  const sgExit = await new Promise((resolve) => {
+    const child = spawn(process.execPath, [sgPath], { stdio: 'inherit', env: process.env })
+    child.on('exit', (code) => resolve(code ?? 0))
+    child.on('error', (err) => {
+      console.error(`  scan-supply-gap spawn error: ${err.message}`)
+      resolve(1)
+    })
+  })
+  if (sgExit !== 0) failCount++
+}
+
 process.exit(failCount > 0 ? 1 : 0)
