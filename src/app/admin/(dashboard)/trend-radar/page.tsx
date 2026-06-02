@@ -1,5 +1,6 @@
 import Link from 'next/link'
 import { createAdminClient } from '@/lib/auth/admin-supabase'
+import { archetypeMeta } from './triggers/archetypes'
 
 export const dynamic = 'force-dynamic'
 
@@ -75,6 +76,21 @@ async function fetchTvPushes() {
   return { ranked, totalKeywords: map.size, totalRows: rows.length }
 }
 
+// 촉발 아키타입 맵 (product_id → {archetype, durability, posture}) — 후보 카드 배지용.
+async function fetchTriggerMap() {
+  const sb = createAdminClient()
+  const { data } = await (sb as any).rpc('jimscanner_trend_trigger_classify', {
+    days_window: 30,
+    min_sim: 0.3,
+    min_final_score: 0,
+    result_limit: 500,
+  })
+  type Row = { product_id: string; trigger_archetype: string; durability: number; sourcing_posture: string }
+  const map = new Map<string, Row>()
+  for (const r of ((data ?? []) as Row[])) map.set(r.product_id, r)
+  return map
+}
+
 async function fetchData(category: Category) {
   const sb = createAdminClient()
 
@@ -132,10 +148,11 @@ export default async function TrendRadarPage({
   const sp = await searchParams
   const category = (CATEGORIES.includes(sp.cat as Category) ? sp.cat : 'all') as Category
 
-  const [{ products, scores, kpis }, tvPushes, tvGgsan] = await Promise.all([
+  const [{ products, scores, kpis }, tvPushes, tvGgsan, triggerMap] = await Promise.all([
     fetchData(category),
     fetchTvPushes(),
     fetchTvGgsanMatchSummary(),
+    fetchTriggerMap(),
   ])
 
   const sorted = products
@@ -290,7 +307,22 @@ export default async function TrendRadarPage({
                 <div className="col-span-1 text-gray-400 font-mono">{i + 1}</div>
                 <div className="col-span-5">
                   <div className="font-medium">{p.canonical_name}</div>
-                  <div className="text-xs text-gray-500">{p.category_top}</div>
+                  <div className="text-xs text-gray-500 flex items-center gap-1.5">
+                    <span>{p.category_top}</span>
+                    {(() => {
+                      const t = triggerMap.get(p.id)
+                      if (!t) return null
+                      const m = archetypeMeta(t.trigger_archetype)
+                      return (
+                        <span
+                          className={`inline-flex items-center gap-0.5 rounded border px-1 py-0.5 text-[10px] font-semibold ${m.badgeClass}`}
+                          title={m.postureHint}
+                        >
+                          {m.emoji} {m.label} · {m.durabilityLabel} · {m.posture}
+                        </span>
+                      )
+                    })()}
+                  </div>
                 </div>
                 <div className="col-span-1 text-right font-mono font-bold">{s!.final_score}</div>
                 <div className="col-span-1 text-right font-mono text-gray-600">{s!.trend_score}</div>
