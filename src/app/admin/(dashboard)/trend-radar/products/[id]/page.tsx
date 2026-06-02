@@ -1,6 +1,7 @@
 import Link from 'next/link'
 import { notFound } from 'next/navigation'
 import { createAdminClient } from '@/lib/auth/admin-supabase'
+import { computeAlphaRanking, type AlphaRow, type CategoryIndex } from '@/lib/trend-radar/alpha'
 
 export const dynamic = 'force-dynamic'
 
@@ -55,10 +56,28 @@ async function fetchProduct(id: string) {
 
   if (prodRes.error || !prodRes.data) return null
 
+  const product = prodRes.data as ProductRow
+
+  // 카테고리 인덱스 대비 제품 궤적 분해 (고유알파)
+  let alphaRow: AlphaRow | null = null
+  let catIndex: CategoryIndex | null = null
+  try {
+    const { rows, categories } = await computeAlphaRanking(sb, {
+      days: 14,
+      category: product.category_top,
+    })
+    alphaRow = rows.find((r) => r.id === id) ?? null
+    catIndex = categories[product.category_top] ?? null
+  } catch {
+    // 분해 실패해도 상세 페이지는 정상 노출
+  }
+
   return {
-    product: prodRes.data as ProductRow,
+    product,
     aliases: (aliasRes.data ?? []) as AliasRow[],
     scoreHistory: (scoreRes.data ?? []) as ScoreRow[],
+    alphaRow,
+    catIndex,
   }
 }
 
@@ -70,7 +89,7 @@ export default async function ProductDetailPage({
   const { id } = await params
   const data = await fetchProduct(id)
   if (!data) notFound()
-  const { product, aliases, scoreHistory } = data
+  const { product, aliases, scoreHistory, alphaRow, catIndex } = data
   const latest = scoreHistory[0]
 
   return (
@@ -117,6 +136,11 @@ export default async function ProductDetailPage({
           <ScoreCard label="supplier" value={latest.supplier_score} />
           <ScoreCard label="competition" value={latest.competition_score} />
         </section>
+      )}
+
+      {/* 카테고리 인덱스 대비 제품 궤적 (고유알파 분해) */}
+      {alphaRow && catIndex && (
+        <AlphaOverlay row={alphaRow} catIndex={catIndex} />
       )}
 
       {/* score 시계열 (최근 30 row) */}
@@ -183,6 +207,93 @@ export default async function ProductDetailPage({
         first_seen: {product.first_seen_at} · last_seen: {product.last_seen_at}
       </section>
     </div>
+  )
+}
+
+/**
+ * 카테고리 공통추세지수(베타) 대비 제품 trend_score 궤적을 SVG 라인으로 오버레이.
+ * 두 선의 벌어짐 = 알파(잔차). 제 카테고리보다 빠르게/느리게 움직였는지 한눈에.
+ */
+function AlphaOverlay({ row, catIndex }: { row: AlphaRow; catIndex: CategoryIndex }) {
+  const W = 640
+  const H = 160
+  const padX = 8
+  const padY = 12
+  const dates = row.series.map((p) => p.date)
+  const prodVals = row.series.map((p) => p.score)
+  const catByDate = new Map(catIndex.series.map((p) => [p.date, p.score]))
+  const catVals = dates.map((d) => catByDate.get(d) ?? null)
+
+  const nums = [...prodVals, ...catVals.filter((v): v is number => v != null)]
+  const min = Math.min(...nums)
+  const max = Math.max(...nums)
+  const span = max - min || 1
+  const n = dates.length
+  const x = (i: number) => padX + (n <= 1 ? 0 : (i / (n - 1)) * (W - 2 * padX))
+  const y = (v: number) => padY + (1 - (v - min) / span) * (H - 2 * padY)
+
+  const line = (vals: (number | null)[]) =>
+    vals
+      .map((v, i) => (v == null ? null : `${i === 0 ? 'M' : 'L'}${x(i).toFixed(1)},${y(v).toFixed(1)}`))
+      .filter(Boolean)
+      .join(' ')
+
+  return (
+    <section>
+      <h2 className="text-sm font-semibold mb-2 flex items-center gap-2">
+        카테고리 인덱스 대비 궤적
+        {row.label === 'alpha' && (
+          <span className="text-[10px] px-1.5 py-0.5 rounded bg-green-100 text-green-700 font-semibold">
+            고유 상승
+          </span>
+        )}
+        {row.label === 'beta' && (
+          <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-100 text-amber-700 font-semibold">
+            베타 의존
+          </span>
+        )}
+      </h2>
+      <div className="rounded border border-gray-200 p-3">
+        <div className="flex gap-4 text-xs mb-2">
+          <span className="flex items-center gap-1">
+            <span className="inline-block w-3 h-0.5 bg-green-600" /> 이 제품 (총상승{' '}
+            {row.totalDelta > 0 ? '+' : ''}
+            {row.totalDelta})
+          </span>
+          <span className="flex items-center gap-1">
+            <span className="inline-block w-3 h-0.5 bg-amber-500" /> {row.category_top} 인덱스 (베타{' '}
+            {row.beta > 0 ? '+' : ''}
+            {row.beta})
+          </span>
+          <span
+            className={`font-semibold ${
+              row.alpha > 0 ? 'text-green-600' : row.alpha < 0 ? 'text-red-500' : 'text-gray-500'
+            }`}
+          >
+            알파(잔차) {row.alpha > 0 ? '+' : ''}
+            {row.alpha}
+          </span>
+        </div>
+        <svg viewBox={`0 0 ${W} ${H}`} className="w-full" style={{ height: H }}>
+          <path d={line(catVals)} fill="none" stroke="#f59e0b" strokeWidth={2} strokeDasharray="4 3" />
+          <path d={line(prodVals)} fill="none" stroke="#16a34a" strokeWidth={2} />
+          {prodVals.map((v, i) => (
+            <circle key={i} cx={x(i)} cy={y(v)} r={2.5} fill="#16a34a" />
+          ))}
+        </svg>
+        <div className="flex justify-between text-[10px] text-gray-400 mt-1">
+          <span>{dates[0]}</span>
+          <span>{dates[dates.length - 1]}</span>
+        </div>
+        <p className="text-xs text-gray-500 mt-2">
+          {row.alpha > 0.5
+            ? '카테고리 평균을 초과해 단독으로 상승 중 — 1인 셀러가 노릴 엣지(알파) 후보.'
+            : row.beta > 0.5 && row.alpha <= 0.5
+              ? '상승의 대부분이 카테고리 동조(베타). 카테고리 전체가 뜬 레드오션일 수 있음.'
+              : '뚜렷한 단독 상승 신호 없음.'}
+        </p>
+      </div>
+    </section>
   )
 }
 
