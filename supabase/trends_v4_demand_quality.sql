@@ -1,0 +1,38 @@
+-- ─────────────────────────────────────────────────────────────
+-- 트렌드 레이더 v4 — 프로모션 의존도 게이트 (demand_quality)
+-- ─────────────────────────────────────────────────────────────
+-- 목적: "딥할인이 있어야만 뜨는 가짜 수요"와 "정가에서도 팔리는 진짜 수요"를
+--       분리하는 게이트. 위탁 셀러는 딥할인 경쟁이 불가능하므로,
+--       딜·특가 바이럴로만 뜬 상품(빨강)을 소싱 큐에서 회피한다.
+--
+-- 데이터 모델:
+--   별도 DDL 불필요 — 기존 jimscanner_trends_scores.score_components (jsonb) 안에
+--   demand_quality 키를 추가로 적재한다. recompute_scores 단계에서 채운다.
+--
+--   score_components.demand_quality = {
+--     "deal_heat":       number,   -- 딜/특가계열 alias heat (ppomppu_main, quasarzone_sale ...)
+--     "organic_heat":    number,   -- 오가닉수요계열 (naver_search_trend, naver_shopping_insight/hot ...)
+--     "community_heat":  number,   -- 커뮤니티화제계열 (dcinside, natepan, 82cook, clien ...)
+--     "dependency_index": number,  -- deal_heat / max(organic_heat + community_heat, 1)
+--     "verdict":         "red" | "amber" | "green"
+--   }
+--
+--   verdict 임계:
+--     red   (프로모션 의존)  : dependency_index >= 1.5  AND deal_heat > 0
+--     green (오가닉 주도)    : dependency_index <= 0.5
+--     amber (혼재)           : 그 외
+--
+-- UI: /admin/trend-radar/promo-dependency
+--   - 의존지수 X · 오가닉 heat Y 산점도
+--   - 빨강 후보 경고 리스트 (소싱 회피 권장)
+--
+-- 주의: 어드민 페이지는 alias.source 기반으로 on-the-fly 계산도 수행하므로,
+--        recompute 가 demand_quality 를 아직 적재하지 않아도 동작한다.
+--        recompute 적재분이 있으면 그 값을 우선 신뢰한다.
+-- ─────────────────────────────────────────────────────────────
+
+-- (DDL 없음 — jsonb 컬럼 재사용. 본 파일은 컨벤션 문서 + 향후 인덱스 후보 메모.)
+
+-- 향후 demand_quality 기준 필터링이 잦아지면 아래 표현식 인덱스 검토:
+-- CREATE INDEX IF NOT EXISTS jimscanner_trends_scores_demand_verdict
+--   ON jimscanner_trends_scores ((score_components -> 'demand_quality' ->> 'verdict'));
