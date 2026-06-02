@@ -75,6 +75,28 @@ async function fetchTvPushes() {
   return { ranked, totalKeywords: map.size, totalRows: rows.length }
 }
 
+async function fetchTopRisers() {
+  const sb = createAdminClient()
+  // rank-velocity 뷰 (마이그레이션 후 가정 → as any). 뷰 부재/빈 데이터는 graceful.
+  const { data } = await (sb as any)
+    .from('jimscanner_trends_rank_velocity')
+    .select('keyword, source, first_rank, current_rank, jump, velocity, is_new_entry')
+    .gte('days_present', 2)
+    .gt('jump', 0)
+    .order('velocity', { ascending: false })
+    .limit(5)
+  type Row = {
+    keyword: string
+    source: string
+    first_rank: number
+    current_rank: number
+    jump: number
+    velocity: number
+    is_new_entry: boolean
+  }
+  return (data ?? []) as Row[]
+}
+
 async function fetchData(category: Category) {
   const sb = createAdminClient()
 
@@ -132,10 +154,11 @@ export default async function TrendRadarPage({
   const sp = await searchParams
   const category = (CATEGORIES.includes(sp.cat as Category) ? sp.cat : 'all') as Category
 
-  const [{ products, scores, kpis }, tvPushes, tvGgsan] = await Promise.all([
+  const [{ products, scores, kpis }, tvPushes, tvGgsan, topRisers] = await Promise.all([
     fetchData(category),
     fetchTvPushes(),
     fetchTvGgsanMatchSummary(),
+    fetchTopRisers(),
   ])
 
   const sorted = products
@@ -214,6 +237,43 @@ export default async function TrendRadarPage({
           </div>
           <span className="text-xs text-gray-500">매칭 보러가기 →</span>
         </div>
+      </Link>
+
+      {/* 🚀 오늘 가장 빨리 오른 키워드 (Rank Velocity) */}
+      <Link
+        href="/admin/trend-radar/rank-velocity"
+        className="block rounded border border-emerald-200 bg-emerald-50/60 px-4 py-3 transition-colors hover:bg-emerald-100"
+      >
+        <div className="flex items-center justify-between flex-wrap gap-2 mb-1">
+          <div className="text-sm font-semibold">
+            🚀 오늘 가장 빨리 오른 키워드{' '}
+            <span className="text-xs font-normal text-gray-500 ml-1">
+              랭킹형 소스 순위 가속 (Δrank/day)
+            </span>
+          </div>
+          <span className="text-xs text-gray-500">브레이크아웃 보드 →</span>
+        </div>
+        {topRisers.length === 0 ? (
+          <div className="text-xs text-gray-500">
+            아직 순위 시계열 부족 — 랭킹형 소스 2일 이상 누적 후 등장.
+          </div>
+        ) : (
+          <div className="flex flex-wrap gap-2">
+            {topRisers.map((r) => (
+              <span
+                key={r.keyword + r.source}
+                className="inline-flex items-center gap-1 rounded-full bg-white border border-emerald-200 px-2.5 py-1 text-xs"
+              >
+                {r.is_new_entry && <span className="text-[10px] text-emerald-700 font-bold">NEW</span>}
+                <span className="font-medium truncate max-w-[160px]">{r.keyword}</span>
+                <span className="font-mono text-gray-500">
+                  {r.first_rank}→{r.current_rank}
+                </span>
+                <span className="font-mono font-bold text-emerald-600">▲{r.jump}</span>
+              </span>
+            ))}
+          </div>
+        )}
       </Link>
 
       {/* TV 편성 push Top 20 */}
