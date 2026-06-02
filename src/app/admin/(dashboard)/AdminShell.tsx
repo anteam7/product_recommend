@@ -96,7 +96,13 @@ const NAV_GROUPS: NavGroup[] = [
         href: '/admin/coupang-publish',
         label: '등록 상품 관리',
         icon: '🅒',
-        match: (p) => p.startsWith('/admin/coupang-publish'),
+        match: (p) => p === '/admin/coupang-publish' || p === '/admin/coupang-publish/',
+      },
+      {
+        href: '/admin/coupang-publish/momentum',
+        label: '📈 SKU 모멘텀',
+        icon: '📈',
+        match: (p) => p.startsWith('/admin/coupang-publish/momentum'),
       },
       {
         href: '/admin/coupang-orders',

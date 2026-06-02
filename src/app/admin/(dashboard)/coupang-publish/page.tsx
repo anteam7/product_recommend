@@ -211,6 +211,9 @@ export default async function CoupangPublishPage({
             <strong>{meta.displayable.toLocaleString()}</strong>건
           </p>
         </div>
+        <Link href="/admin/coupang-publish/momentum" className="text-sm text-gray-700 hover:text-black underline">
+          📈 SKU 모멘텀 →
+        </Link>
       </header>
 
       {/* cron 위젯 */}
