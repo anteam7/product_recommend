@@ -248,11 +248,12 @@ export default async function CoupangOrdersPage({
           ))}
           <span className="text-xs text-gray-400 ml-1">· 주문 {summary.count.toLocaleString()}건 (취소 제외)</span>
         </div>
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
           <Kpi label="총 매출" value={`${summary.revenue.toLocaleString()}원`} />
           <Kpi label="총 매입원가" value={`${summary.cost.toLocaleString()}원`} />
-          <Kpi label="수수료+부가세" value={`${(summary.fee + summary.vat).toLocaleString()}원`} sub={`수수료 ${summary.fee.toLocaleString()} + 부가세 ${summary.vat.toLocaleString()}`} />
-          <Kpi label="총 실수익" value={`${summary.net.toLocaleString()}원`} highlight positive={summary.net >= 0} />
+          <Kpi label="수수료" value={`${summary.fee.toLocaleString()}원`} sub="판매수수료 10.6%" />
+          <Kpi label="총 실수익 (부가세 포함)" value={`${(summary.net + summary.vat).toLocaleString()}원`} sub={`부가세 차감 전 (부가세 ${summary.vat.toLocaleString()})`} />
+          <Kpi label="총 실수익 (부가세 제외)" value={`${summary.net.toLocaleString()}원`} sub={`부가세 −${summary.vat.toLocaleString()} 차감`} highlight positive={summary.net >= 0} />
         </div>
         {summary.costMissing > 0 && (
           <p className="text-[11px] text-amber-600">
