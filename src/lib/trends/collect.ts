@@ -6,7 +6,17 @@ import {
   chunk,
   type DatalabKeywordGroup,
   type DatalabCategoryGroup,
+  type DatalabResponse,
+  type DatalabGender,
 } from './naver-datalab'
+import {
+  DEMO_SOURCE,
+  AGE_BUCKET_KEYS,
+  AGE_CODES,
+  GENDER_KEYS,
+  type DemoAgeVector,
+  type DemoGenderVector,
+} from './demographics'
 
 /**
  * 트렌드 수집 코어 — cron 라우트가 호출.
@@ -131,6 +141,136 @@ export async function collectNaverSearchTrends(
         if (insErr) lastErr = insErr.message
         else inserted += rows.length
       }
+    } catch (e) {
+      lastErr = e instanceof Error ? e.message : String(e)
+    }
+  }
+
+  const status: CollectSummary['status'] = lastErr
+    ? inserted > 0
+      ? 'partial'
+      : 'error'
+    : 'ok'
+  const summary = { fetched, inserted, status, error: lastErr }
+  await logRun(admin, source, triggeredBy, startedAt, summary)
+  return { ...summary, source, durationMs: Date.now() - startedAt }
+}
+
+/** 응답 첫 그룹 data 의 평균 ratio (세그먼트 필터 호출 결과 축약용) */
+function meanRatio(resp: DatalabResponse): number {
+  const data = resp.results?.[0]?.data ?? []
+  if (data.length === 0) return 0
+  const sum = data.reduce((a, d) => a + (d.ratio ?? 0), 0)
+  return sum / data.length
+}
+
+/**
+ * 인구통계 수요 프로파일 수집.
+ *
+ * 기존 collect 가 단일 ratio 로 평탄화하는 것과 달리, 각 시드(검색어 그룹/쇼핑 카테고리)를
+ * 연령대(10~60대+)×성별로 분할 호출해 데모그래픽 벡터를 조립한다.
+ * 결과는 jimscanner_trends_keywords 에 source='naver_demographics' + demo_age/demo_gender(jsonb) 로 적재.
+ *
+ * 마이그레이션(supabase/trends_demographics.sql) 적용 후 동작. 컬럼 타입 미반영이라 insert 는 as any.
+ */
+export async function collectNaverDemographics(
+  admin: SupabaseClient,
+  triggeredBy: string,
+): Promise<CollectSummary> {
+  const startedAt = Date.now()
+  const source = DEMO_SOURCE
+
+  const { data: seeds, error: sErr } = await admin
+    .from('jimscanner_trends_seeds')
+    .select('id, source, kind, label, config')
+    .in('source', ['naver_search_trend', 'naver_shopping_insight'])
+    .eq('is_active', true)
+    .order('display_order')
+  if (sErr) {
+    const summary = { fetched: 0, inserted: 0, status: 'error' as const, error: sErr.message }
+    await logRun(admin, source, triggeredBy, startedAt, summary)
+    return { ...summary, source, durationMs: Date.now() - startedAt }
+  }
+  const seedList = (seeds ?? []) as Seed[]
+  if (seedList.length === 0) {
+    const summary = { fetched: 0, inserted: 0, status: 'partial' as const, error: 'no active seeds' }
+    await logRun(admin, source, triggeredBy, startedAt, summary)
+    return { ...summary, source, durationMs: Date.now() - startedAt }
+  }
+
+  const startDate = dateNDaysAgoKst(30)
+  const endDate = dateNDaysAgoKst(1)
+
+  let fetched = 0
+  let inserted = 0
+  let lastErr: string | undefined
+
+  for (const seed of seedList) {
+    const isShopping = seed.source === 'naver_shopping_insight'
+    const ageMode = isShopping ? 'shopping' : 'search'
+
+    // 시드 → 단일 키워드/카테고리 요청 빌더
+    const keywordGroup: DatalabKeywordGroup | null =
+      !isShopping && (seed.config.keywords?.length ?? 0) > 0
+        ? { groupName: seed.config.groupName ?? seed.label, keywords: seed.config.keywords! }
+        : null
+    const category: DatalabCategoryGroup | null =
+      isShopping && seed.config.cid
+        ? { name: seed.config.name ?? seed.label, param: [seed.config.cid] }
+        : null
+    if (!keywordGroup && !category) continue
+
+    const callSegment = async (ages?: string[], gender?: DatalabGender): Promise<number> => {
+      if (isShopping) {
+        const resp = await fetchShoppingCategories({
+          startDate,
+          endDate,
+          timeUnit: 'date',
+          category: [category!],
+          ...(ages ? { ages } : {}),
+          ...(gender ? { gender } : {}),
+        })
+        return meanRatio(resp)
+      }
+      const resp = await fetchSearchTrend({
+        startDate,
+        endDate,
+        timeUnit: 'date',
+        keywordGroups: [keywordGroup!],
+        ...(ages ? { ages } : {}),
+        ...(gender ? { gender } : {}),
+      })
+      return meanRatio(resp)
+    }
+
+    try {
+      const demoAge: DemoAgeVector = {}
+      for (const bucket of AGE_BUCKET_KEYS) {
+        demoAge[bucket] = await callSegment(AGE_CODES[ageMode][bucket])
+        fetched++
+      }
+      const demoGender: DemoGenderVector = {}
+      for (const g of GENDER_KEYS) {
+        demoGender[g] = await callSegment(undefined, g)
+        fetched++
+      }
+
+      const keyword = isShopping
+        ? (category!.name)
+        : (keywordGroup!.groupName)
+
+      const { error: insErr } = await admin.from('jimscanner_trends_keywords').insert({
+        keyword,
+        source,
+        category: isShopping ? keyword : null,
+        category_top: isShopping ? keyword : null,
+        rank: null,
+        volume_relative: null,
+        demo_age: demoAge,
+        demo_gender: demoGender,
+      } as never)
+      if (insErr) lastErr = insErr.message
+      else inserted++
     } catch (e) {
       lastErr = e instanceof Error ? e.message : String(e)
     }
