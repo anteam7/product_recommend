@@ -63,6 +63,12 @@ const NAV_GROUPS: NavGroup[] = [
         match: (p) => p.startsWith('/admin/trend-radar/tv-ggsan-match'),
       },
       {
+        href: '/admin/trend-radar/affinity',
+        label: '🔗 동반언급 묶음',
+        icon: '🔗',
+        match: (p) => p.startsWith('/admin/trend-radar/affinity'),
+      },
+      {
         href: '/admin/trend-radar/opportunity',
         label: '기회 점수',
         icon: '🎯',
