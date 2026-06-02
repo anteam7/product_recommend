@@ -63,6 +63,12 @@ const NAV_GROUPS: NavGroup[] = [
         match: (p) => p.startsWith('/admin/trend-radar/tv-ggsan-match'),
       },
       {
+        href: '/admin/trend-radar/review-gaps',
+        label: '🔍 리뷰 불만 갭',
+        icon: '🔍',
+        match: (p) => p.startsWith('/admin/trend-radar/review-gaps'),
+      },
+      {
         href: '/admin/trend-radar/opportunity',
         label: '기회 점수',
         icon: '🎯',
