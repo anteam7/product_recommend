@@ -216,6 +216,27 @@ export default async function TrendRadarPage({
         </div>
       </Link>
 
+      {/* 🟢 입고 골든윈도우 callout */}
+      <Link
+        href="/admin/trend-radar/new-arrival"
+        className="block rounded border border-emerald-300 bg-emerald-50 px-4 py-3 transition-colors hover:bg-emerald-100"
+      >
+        <div className="flex items-center justify-between flex-wrap gap-2">
+          <div>
+            <div className="text-sm font-semibold">
+              🟢 입고 골든윈도우{' '}
+              <span className="text-xs font-normal text-gray-500 ml-1">
+                도매처가 막 취급 시작한 신규 SKU × 수요
+              </span>
+            </div>
+            <div className="text-xs text-gray-600 mt-0.5">
+              남들이 리스팅하기 전에 먼저 등록 · 입고경과 오름차순 × 수요 강도
+            </div>
+          </div>
+          <span className="text-xs text-gray-500">신규입고 보러가기 →</span>
+        </div>
+      </Link>
+
       {/* TV 편성 push Top 20 */}
       <section className="rounded border border-gray-200 p-4 bg-amber-50/40">
         <div className="flex items-baseline justify-between mb-3">
