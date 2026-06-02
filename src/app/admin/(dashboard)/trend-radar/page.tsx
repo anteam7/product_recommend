@@ -75,6 +75,35 @@ async function fetchTvPushes() {
   return { ranked, totalKeywords: map.size, totalRows: rows.length }
 }
 
+async function fetchCrowdingKpi() {
+  const sb = createAdminClient()
+  // trends_v4_crowding_rpc.sql 적용 후 상태 가정 (생성 타입 미반영 → as any)
+  const { data } = await (sb.rpc as any)('jimscanner_trends_crowding', {
+    days_window: 7,
+    min_points: 3,
+    result_limit: 500,
+  })
+  type Row = {
+    canonical_name: string | null
+    competition_slope: number | null
+    trend_slope: number | null
+  }
+  const rows = ((data ?? []) as Row[]).filter((r) => r.competition_slope != null)
+  const EPS = 0.3
+  // 닫히는 창: 수요 가속 + 경쟁 급증 동시 (진입창이 닫히는 중)
+  const closing = rows.filter(
+    (r) => Number(r.trend_slope ?? 0) > EPS && Number(r.competition_slope ?? 0) > EPS,
+  )
+  const top = [...rows].sort(
+    (a, b) => Number(b.competition_slope ?? 0) - Number(a.competition_slope ?? 0),
+  )[0]
+  return {
+    closingCount: closing.length,
+    topName: top?.canonical_name ?? null,
+    topSlope: top ? Number(top.competition_slope ?? 0) : 0,
+  }
+}
+
 async function fetchData(category: Category) {
   const sb = createAdminClient()
 
@@ -132,10 +161,11 @@ export default async function TrendRadarPage({
   const sp = await searchParams
   const category = (CATEGORIES.includes(sp.cat as Category) ? sp.cat : 'all') as Category
 
-  const [{ products, scores, kpis }, tvPushes, tvGgsan] = await Promise.all([
+  const [{ products, scores, kpis }, tvPushes, tvGgsan, crowding] = await Promise.all([
     fetchData(category),
     fetchTvPushes(),
     fetchTvGgsanMatchSummary(),
+    fetchCrowdingKpi(),
   ])
 
   const sorted = products
@@ -160,13 +190,29 @@ export default async function TrendRadarPage({
         </Link>
       </header>
 
-      {/* KPI 5종 */}
-      <section className="grid grid-cols-2 md:grid-cols-5 gap-4">
+      {/* KPI 6종 */}
+      <section className="grid grid-cols-2 md:grid-cols-6 gap-4">
         <KpiCard label="canonical 상품" value={kpis.products} hint="누적 매핑" />
         <KpiCard label="LLM 분류" value={kpis.llmClassified} hint={`${kpis.products > 0 ? Math.round((kpis.llmClassified / kpis.products) * 100) : 0}% 진척`} />
         <KpiCard label="고득점 (≥50)" value={kpis.top} hint="final_score 기준" />
         <KpiCard label="supplier 매칭" value={kpis.supplier} hint="도매꾹·알리 검출" />
         <KpiCard label="TV push" value={kpis.tv} hint="홈쇼핑 편성 검출" />
+        <Link
+          href="/admin/trend-radar/crowding"
+          className={`rounded border p-4 transition-colors ${
+            crowding.closingCount > 0
+              ? 'border-amber-300 bg-amber-50 hover:bg-amber-100'
+              : 'border-gray-200 hover:bg-gray-50'
+          }`}
+        >
+          <div className="text-xs text-gray-500">⏳ 혼잡 가속 (닫히는 창)</div>
+          <div className="text-3xl font-bold mt-1">{crowding.closingCount.toLocaleString()}</div>
+          <div className="text-xs text-gray-400 mt-1 truncate">
+            {crowding.topName
+              ? `최고 ${crowding.topName} +${crowding.topSlope.toFixed(1)}/일`
+              : '7일 누적 후 산출'}
+          </div>
+        </Link>
       </section>
 
       {/* 카테고리 탭 */}
