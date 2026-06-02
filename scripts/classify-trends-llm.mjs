@@ -254,6 +254,138 @@ async function logRun(payload) {
   }
 }
 
+// ────────────────────────────────────────────────────────────
+// painpoint → solution 역설계 패스
+// pain_point 시그널(불편 발화)을 LLM 에 넣어 "이 불편을 푸는 후보 상품
+// 카테고리/제품형태" 1~3개를 역설계 생성, jimscanner_painpoint_solution 에 저장.
+// 능동 구매발화가 아닌, 상품을 모른 채 표출된 불편을 상품으로 번역하는 패스.
+// ────────────────────────────────────────────────────────────
+const PAINPOINT_BATCH_SIZE = 12
+const PAINPOINT_MAX_REQ = 8
+
+const PAINPOINT_SYSTEM_PROMPT = `한국 위탁 판매 상품 발굴기. 입력은 커뮤니티·뉴스에서 추출된 '불편(pain point)' 발화 리스트.
+각 불편을 푸는 후보 상품 카테고리/제품형태를 역설계해서 JSON 배열로 변환.
+
+❗ 절대 규칙:
+- 응답 첫 글자는 '['
+- 응답 마지막 글자는 ']'
+- 분석 과정·설명·코드펜스(\`\`\`)·markdown 출력 금지
+- 입력 id 그대로 유지
+
+각 항목 필드:
+- id: 입력 id 그대로
+- pain_summary: 불편을 12자 이내 한 줄로 요약
+- solution_terms: 이 불편을 푸는 후보 상품 카테고리/제품형태 1~3개 (각 2~8자 한국어 일반명사, 브랜드 금지)
+  · ggsan 도매몰 상품명과 매칭될 일반 상품군명으로 (예: "층간소음" 불편 → ["방음매트","발소리슬리퍼"])
+  · 상품으로 풀 수 없는 불편이면 빈 배열 []
+
+예시 입력: - id="p1" keywords=[층간소음, 윗집] desc="윗집 발소리 때문에 잠을 못 잠"
+예시 출력: [{"id":"p1","pain_summary":"윗집 층간소음","solution_terms":["방음매트","소음방지슬리퍼"]}]`
+
+function buildPainpointPrompt(items) {
+  const lines = items.map(
+    (it) =>
+      `- id="${it.id}" keywords=[${(it.keywords ?? []).join(', ')}] desc="${(it.description ?? '').slice(0, 120)}"`,
+  )
+  return `다음 ${items.length}개 불편 발화를 역설계해서 JSON 배열로 응답:\n\n${lines.join('\n')}`
+}
+
+function normalizePainpoint(o, fallbackId) {
+  if (!o || typeof o !== 'object') return null
+  const id = String(o.id ?? fallbackId).trim()
+  if (!id) return null
+  let terms = Array.isArray(o.solution_terms) ? o.solution_terms : []
+  terms = terms
+    .map((t) => (typeof t === 'string' ? t.trim().slice(0, 20) : ''))
+    .filter(Boolean)
+    .slice(0, 3)
+  return {
+    signal_id: id,
+    pain_summary:
+      typeof o.pain_summary === 'string' ? o.pain_summary.trim().slice(0, 40) : null,
+    solution_terms: terms,
+    llm_model: MODEL,
+    generated_at: new Date().toISOString(),
+  }
+}
+
+async function fetchPainpointCandidates() {
+  // 아직 역설계되지 않은 pain_point 시그널 (최근 우선)
+  const { data: signals } = await sb
+    .from('jimscanner_market_signals')
+    .select('id, keywords, description, last_seen')
+    .eq('signal_type', 'pain_point')
+    .order('last_seen', { ascending: false })
+    .limit(PAINPOINT_BATCH_SIZE * PAINPOINT_MAX_REQ)
+  if (!signals || signals.length === 0) return []
+  const { data: done } = await sb
+    .from('jimscanner_painpoint_solution')
+    .select('signal_id')
+    .in(
+      'signal_id',
+      signals.map((s) => s.id),
+    )
+  const doneSet = new Set((done ?? []).map((d) => d.signal_id))
+  return signals.filter((s) => !doneSet.has(s.id))
+}
+
+async function runPainpointPass() {
+  let candidates
+  try {
+    candidates = await fetchPainpointCandidates()
+  } catch (e) {
+    console.error(`  [painpoint] fetch 실패: ${e instanceof Error ? e.message : e}`)
+    return
+  }
+  if (candidates.length === 0) {
+    console.log('  [painpoint] 역설계 대상 없음')
+    return
+  }
+  console.log(`  [painpoint] candidates: ${candidates.length}`)
+
+  const rows = []
+  let req = 0
+  for (let i = 0; i < candidates.length; i += PAINPOINT_BATCH_SIZE) {
+    if (req >= PAINPOINT_MAX_REQ) break
+    const batch = candidates.slice(i, i + PAINPOINT_BATCH_SIZE)
+    const inputs = batch.map((c) => ({
+      id: c.id,
+      keywords: c.keywords,
+      description: c.description,
+    }))
+    const fullPrompt = `${PAINPOINT_SYSTEM_PROMPT}\n\n---\n\n${buildPainpointPrompt(inputs)}`
+    try {
+      const out = await callClaudeCli(fullPrompt)
+      req++
+      const arr = tryParseJsonArray(out.text) ?? []
+      const byId = new Map()
+      for (let j = 0; j < arr.length; j++) {
+        const r = normalizePainpoint(arr[j], inputs[j]?.id ?? '')
+        if (r) byId.set(r.signal_id, r)
+      }
+      // 솔루션이 안 나온 시그널도 빈 배열로 기록해 재처리 루프 방지
+      for (const it of inputs) {
+        rows.push(byId.get(it.id) ?? normalizePainpoint({ id: it.id, solution_terms: [] }, it.id))
+      }
+      console.log(`  [painpoint] batch ${req}: ${batch.length} in → ${byId.size} solved`)
+    } catch (e) {
+      console.error(`  [painpoint] batch ${req + 1} 실패: ${e instanceof Error ? e.message : e}`)
+      break
+    }
+  }
+
+  if (rows.length > 0) {
+    const { error } = await sb
+      .from('jimscanner_painpoint_solution')
+      .upsert(rows, { onConflict: 'signal_id' })
+    if (error) console.error(`  [painpoint] upsert 실패: ${error.message}`)
+    else
+      console.log(
+        `  [painpoint] 저장 ${rows.length}건 (solution_terms 있는 것 ${rows.filter((r) => r.solution_terms.length > 0).length})`,
+      )
+  }
+}
+
 async function main() {
   const t0 = Date.now()
   const stamp = new Date().toISOString()
@@ -267,7 +399,8 @@ async function main() {
 
   const candidates = await fetchCandidates()
   if (candidates.length === 0) {
-    console.log('  done: 분류 대상 없음 (0 candidates)')
+    console.log('  done: 상품 분류 대상 없음 (0 candidates) — painpoint 패스만 실행')
+    await runPainpointPass()
     await logRun({
       status: 'ok',
       fetched_count: 0,
@@ -344,6 +477,9 @@ async function main() {
       outputTokens: totalOut,
     })
   }
+
+  // painpoint → solution 역설계 패스 (상품 분류와 독립)
+  await runPainpointPass()
 
   await logRun({
     status: lastError ? 'partial' : 'ok',
