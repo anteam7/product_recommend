@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react'
 import Link from 'next/link'
 import { notFound } from 'next/navigation'
 import { createAdminClient } from '@/lib/auth/admin-supabase'
@@ -35,10 +36,40 @@ interface ScoreRow {
   score_components: any
   computed_at: string
 }
+interface EvidenceRow {
+  raw_id: string
+  source: string
+  source_url: string | null
+  title: string | null
+  query: string | null
+  metadata: any
+  captured_at: string
+  matched_alias: string | null
+  matched_keyword: string | null
+  signal_type: string | null
+  signal_category: string | null
+}
+
+const EVIDENCE_DAYS = 30
+
+// 출처 코드 → 사람이 읽는 라벨
+const SOURCE_LABELS: Record<string, string> = {
+  clien_park: '클리앙 파크',
+  naver_news: '네이버 뉴스',
+  naver_blog: '네이버 블로그',
+  google_suggest: '구글 자동완성',
+  quasarzone_sale: '퀘이사존 핫딜',
+  kca_press: 'KCA 보도자료',
+  '82cook': '82cook',
+  dcinside: '디시인사이드',
+}
+function sourceLabel(source: string) {
+  return SOURCE_LABELS[source] ?? source
+}
 
 async function fetchProduct(id: string) {
   const sb = createAdminClient()
-  const [prodRes, aliasRes, scoreRes] = await Promise.all([
+  const [prodRes, aliasRes, scoreRes, evidenceRes] = await Promise.all([
     sb.from('jimscanner_trends_products').select('*').eq('id', id).single(),
     sb
       .from('jimscanner_trends_aliases')
@@ -51,6 +82,8 @@ async function fetchProduct(id: string) {
       .eq('product_id', id)
       .order('computed_at', { ascending: false })
       .limit(30),
+    // 근거 원문 드릴다운: alias → market_signals.keywords → raw_ids[] → market_raw 원문
+    sb.rpc('get_product_evidence' as never, { p_product_id: id, p_days: EVIDENCE_DAYS } as never),
   ])
 
   if (prodRes.error || !prodRes.data) return null
@@ -59,6 +92,7 @@ async function fetchProduct(id: string) {
     product: prodRes.data as ProductRow,
     aliases: (aliasRes.data ?? []) as AliasRow[],
     scoreHistory: (scoreRes.data ?? []) as ScoreRow[],
+    evidence: ((evidenceRes.data ?? []) as unknown as EvidenceRow[]) ?? [],
   }
 }
 
@@ -70,7 +104,7 @@ export default async function ProductDetailPage({
   const { id } = await params
   const data = await fetchProduct(id)
   if (!data) notFound()
-  const { product, aliases, scoreHistory } = data
+  const { product, aliases, scoreHistory, evidence } = data
   const latest = scoreHistory[0]
 
   return (
@@ -162,6 +196,9 @@ export default async function ProductDetailPage({
         </section>
       )}
 
+      {/* 근거 원문 (Evidence) — 점수 → 실제 발화/기사 추적 */}
+      <EvidencePanel evidence={evidence} />
+
       {/* aliases */}
       <section>
         <h2 className="text-sm font-semibold mb-2">매핑된 alias ({aliases.length})</h2>
@@ -194,5 +231,151 @@ function ScoreCard({ label, value, bold }: { label: string; value: number; bold?
         {value}
       </div>
     </div>
+  )
+}
+
+function snippet(meta: any): string | null {
+  if (!meta || typeof meta !== 'object') return null
+  const raw =
+    meta.description ?? meta.snippet ?? meta.content ?? meta.summary ?? meta.body ?? null
+  if (!raw || typeof raw !== 'string') return null
+  const clean = raw.replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim()
+  if (!clean) return null
+  return clean.length > 220 ? clean.slice(0, 220) + '…' : clean
+}
+
+function EvidencePanel({ evidence }: { evidence: EvidenceRow[] }) {
+  if (!evidence.length) {
+    return (
+      <section>
+        <h2 className="text-sm font-semibold mb-2">근거 원문 (Evidence)</h2>
+        <div className="rounded border border-dashed border-gray-200 p-6 text-center text-sm text-gray-400">
+          최근 {EVIDENCE_DAYS}일간 이 상품의 alias 와 매칭되는 수집 원문이 없습니다.
+          <br />
+          <span className="text-xs">
+            (alias → market_signals.keywords → market_raw 추적 결과 0건 — 점수가 과거 시그널 또는
+            도매/경쟁 지표에만 기댄 상태일 수 있음)
+          </span>
+        </div>
+      </section>
+    )
+  }
+
+  // 근거 충실도: 원문 건수 · 고유 출처 수 · 최근성(최신 captured_at)
+  const total = evidence.length
+  const sources = Array.from(new Set(evidence.map((e) => e.source)))
+  const latest = evidence.reduce<string | null>(
+    (acc, e) => (acc && acc > e.captured_at ? acc : e.captured_at),
+    null,
+  )
+  const ageDays =
+    latest != null
+      ? Math.max(0, Math.round((Date.now() - new Date(latest).getTime()) / 86_400_000))
+      : null
+
+  // 출처별 그룹핑 (각 그룹 내 시간 역순)
+  const groups = new Map<string, EvidenceRow[]>()
+  for (const e of evidence) {
+    const arr = groups.get(e.source) ?? []
+    arr.push(e)
+    groups.set(e.source, arr)
+  }
+  const orderedGroups = Array.from(groups.entries()).sort((a, b) => b[1].length - a[1].length)
+
+  return (
+    <section>
+      <div className="flex items-center justify-between mb-2 flex-wrap gap-2">
+        <h2 className="text-sm font-semibold">
+          근거 원문 (Evidence) <span className="text-gray-400 font-normal">최근 {EVIDENCE_DAYS}일</span>
+        </h2>
+        <div className="flex items-center gap-1.5 flex-wrap">
+          <Badge tone="blue">원문 {total}건</Badge>
+          <Badge tone="violet">고유 출처 {sources.length}개</Badge>
+          {ageDays != null && (
+            <Badge tone={ageDays <= 3 ? 'green' : ageDays <= 14 ? 'amber' : 'gray'}>
+              {ageDays === 0 ? '오늘' : `최근성 ${ageDays}일 전`}
+            </Badge>
+          )}
+        </div>
+      </div>
+
+      <div className="space-y-4">
+        {orderedGroups.map(([source, rows]) => (
+          <div key={source}>
+            <div className="text-xs font-medium text-gray-500 mb-1.5 flex items-center gap-1.5">
+              <span className="inline-block w-1.5 h-1.5 rounded-full bg-gray-300" />
+              {sourceLabel(source)}
+              <span className="text-gray-300">·</span>
+              <span className="text-gray-400">{rows.length}건</span>
+            </div>
+            <div className="rounded border border-gray-200 divide-y divide-gray-100">
+              {rows.map((e) => {
+                const snip = snippet(e.metadata)
+                return (
+                  <div key={e.raw_id} className="px-3 py-2.5">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        {e.source_url ? (
+                          <a
+                            href={e.source_url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-sm font-medium text-blue-700 hover:underline break-words"
+                          >
+                            {e.title || e.source_url}
+                          </a>
+                        ) : (
+                          <span className="text-sm font-medium text-gray-800 break-words">
+                            {e.title || '(제목 없음)'}
+                          </span>
+                        )}
+                        {snip && <p className="text-xs text-gray-600 mt-1 leading-relaxed">{snip}</p>}
+                        <div className="mt-1 flex items-center gap-1.5 flex-wrap text-[10px]">
+                          {e.matched_keyword && (
+                            <span className="px-1.5 py-0.5 rounded bg-amber-50 text-amber-700 font-mono">
+                              🔑 {e.matched_keyword}
+                            </span>
+                          )}
+                          {e.signal_type && (
+                            <span className="px-1.5 py-0.5 rounded bg-gray-100 text-gray-500">
+                              {e.signal_type}
+                            </span>
+                          )}
+                          {e.matched_alias && e.matched_alias !== e.matched_keyword && (
+                            <span className="text-gray-400">← alias “{e.matched_alias}”</span>
+                          )}
+                        </div>
+                      </div>
+                      <time className="text-[10px] font-mono text-gray-400 whitespace-nowrap shrink-0">
+                        {e.captured_at?.slice(0, 16).replace('T', ' ')}
+                      </time>
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          </div>
+        ))}
+      </div>
+    </section>
+  )
+}
+
+function Badge({
+  children,
+  tone,
+}: {
+  children: ReactNode
+  tone: 'blue' | 'violet' | 'green' | 'amber' | 'gray'
+}) {
+  const tones: Record<string, string> = {
+    blue: 'bg-blue-50 text-blue-700',
+    violet: 'bg-violet-50 text-violet-700',
+    green: 'bg-green-50 text-green-700',
+    amber: 'bg-amber-50 text-amber-700',
+    gray: 'bg-gray-100 text-gray-500',
+  }
+  return (
+    <span className={`text-[11px] px-2 py-0.5 rounded font-medium ${tones[tone]}`}>{children}</span>
   )
 }
