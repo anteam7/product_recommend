@@ -34,6 +34,7 @@ const CRONS = [
   '/api/cron/update-rates',
   '/api/cron/refresh-shipping-rates',
   '/api/cron/collect-naver-search-trends',
+  '/api/cron/collect-naver-searchad',
   '/api/cron/collect-naver-shopping-trends',
   '/api/cron/collect-google-suggest',
   '/api/cron/collect-naver-news',
