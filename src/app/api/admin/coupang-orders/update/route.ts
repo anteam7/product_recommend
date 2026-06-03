@@ -7,7 +7,7 @@ import { logAdminAction } from '@/lib/admin-log'
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 
-const PURCHASE_STATUSES = ['PENDING', 'ORDERED', 'RECEIVED', 'CANCELLED'] as const
+const PURCHASE_STATUSES = ['PENDING', 'ORDERED', 'SHIPPED', 'RECEIVED', 'CANCELLED'] as const
 type PurchaseStatus = (typeof PURCHASE_STATUSES)[number]
 
 async function requireAdmin() {
@@ -39,7 +39,7 @@ export async function POST(request: NextRequest) {
   const user = await requireAdmin()
   if (!user) return NextResponse.json({ error: '권한 없음' }, { status: 401 })
 
-  let body: { id?: string; purchase_status?: string; purchase_unit_cost?: unknown; purchase_total_cost?: unknown; purchase_note?: string; delivery_company?: string; invoice_number?: string }
+  let body: { id?: string; purchase_status?: string; purchase_unit_cost?: unknown; purchase_total_cost?: unknown; purchase_note?: string; delivery_company?: string; invoice_number?: string; ggsan_order_no?: string }
   try { body = await request.json() } catch { return NextResponse.json({ error: '잘못된 요청' }, { status: 400 }) }
   const { id } = body
   if (!id) return NextResponse.json({ error: 'id 누락' }, { status: 400 })
@@ -67,6 +67,8 @@ export async function POST(request: NextRequest) {
     update.purchase_status = ps
     // 상태 전이 시각 자동 스탬프 (이미 찍힌 건 유지)
     if (ps === 'ORDERED' && !order.purchase_ordered_at) update.purchase_ordered_at = now
+    // SHIPPED(매입처발송): 발주 시각이 비었으면 채움. 송장/쿠팡등록은 ggsan cron / register-invoice 소관.
+    if (ps === 'SHIPPED' && !order.purchase_ordered_at) update.purchase_ordered_at = now
     if (ps === 'RECEIVED') {
       if (!order.purchase_ordered_at) update.purchase_ordered_at = now
       if (!order.purchase_received_at) update.purchase_received_at = now
@@ -95,6 +97,22 @@ export async function POST(request: NextRequest) {
     changes.push('메모')
   }
 
+  // 3.5) ggsan 발주(주문)번호 — 수동입력만(자동캡처/휴리스틱 없음). 매칭 린치핀.
+  //      10~18자리 숫자 검증. 저장 시 ggsan_match_method='manual'. 빈 문자열은 해제(null).
+  if (body.ggsan_order_no !== undefined) {
+    const raw = String(body.ggsan_order_no).replace(/\s/g, '')
+    if (raw === '') {
+      update.ggsan_order_no = null
+      update.ggsan_match_method = null
+      changes.push('ggsan 주문번호 해제')
+    } else {
+      if (!/^\d{10,18}$/.test(raw)) return NextResponse.json({ error: 'ggsan 주문번호 형식 오류(숫자 10~18자리)' }, { status: 400 })
+      update.ggsan_order_no = raw
+      update.ggsan_match_method = 'manual'
+      changes.push(`ggsan 주문번호 ${raw}`)
+    }
+  }
+
   // 4) 송장 / 발송 추적 — 쿠팡 API 등록이 아니라 내부 기록만 (운송장은 Wing에서 직접 등록)
   const hasCompany = body.delivery_company !== undefined
   const hasInvoice = body.invoice_number !== undefined
@@ -108,7 +126,9 @@ export async function POST(request: NextRequest) {
     // 송장번호가 채워지면 = 발송 처리: 발송시각 + 발주상태 '발송완료'(RECEIVED) 자동 (취소건 제외)
     if (invoiceVal) {
       if (!order.shipped_at) update.shipped_at = now
-      if (order.purchase_status !== 'CANCELLED' && order.purchase_status !== 'RECEIVED') {
+      // SHIPPED 제외: ggsan cron 이 매입처발송으로 만든 건은 수동 송장입력으로 RECEIVED 직행 금지(검토 C-2).
+      // 쿠팡 송장등록(register-invoice)이 성공해야만 RECEIVED 로 전이된다.
+      if (order.purchase_status !== 'CANCELLED' && order.purchase_status !== 'RECEIVED' && order.purchase_status !== 'SHIPPED') {
         update.purchase_status = 'RECEIVED'
         if (!order.purchase_ordered_at) update.purchase_ordered_at = now
         if (!order.purchase_received_at) update.purchase_received_at = now
@@ -141,5 +161,6 @@ export async function POST(request: NextRequest) {
     delivery_company: update.delivery_company,
     invoice_number: update.invoice_number,
     shipped_at: update.shipped_at,
+    ggsan_order_no: update.ggsan_order_no,
   })
 }

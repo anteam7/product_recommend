@@ -111,7 +111,7 @@ async function fetchData(opts: {
 async function fetchCronStatus() {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const sb = createAdminClient() as any
-  const [stockRun, ordersRun, ordersAggResp, ordersCountResp] = await Promise.all([
+  const [stockRun, ordersRun, ggsanRun, ordersAggResp, ordersCountResp] = await Promise.all([
     sb
       .from('jimscanner_coupang_stock_sync_runs')
       .select('started_at, status, total_checked, sold_out_count, resumed_count, error_count, duration_ms')
@@ -124,6 +124,19 @@ async function fetchCronStatus() {
       .order('started_at', { ascending: false })
       .limit(1)
       .maybeSingle(),
+    // ggsan_sync_runs 테이블 미생성 시 throw → catch로 null 폴백 (Promise.all 보호)
+    sb
+      .from('jimscanner_coupang_ggsan_sync_runs')
+      .select(
+        'started_at, status, tracked_count, shipped_count, invoice_ok_count, duplicate_count, invoice_err_count, attention_count, duration_ms',
+      )
+      .order('started_at', { ascending: false })
+      .limit(1)
+      .maybeSingle()
+      .then(
+        (r: { data: unknown }) => r,
+        () => ({ data: null }),
+      ),
     sb
       .from('jimscanner_coupang_orders')
       .select('last_synced_at')
@@ -136,6 +149,8 @@ async function fetchCronStatus() {
     stock: stockRun.data,
     // orders_sync_runs 테이블 생성 전이면 null → 위젯이 최근주문시각 fallback
     ordersRun: ordersRun.data ?? null,
+    // ggsan_sync_runs 테이블 미생성 시 null 폴백
+    ggsanRun: ggsanRun?.data ?? null,
     ordersLastSync: ordersAggResp.data?.last_synced_at ?? null,
     ordersTotal: ordersCountResp.count ?? 0,
   }
@@ -214,7 +229,7 @@ export default async function CoupangPublishPage({
       </header>
 
       {/* cron 위젯 */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
         {/* Stock sync */}
         <div className="bg-white border rounded p-3">
           <div className="flex items-baseline justify-between mb-2">
@@ -262,6 +277,33 @@ export default async function CoupangPublishPage({
             )}
             <div>누적 주문: <strong>{cronStatus.ordersTotal.toLocaleString()}</strong> · <a href="/admin/coupang-orders" className="text-blue-600 hover:underline">→ 주문 관리</a></div>
           </div>
+        </div>
+
+        {/* ggsan 발송(송장) sync */}
+        <div className="bg-white border rounded p-3">
+          <div className="flex items-baseline justify-between mb-2">
+            <span className="text-xs font-semibold text-gray-500">📑 매입처발송 Sync (시간당)</span>
+            {cronStatus.ggsanRun?.status === 'error' ? (
+              <span className="text-[10px] bg-rose-100 text-rose-700 px-1.5 py-0.5 rounded">에러</span>
+            ) : cronStatus.ggsanRun?.status === 'success' ? (
+              <span className="text-[10px] bg-emerald-100 text-emerald-700 px-1.5 py-0.5 rounded">정상</span>
+            ) : (
+              <span className="text-[10px] bg-gray-100 text-gray-500 px-1.5 py-0.5 rounded">대기</span>
+            )}
+          </div>
+          {cronStatus.ggsanRun ? (
+            <div className="text-xs text-gray-700 space-y-0.5">
+              <div>마지막 실행: <strong>{fmtDate(cronStatus.ggsanRun.started_at)}</strong> ({((cronStatus.ggsanRun.duration_ms ?? 0) / 1000).toFixed(1)}s)</div>
+              <div>
+                조회 <strong>{cronStatus.ggsanRun.tracked_count ?? 0}</strong> · 발송 {cronStatus.ggsanRun.shipped_count ?? 0} · 등록 {cronStatus.ggsanRun.invoice_ok_count ?? 0}
+                {(cronStatus.ggsanRun.attention_count ?? 0) > 0 && (
+                  <span className="text-rose-600 font-semibold"> · 주의 {cronStatus.ggsanRun.attention_count}</span>
+                )}
+              </div>
+            </div>
+          ) : (
+            <div className="text-xs text-gray-400">아직 실행 기록 없음</div>
+          )}
         </div>
       </div>
 

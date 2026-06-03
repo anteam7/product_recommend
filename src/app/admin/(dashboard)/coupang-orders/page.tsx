@@ -3,10 +3,11 @@ import { createAdminClient } from '@/lib/auth/admin-supabase'
 import { PurchaseStatusCell } from './PurchaseStatusCell'
 import { PurchaseCostCell } from './PurchaseCostCell'
 import { InvoiceCell } from './InvoiceCell'
+import { GgsanTrackingCell } from './GgsanTrackingCell'
 
 export const dynamic = 'force-dynamic'
 
-type PurchaseStatus = 'PENDING' | 'ORDERED' | 'RECEIVED' | 'CANCELLED'
+type PurchaseStatus = 'PENDING' | 'ORDERED' | 'SHIPPED' | 'RECEIVED' | 'CANCELLED'
 type ShippingStatus =
   | 'ACCEPT'
   | 'INSTRUCT'
@@ -50,16 +51,26 @@ interface OrderRow {
   // 조인: 매입처(ggsan) 바로가기용
   ggsan_goods_no?: string | null
   ggsan_url?: string | null
+  // ggsan↔쿠팡 송장 동기화 컬럼 (select('*') 라 쿼리 변경 불필요, 타입만)
+  ggsan_order_no?: string | null
+  ggsan_order_status?: string | null
+  ggsan_invoice_number?: string | null
+  ggsan_carrier_name?: string | null
+  ggsan_shipped_at?: string | null
+  coupang_invoice_status?: string | null
+  needs_attention?: boolean | null
+  attention_reason?: string | null
   // raw_payload.receiver 에서 가공(목록 표시용)
   receiver_zip_code?: string | null
   receiver_phone?: string | null
   receiver_address_full?: string | null
 }
 
-// 드롭십(ggsan 직배송): 미발주 → 발주완료 → 발송완료(운송장 등록) → 취소 ("입고" 단계 없음)
+// 드롭십(ggsan 직배송): 미발주 → 발주완료 → 매입처발송 → 발송완료(쿠팡 등록) → 취소 ("입고" 단계 없음)
 const PURCHASE_STATUS_LABELS: Record<PurchaseStatus, { label: string; cls: string }> = {
   PENDING: { label: '미발주', cls: 'bg-rose-100 text-rose-700' },
   ORDERED: { label: '발주완료', cls: 'bg-amber-100 text-amber-700' },
+  SHIPPED: { label: '매입처발송', cls: 'bg-sky-100 text-sky-700' },
   RECEIVED: { label: '발송완료', cls: 'bg-emerald-100 text-emerald-700' },
   CANCELLED: { label: '취소', cls: 'bg-zinc-200 text-zinc-600' },
 }
@@ -159,15 +170,17 @@ async function fetchMeta() {
   const sb = createAdminClient() as unknown as {
     from: (t: string) => ReturnType<ReturnType<typeof createAdminClient>['from']>
   }
-  const [{ count: total }, pStat] = await Promise.all([
+  const [{ count: total }, pStat, { count: attentionCount }] = await Promise.all([
     sb.from('jimscanner_coupang_orders').select('*', { count: 'exact', head: true }),
     sb.from('jimscanner_coupang_orders').select('purchase_status'),
+    // needs_attention 건수 배너용. 컬럼 미적용(Phase1 전) 환경이면 에러→0 폴백.
+    sb.from('jimscanner_coupang_orders').select('*', { count: 'exact', head: true }).eq('needs_attention', true),
   ])
   const byPurchase = new Map<string, number>()
   for (const r of (pStat.data ?? []) as unknown as { purchase_status: string }[]) {
     byPurchase.set(r.purchase_status, (byPurchase.get(r.purchase_status) ?? 0) + 1)
   }
-  return { total: total ?? 0, byPurchase }
+  return { total: total ?? 0, byPurchase, attentionCount: attentionCount ?? 0 }
 }
 
 /** 지정 기간 실수익 합산 (취소 제외). 실수익 = 매출 − 매입원가 − 수수료(10.6%) − 부가세(÷11) */
@@ -244,6 +257,13 @@ export default async function CoupangOrdersPage({
           </p>
         </div>
       </header>
+
+      {/* 확인 필요(needs_attention) 배너 — 미결제·매칭실패·등록실패·반품·택배사 미매핑 등 돈·배송 직결 건 */}
+      {meta.attentionCount > 0 && (
+        <div className="rounded border border-rose-300 bg-rose-50 px-4 py-3 text-sm text-rose-700">
+          ⚠ <strong>{meta.attentionCount}건</strong>이 사람 확인이 필요합니다 (매입처 추적 열의 ⚠ 표시 — 미결제·매칭실패·등록실패·반품·택배사 미매핑 등). 처리 후 자동으로 사라집니다.
+        </div>
+      )}
 
       {/* 기간별 실수익 요약 */}
       <section className="space-y-2">
@@ -341,6 +361,7 @@ export default async function CoupangOrdersPage({
               <th className="px-3 py-2 text-right font-semibold">주문금액</th>
               <th className="px-3 py-2 text-right font-semibold">매입가</th>
               <th className="px-3 py-2 text-center font-semibold">매입 상태</th>
+              <th className="px-3 py-2 text-left font-semibold">매입처 추적</th>
               <th className="px-3 py-2 text-center font-semibold">배송 상태</th>
               <th className="px-3 py-2 text-left font-semibold">송장</th>
               <th className="px-3 py-2 text-center font-semibold">주문일</th>
@@ -349,7 +370,7 @@ export default async function CoupangOrdersPage({
           <tbody>
             {rows.length === 0 && (
               <tr>
-                <td colSpan={8} className="px-3 py-12 text-center text-gray-400 text-sm">
+                <td colSpan={9} className="px-3 py-12 text-center text-gray-400 text-sm">
                   아직 주문이 없습니다. 쿠팡에서 주문이 들어오면 자동으로 추가됩니다.
                 </td>
               </tr>
@@ -414,6 +435,20 @@ export default async function CoupangOrdersPage({
                       id={r.id}
                       status={r.purchase_status}
                       orderedAt={r.purchase_ordered_at}
+                      ggsanOrderNo={r.ggsan_order_no}
+                    />
+                  </td>
+                  <td className="px-3 py-2">
+                    <GgsanTrackingCell
+                      id={r.id}
+                      ggsanOrderNo={r.ggsan_order_no ?? null}
+                      ggsanOrderStatus={r.ggsan_order_status ?? null}
+                      ggsanInvoiceNumber={r.ggsan_invoice_number ?? null}
+                      ggsanCarrierName={r.ggsan_carrier_name ?? null}
+                      ggsanShippedAt={r.ggsan_shipped_at ?? null}
+                      coupangInvoiceStatus={r.coupang_invoice_status ?? null}
+                      needsAttention={r.needs_attention ?? null}
+                      attentionReason={r.attention_reason ?? null}
                     />
                   </td>
                   <td className="px-3 py-2 text-center">
@@ -453,8 +488,9 @@ export default async function CoupangOrdersPage({
       )}
 
       <div className="text-xs text-gray-400 border-t pt-3 leading-relaxed">
-        ℹ️ 흐름: 쿠팡 주문 자동 수집(매시간) → 🛒 건강산 매입 → 발주 상태/매입원가 입력(실수익 표시) → ggsan 직배송 후 받은 <strong>송장번호를 여기 입력하면 자동으로 &lsquo;발송완료&rsquo; 처리·발송일 기록</strong>됩니다.
-        <br />※ 송장의 <strong>쿠팡 등록은 자동이 아니라 Wing에서 직접</strong> 하세요. 이 화면은 발송 추적·관리용입니다.
+        ℹ️ 흐름: 쿠팡 주문 자동 수집(매시간) → 🛒 건강산 매입 → 발주완료 후 <strong>ggsan 주문번호 입력</strong>(매입 상태 칸) → 매시간 ggsan 추적 크론이 <strong>송장 발급을 감지하면 &lsquo;매입처발송&rsquo;으로 전이</strong>합니다.
+        <br />※ 송장은 <strong>쿠팡에 자동 등록</strong>됩니다 — 반자동 모드에서는 &lsquo;매입처 추적&rsquo; 칸의 <strong>[확인·등록]</strong> 버튼을 눌러 등록(쿠팡 등록 성공 시 &lsquo;발송완료&rsquo;). 자동 모드에서는 크론이 바로 등록합니다.
+        <br />※ <strong>⚠ 확인 필요</strong> 배너/표시(미결제·매칭실패·등록실패·반품·택배사 미매핑)는 사람 확인이 필요한 돈·배송 직결 건입니다.
         <br />※ <strong>💳 결제진행</strong>(미발주·매입처 연결 건): 로컬 헬퍼(<code>node --env-file=.env.local scripts/order-server.mjs</code>)가 PC에 떠 있어야 작동 — 클릭 시 ggsan 주문서를 자동 작성하고 <strong>결제 직전에 멈춥니다</strong>(실결제는 직접).
       </div>
     </div>
