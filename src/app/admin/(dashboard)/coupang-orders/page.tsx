@@ -46,9 +46,14 @@ interface OrderRow {
   paid_amount: number | null
   ordered_at: string
   last_synced_at: string | null
+  raw_payload?: { receiver?: { name?: string; postCode?: string; addr1?: string; addr2?: string; safeNumber?: string; receiverNumber?: string } } | null
   // 조인: 매입처(ggsan) 바로가기용
   ggsan_goods_no?: string | null
   ggsan_url?: string | null
+  // raw_payload.receiver 에서 가공(목록 표시용)
+  receiver_zip_code?: string | null
+  receiver_phone?: string | null
+  receiver_address_full?: string | null
 }
 
 // 드롭십(ggsan 직배송): 미발주 → 발주완료 → 발송완료(운송장 등록) → 취소 ("입고" 단계 없음)
@@ -139,6 +144,13 @@ async function fetchData(opts: {
       r.ggsan_url = l?.source_detail_url
         ?? (goodsNo ? `https://www.ggsan.com/goods/goods_view.php?goodsNo=${goodsNo}` : null)
     }
+  }
+  // 수령인(배송지) 가공: raw_payload.receiver → 우편번호/전체주소/연락처 (목록 표시 + 결제진행용)
+  for (const r of rows) {
+    const rc = r.raw_payload?.receiver
+    r.receiver_zip_code = rc?.postCode ?? null
+    r.receiver_phone = rc?.safeNumber ?? rc?.receiverNumber ?? null
+    r.receiver_address_full = rc ? [rc.addr1, rc.addr2].filter(Boolean).join(' ') : null
   }
   return { rows, total: count ?? 0 }
 }
@@ -363,6 +375,28 @@ export default async function CoupangOrdersPage({
                         </a>
                       )}
                     </div>
+                    {(r.receiver_name || r.receiver_address_full) && (
+                      <div className="text-[11px] text-gray-600 mt-1">
+                        📦 <span className="font-medium text-gray-800">{r.receiver_name ?? '-'}</span>
+                        {r.receiver_zip_code ? <span className="text-gray-400"> ({r.receiver_zip_code})</span> : null}
+                        {r.receiver_address_full ? <span> · {r.receiver_address_full}</span> : null}
+                        {r.receiver_phone ? <span className="text-gray-400"> · {r.receiver_phone}</span> : null}
+                      </div>
+                    )}
+                    {r.purchase_status === 'PENDING' && r.ggsan_goods_no && (
+                      <div className="mt-1">
+                        <a
+                          href={`http://127.0.0.1:39201/order?id=${r.order_id}`}
+                          target="_blank"
+                          rel="noreferrer noopener"
+                          className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-blue-600 text-white text-[11px] font-semibold hover:bg-blue-700"
+                          title="로컬 헬퍼로 ggsan 주문서 자동작성 → 결제 직전 정지(결제는 직접)"
+                        >
+                          💳 결제진행
+                        </a>
+                        <span className="text-[10px] text-gray-400 ml-1">로컬 헬퍼 실행 필요</span>
+                      </div>
+                    )}
                   </td>
                   <td className="px-3 py-2 text-center tabular-nums">{r.shipping_count}</td>
                   <td className="px-3 py-2 text-right tabular-nums font-semibold">{fmt(r.order_price)}</td>
@@ -421,6 +455,7 @@ export default async function CoupangOrdersPage({
       <div className="text-xs text-gray-400 border-t pt-3 leading-relaxed">
         ℹ️ 흐름: 쿠팡 주문 자동 수집(매시간) → 🛒 건강산 매입 → 발주 상태/매입원가 입력(실수익 표시) → ggsan 직배송 후 받은 <strong>송장번호를 여기 입력하면 자동으로 &lsquo;발송완료&rsquo; 처리·발송일 기록</strong>됩니다.
         <br />※ 송장의 <strong>쿠팡 등록은 자동이 아니라 Wing에서 직접</strong> 하세요. 이 화면은 발송 추적·관리용입니다.
+        <br />※ <strong>💳 결제진행</strong>(미발주·매입처 연결 건): 로컬 헬퍼(<code>node --env-file=.env.local scripts/order-server.mjs</code>)가 PC에 떠 있어야 작동 — 클릭 시 ggsan 주문서를 자동 작성하고 <strong>결제 직전에 멈춥니다</strong>(실결제는 직접).
       </div>
     </div>
   )
