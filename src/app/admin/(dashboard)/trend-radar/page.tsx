@@ -216,6 +216,27 @@ export default async function TrendRadarPage({
         </div>
       </Link>
 
+      {/* ⏱ 타임투마켓 도착가능성 게이트 */}
+      <Link
+        href="/admin/trend-radar/time-to-market"
+        className="block rounded border border-indigo-200 bg-indigo-50/60 px-4 py-3 transition-colors hover:bg-indigo-100"
+      >
+        <div className="flex items-center justify-between flex-wrap gap-2">
+          <div>
+            <div className="text-sm font-semibold">
+              ⏱ 타임투마켓 게이트{' '}
+              <span className="text-xs font-normal text-gray-500 ml-1">
+                수요 반감기 × 소싱 리드타임 — 도착 전 수요 소멸 차단
+              </span>
+            </div>
+            <div className="text-xs text-gray-600 mt-0.5">
+              시계열에서 반감기·잔존수명을 추정해 도매 리드타임과 직접 충돌 → 늦음/안전/여유 3색 판정
+            </div>
+          </div>
+          <span className="text-xs text-gray-500">게이트 보러가기 →</span>
+        </div>
+      </Link>
+
       {/* TV 편성 push Top 20 */}
       <section className="rounded border border-gray-200 p-4 bg-amber-50/40">
         <div className="flex items-baseline justify-between mb-3">
