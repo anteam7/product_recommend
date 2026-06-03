@@ -92,3 +92,26 @@ export function computeMargin(listPrice: number, dome: number, shipping: number 
     marginPct: listPrice ? +((margin / listPrice) * 100).toFixed(2) : 0,
   }
 }
+
+// ─── 필수 바닥가 (price-fit 게이트) ───
+// margin >= targetMargin 을 만족하는 최소 판매가.
+//   margin = list*(1 - FEE_RATE - 1/VAT_DIVISOR) - (dome+ship)
+//   list  >= (dome+ship+targetMargin) / (1 - FEE_RATE - 1/VAT_DIVISOR)
+// WTP 천장(수요측 지불의사 상한)과 겹쳐 '가격 헤드룸 = WTP천장 − 필수바닥가' 를 산출한다.
+export function computeFloorPrice(dome: number, targetMargin = 0, shipping: number = SHIP): number {
+  const variableRate = 1 - FEE_RATE - 1 / VAT_DIVISOR // 판매가 1원당 셀러에게 남는 비율 (배송·도매 제외 전)
+  if (variableRate <= 0) return Infinity
+  return Math.ceil((dome + shipping + targetMargin) / variableRate)
+}
+
+// WTP 천장 대비 헤드룸 — 음수면 '마진불가'(조기 킬), 넓으면 '가격결정력'.
+export function computeHeadroom(wtpHigh: number | null, dome: number, targetMargin = 0, shipping: number = SHIP) {
+  const floor = computeFloorPrice(dome, targetMargin, shipping)
+  if (wtpHigh == null || !Number.isFinite(floor)) {
+    return { floor, headroom: null as number | null, headroomPct: null as number | null, verdict: 'unknown' as const }
+  }
+  const headroom = wtpHigh - floor
+  const headroomPct = wtpHigh > 0 ? +((headroom / wtpHigh) * 100).toFixed(1) : 0
+  const verdict: 'kill' | 'tight' | 'power' = headroom < 0 ? 'kill' : headroomPct < 15 ? 'tight' : 'power'
+  return { floor, headroom, headroomPct, verdict }
+}
