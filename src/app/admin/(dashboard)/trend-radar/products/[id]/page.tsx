@@ -1,6 +1,8 @@
 import Link from 'next/link'
 import { notFound } from 'next/navigation'
 import { createAdminClient } from '@/lib/auth/admin-supabase'
+import { fetchSourceHealth } from '@/lib/trend-radar/source-health'
+import { TrustBadge } from '../../data-health/page'
 
 export const dynamic = 'force-dynamic'
 
@@ -38,6 +40,7 @@ interface ScoreRow {
 
 async function fetchProduct(id: string) {
   const sb = createAdminClient()
+  const healthP = fetchSourceHealth()
   const [prodRes, aliasRes, scoreRes] = await Promise.all([
     sb.from('jimscanner_trends_products').select('*').eq('id', id).single(),
     sb
@@ -55,10 +58,32 @@ async function fetchProduct(id: string) {
 
   if (prodRes.error || !prodRes.data) return null
 
+  const aliases = (aliasRes.data ?? []) as AliasRow[]
+
+  // 데이터 신뢰 디스카운트 — 이 상품을 떠받치는 소스가 현재 degraded/stale 인지
+  const { bySource } = await healthP
+  const sourced = aliases.filter((a) => a.source)
+  const degradedSources = new Set<string>()
+  let degradedCount = 0
+  for (const a of sourced) {
+    const h = a.source ? bySource.get(a.source) : undefined
+    if (h?.degraded) {
+      degradedCount++
+      if (a.source) degradedSources.add(a.source)
+    }
+  }
+  const trustDiscount = sourced.length > 0 ? degradedCount / sourced.length : 0
+
   return {
     product: prodRes.data as ProductRow,
-    aliases: (aliasRes.data ?? []) as AliasRow[],
+    aliases,
     scoreHistory: (scoreRes.data ?? []) as ScoreRow[],
+    trust: {
+      discount: trustDiscount,
+      sourcedCount: sourced.length,
+      degradedCount,
+      degradedSources: [...degradedSources],
+    },
   }
 }
 
@@ -70,7 +95,7 @@ export default async function ProductDetailPage({
   const { id } = await params
   const data = await fetchProduct(id)
   if (!data) notFound()
-  const { product, aliases, scoreHistory } = data
+  const { product, aliases, scoreHistory, trust } = data
   const latest = scoreHistory[0]
 
   return (
@@ -97,6 +122,24 @@ export default async function ProductDetailPage({
               {product.description && (
                 <span className="text-sm text-gray-700">{product.description}</span>
               )}
+            </div>
+          )}
+          {trust.discount > 0 && (
+            <div className="mt-2 flex items-center gap-2 flex-wrap">
+              <TrustBadge discount={trust.discount} />
+              <span className="text-xs text-gray-600">
+                데이터 신뢰 디스카운트 — 이 상품을 떠받치는 {trust.sourcedCount}개 소스 중{' '}
+                {trust.degradedCount}개가 현재 degraded/stale
+                {trust.degradedSources.length > 0 && (
+                  <span className="font-mono text-gray-500">
+                    {' '}({trust.degradedSources.join(', ')})
+                  </span>
+                )}
+                . 급상승이 실수요가 아닌 파이프라인 노이즈일 수 있음.{' '}
+                <Link href="/admin/trend-radar/data-health" className="underline">
+                  데이터 신뢰도 보드
+                </Link>
+              </span>
             </div>
           )}
           {product.llm_classified_at && (
