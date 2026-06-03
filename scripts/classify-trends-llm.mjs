@@ -104,7 +104,13 @@ function normalizeResult(o, fallbackId) {
     brand: typeof o.brand === 'string' && o.brand.trim() ? o.brand.trim() : null,
     category_top: top,
     category_mid: typeof o.category_mid === 'string' ? o.category_mid.trim().slice(0, 30) : '',
-    intent_label: typeof o.intent_label === 'string' ? o.intent_label.trim().slice(0, 20) : '',
+    // intent_label NULL 백필 보강: LLM 누락 시 category_mid → '기타' 폴백 (JTBD 갭 보드 집계 누수 방지)
+    intent_label: (typeof o.intent_label === 'string' && o.intent_label.trim()
+      ? o.intent_label.trim()
+      : typeof o.category_mid === 'string' && o.category_mid.trim()
+        ? o.category_mid.trim()
+        : '기타'
+    ).slice(0, 20),
     description: typeof o.description === 'string' ? o.description.trim().slice(0, 80) : '',
   }
 }
