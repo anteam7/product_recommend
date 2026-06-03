@@ -53,9 +53,22 @@ const SYSTEM_PROMPT = `한국 위탁 판매 상품 분류기. 입력 리스트�
 - category_mid: 5-10자 한국어 (예: "오메가3", "수납용품")
 - intent_label: 5-7자 (예: "예방건강", "문제해결", "소모품")
 - description: 15자 이내 1문장 (위탁 판매 의사결정 단서)
+- productizability: 실물 위탁 소싱 가능성 게이트. 다음 셋 중 하나:
+  · "direct_sku"    — 그 자체로 도매처에서 떼다 팔 수 있는 실물 상품 (예: 오메가3, 캠핑의자)
+  · "theme_to_sku"  — 상품 자체는 아니지만 판매 SKU 로 역산 가능한 추상 테마 (예: 수면, 홈카페, 캠핑, 다이어트)
+  · "non_product"   — 인물·사건·정치·드라마·연예·스포츠·지명 등 실물로 소싱 불가한 노이즈
+- productizable_score: 0~100 정수. 실물 소싱 가능성·발굴 가치. non_product 는 0~10, theme_to_sku 는 30~70, direct_sku 는 60~100.
+- sku_candidates: theme_to_sku 또는 모호한 direct_sku 일 때 LLM 이 역산한 구체 판매 SKU 후보 1~3개 배열.
+  각 원소 {"name":"수면안대","reason":"수면 대표 소모품"} 형태. non_product 면 빈 배열 []. 명백한 direct_sku 면 [] 가능.
+
+❗ non_product 판정을 적극적으로 하라. 뉴스/커뮤니티 소스(daum_news, natepan, 82cook 등)에서 온 인물·사건명은 거의 다 non_product 다.
 
 예시 입력: - id="abc" name="닥터린 초임계 알티지 오메가3 60캡슐" cur_top=health aliases=2 samples=[종근당 오메가3 | 일양 오메가3] sources=[naver_shopping_hot,musinsa_best]
-예시 출력: [{"id":"abc","canonical_name":"오메가3","brand":"닥터린","category_top":"health","category_mid":"오메가3","intent_label":"예방건강","description":"혈행건강 영양제"}]`
+예시 출력: [{"id":"abc","canonical_name":"오메가3","brand":"닥터린","category_top":"health","category_mid":"오메가3","intent_label":"예방건강","description":"혈행건강 영양제","productizability":"direct_sku","productizable_score":85,"sku_candidates":[]}]
+예시 입력: - id="t1" name="꿀잠 수면" cur_top=other aliases=4 samples=[수면 꿀팁 | 불면증 극복] sources=[82cook,naver_blog]
+예시 출력: [{"id":"t1","canonical_name":"수면","brand":null,"category_top":"living","category_mid":"수면용품","intent_label":"문제해결","description":"수면질 개선 테마","productizability":"theme_to_sku","productizable_score":55,"sku_candidates":[{"name":"수면안대","reason":"수면 대표 소모품"},{"name":"중량담요","reason":"숙면 보조"}]}]
+예시 입력: - id="n9" name="홍길동 의원" cur_top=other aliases=1 samples=[홍길동 발언] sources=[daum_news,natepan]
+예시 출력: [{"id":"n9","canonical_name":"홍길동","brand":null,"category_top":"other","category_mid":"인물","intent_label":"비상품","description":"정치 인물 노이즈","productizability":"non_product","productizable_score":0,"sku_candidates":[]}]`
 
 function buildUserPrompt(items) {
   const lines = items.map(
@@ -98,6 +111,29 @@ function normalizeResult(o, fallbackId) {
   const top = ['health', 'living', 'digital', 'other'].includes(o.category_top)
     ? o.category_top
     : 'other'
+  const label = ['direct_sku', 'theme_to_sku', 'non_product'].includes(o.productizability)
+    ? o.productizability
+    : null
+  // sku_candidates: [{name, reason?}] 정규화. 최대 3개, name 필수.
+  let skuCandidates = []
+  if (Array.isArray(o.sku_candidates)) {
+    skuCandidates = o.sku_candidates
+      .map((c) => {
+        if (typeof c === 'string') return c.trim() ? { name: c.trim().slice(0, 40) } : null
+        if (c && typeof c === 'object' && typeof c.name === 'string' && c.name.trim()) {
+          const out = { name: c.name.trim().slice(0, 40) }
+          if (typeof c.reason === 'string' && c.reason.trim()) out.reason = c.reason.trim().slice(0, 60)
+          return out
+        }
+        return null
+      })
+      .filter(Boolean)
+      .slice(0, 3)
+  }
+  // non_product 면 후보 강제 비움.
+  if (label === 'non_product') skuCandidates = []
+  let score = Number.isFinite(o.productizable_score) ? Math.round(o.productizable_score) : null
+  if (score != null) score = Math.max(0, Math.min(100, score))
   return {
     id,
     canonical_name: cn,
@@ -106,6 +142,9 @@ function normalizeResult(o, fallbackId) {
     category_mid: typeof o.category_mid === 'string' ? o.category_mid.trim().slice(0, 30) : '',
     intent_label: typeof o.intent_label === 'string' ? o.intent_label.trim().slice(0, 20) : '',
     description: typeof o.description === 'string' ? o.description.trim().slice(0, 80) : '',
+    productizability_label: label,
+    productizable_score: score,
+    sku_candidates: skuCandidates,
   }
 }
 
@@ -233,6 +272,9 @@ async function applyResults(results) {
           category_mid: r.category_mid,
           intent_label: r.intent_label,
           description: r.description,
+          productizability_label: r.productizability_label,
+          productizable_score: r.productizable_score,
+          sku_candidates: r.sku_candidates,
           llm_classified_at: now,
           llm_model: MODEL,
         })

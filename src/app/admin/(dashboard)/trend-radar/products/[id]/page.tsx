@@ -12,6 +12,9 @@ interface ProductRow {
   brand: string | null
   description: string | null
   intent_label: string | null
+  productizability_label: string | null
+  productizable_score: number | null
+  sku_candidates: { name: string; reason?: string }[] | null
   llm_classified_at: string | null
   llm_model: string | null
   alias_count: number
@@ -56,7 +59,7 @@ async function fetchProduct(id: string) {
   if (prodRes.error || !prodRes.data) return null
 
   return {
-    product: prodRes.data as ProductRow,
+    product: prodRes.data as unknown as ProductRow,
     aliases: (aliasRes.data ?? []) as AliasRow[],
     scoreHistory: (scoreRes.data ?? []) as ScoreRow[],
   }
@@ -107,6 +110,39 @@ export default async function ProductDetailPage({
           )}
         </div>
       </header>
+
+      {/* 상품화 가능성 게이트 + 실물 SKU 후보 */}
+      {product.productizability_label && (
+        <section className="rounded border border-gray-200 p-4">
+          <div className="flex items-center gap-2 flex-wrap">
+            <h2 className="text-sm font-semibold text-gray-700">상품화 가능성</h2>
+            <ProductizabilityTag label={product.productizability_label} />
+            {product.productizable_score != null && (
+              <span className="text-xs text-gray-500">
+                실물 소싱 점수 <span className="font-mono font-bold text-gray-800">{product.productizable_score}</span>/100
+              </span>
+            )}
+          </div>
+          {Array.isArray(product.sku_candidates) && product.sku_candidates.length > 0 ? (
+            <div className="mt-3">
+              <div className="text-xs text-gray-500 mb-1.5">테마 → 판매 SKU 후보 (LLM 역산)</div>
+              <div className="flex flex-wrap gap-2">
+                {product.sku_candidates.map((c, i) => (
+                  <span
+                    key={i}
+                    className="text-sm px-2 py-1 rounded bg-emerald-50 text-emerald-700 border border-emerald-100"
+                  >
+                    {c.name}
+                    {c.reason ? <span className="text-xs text-emerald-600/70 ml-1">· {c.reason}</span> : null}
+                  </span>
+                ))}
+              </div>
+            </div>
+          ) : product.productizability_label === 'non_product' ? (
+            <p className="text-xs text-gray-400 mt-2">실물 소싱 불가 — 발굴 큐에서 기본 숨김 처리됩니다.</p>
+          ) : null}
+        </section>
+      )}
 
       {/* 4점수 카드 */}
       {latest && (
@@ -184,6 +220,16 @@ export default async function ProductDetailPage({
       </section>
     </div>
   )
+}
+
+function ProductizabilityTag({ label }: { label: string }) {
+  const map: Record<string, { text: string; cls: string }> = {
+    direct_sku: { text: '실물 SKU', cls: 'bg-emerald-100 text-emerald-700' },
+    theme_to_sku: { text: '테마 → SKU', cls: 'bg-blue-100 text-blue-700' },
+    non_product: { text: '비상품 노이즈', cls: 'bg-gray-200 text-gray-500' },
+  }
+  const m = map[label] ?? { text: label, cls: 'bg-gray-100 text-gray-600' }
+  return <span className={`text-xs px-2 py-0.5 rounded font-medium ${m.cls}`}>{m.text}</span>
 }
 
 function ScoreCard({ label, value, bold }: { label: string; value: number; bold?: boolean }) {

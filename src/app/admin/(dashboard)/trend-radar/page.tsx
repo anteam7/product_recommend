@@ -13,12 +13,19 @@ const CATEGORY_LABEL: Record<Category, string> = {
   digital: '디지털/가전',
 }
 
+interface SkuCandidate {
+  name: string
+  reason?: string
+}
 interface ProductRow {
   id: string
   canonical_name: string
   category_top: string
   alias_count: number
   last_seen_at: string
+  productizability_label: string | null
+  productizable_score: number | null
+  sku_candidates: SkuCandidate[] | null
 }
 interface ScoreRow {
   product_id: string
@@ -75,7 +82,7 @@ async function fetchTvPushes() {
   return { ranked, totalKeywords: map.size, totalRows: rows.length }
 }
 
-async function fetchData(category: Category) {
+async function fetchData(category: Category, showNoise: boolean) {
   const sb = createAdminClient()
 
   // 최신 score 별 product_id 조회 — 같은 product 의 가장 최근 row 만.
@@ -95,14 +102,18 @@ async function fetchData(category: Category) {
   }
 
   const productIds = [...latestMap.keys()]
-  if (productIds.length === 0) return { products: [], scores: latestMap, kpis: { products: 0, top: 0, supplier: 0, tv: 0, llmClassified: 0 } }
+  if (productIds.length === 0) return { products: [], scores: latestMap, kpis: { products: 0, top: 0, supplier: 0, tv: 0, llmClassified: 0, noiseHidden: 0 } }
 
   const prodQuery = sb
     .from('jimscanner_trends_products')
-    .select('id, canonical_name, category_top, alias_count, last_seen_at')
+    .select('id, canonical_name, category_top, alias_count, last_seen_at, productizability_label, productizable_score, sku_candidates')
     .in('id', productIds)
 
   if (category !== 'all') prodQuery.eq('category_top', category)
+
+  // 상품화 게이트: non_product 노이즈는 기본 숨김 (노이즈 포함 토글 시 노출).
+  // as any — productizability 컬럼은 PR-4.6 마이그레이션 후 추가됨.
+  if (!showNoise) (prodQuery as any).or('productizability_label.is.null,productizability_label.neq.non_product')
 
   const { data: products } = await prodQuery
 
@@ -113,27 +124,33 @@ async function fetchData(category: Category) {
       .from('jimscanner_trends_products')
       .select('*', { count: 'exact', head: true })
       .not('llm_classified_at', 'is', null)).count ?? 0
+  const noiseHiddenCount =
+    (await (sb
+      .from('jimscanner_trends_products')
+      .select('*', { count: 'exact', head: true }) as any)
+      .eq('productizability_label', 'non_product')).count ?? 0
   const topCount = [...latestMap.values()].filter((s) => s.final_score >= 50).length
   const supplierCount = [...latestMap.values()].filter((s) => s.supplier_score >= 50).length
   const tvCount = [...latestMap.values()].filter((s) => (s.score_components as any)?.commerce?.tv_push > 0).length
 
   return {
-    products: (products ?? []) as ProductRow[],
+    products: (products ?? []) as unknown as ProductRow[],
     scores: latestMap,
-    kpis: { products: allCount, top: topCount, supplier: supplierCount, tv: tvCount, llmClassified: llmClassifiedCount },
+    kpis: { products: allCount, top: topCount, supplier: supplierCount, tv: tvCount, llmClassified: llmClassifiedCount, noiseHidden: noiseHiddenCount },
   }
 }
 
 export default async function TrendRadarPage({
   searchParams,
 }: {
-  searchParams: Promise<{ cat?: string }>
+  searchParams: Promise<{ cat?: string; noise?: string }>
 }) {
   const sp = await searchParams
   const category = (CATEGORIES.includes(sp.cat as Category) ? sp.cat : 'all') as Category
+  const showNoise = sp.noise === '1'
 
   const [{ products, scores, kpis }, tvPushes, tvGgsan] = await Promise.all([
-    fetchData(category),
+    fetchData(category, showNoise),
     fetchTvPushes(),
     fetchTvGgsanMatchSummary(),
   ])
@@ -169,12 +186,12 @@ export default async function TrendRadarPage({
         <KpiCard label="TV push" value={kpis.tv} hint="홈쇼핑 편성 검출" />
       </section>
 
-      {/* 카테고리 탭 */}
-      <nav className="flex gap-2 border-b border-gray-200">
+      {/* 카테고리 탭 + 상품화 게이트 토글 */}
+      <nav className="flex items-center gap-2 border-b border-gray-200">
         {CATEGORIES.map((c) => (
           <Link
             key={c}
-            href={`/admin/trend-radar?cat=${c}`}
+            href={`/admin/trend-radar?cat=${c}${showNoise ? '&noise=1' : ''}`}
             className={`px-3 py-2 text-sm ${
               category === c
                 ? 'border-b-2 border-black font-semibold text-black'
@@ -184,6 +201,18 @@ export default async function TrendRadarPage({
             {CATEGORY_LABEL[c]}
           </Link>
         ))}
+        <span className="flex-1" />
+        <Link
+          href={`/admin/trend-radar?cat=${category}${showNoise ? '' : '&noise=1'}`}
+          className={`px-3 py-1 text-xs rounded border transition-colors ${
+            showNoise
+              ? 'border-amber-400 bg-amber-50 text-amber-700'
+              : 'border-gray-200 text-gray-500 hover:text-black'
+          }`}
+          title="인물·사건·드라마 등 실물 소싱 불가 키워드 (non_product)"
+        >
+          {showNoise ? '✓ 비상품 노이즈 포함' : `비상품 ${kpis.noiseHidden} 숨김 — 표시`}
+        </Link>
       </nav>
 
       {/* 🔥 TV ↔ ggsan 매칭 callout */}
@@ -273,38 +302,77 @@ export default async function TrendRadarPage({
           <div className="grid gap-3">
             <div className="grid grid-cols-12 text-xs text-gray-500 px-3 py-1">
               <div className="col-span-1">#</div>
-              <div className="col-span-5">상품명</div>
+              <div className="col-span-4">상품명</div>
+              <div className="col-span-3">테마→SKU 후보</div>
               <div className="col-span-1 text-right">final</div>
               <div className="col-span-1 text-right">trend</div>
-              <div className="col-span-1 text-right">commerce</div>
               <div className="col-span-1 text-right">supplier</div>
-              <div className="col-span-1 text-right">competition</div>
-              <div className="col-span-1 text-right">aliases</div>
+              <div className="col-span-1 text-right">실물</div>
             </div>
-            {sorted.slice(0, 50).map(({ p, s }, i) => (
+            {sorted.slice(0, 50).map(({ p, s }, i) => {
+              const skus = Array.isArray(p.sku_candidates) ? p.sku_candidates : []
+              return (
               <Link
                 key={p.id}
                 href={`/admin/trend-radar/products/${p.id}`}
-                className="grid grid-cols-12 px-3 py-2 rounded border border-gray-200 hover:bg-gray-50 transition-colors"
+                className="grid grid-cols-12 px-3 py-2 rounded border border-gray-200 hover:bg-gray-50 transition-colors items-center"
               >
                 <div className="col-span-1 text-gray-400 font-mono">{i + 1}</div>
-                <div className="col-span-5">
-                  <div className="font-medium">{p.canonical_name}</div>
-                  <div className="text-xs text-gray-500">{p.category_top}</div>
+                <div className="col-span-4">
+                  <div className="font-medium flex items-center gap-1.5">
+                    {p.canonical_name}
+                    <ProductizabilityBadge label={p.productizability_label} />
+                  </div>
+                  <div className="text-xs text-gray-500">{p.category_top} · alias {p.alias_count}</div>
+                </div>
+                <div className="col-span-3 flex flex-wrap gap-1">
+                  {skus.length > 0 ? (
+                    skus.map((c, j) => (
+                      <span
+                        key={j}
+                        title={c.reason ?? ''}
+                        className="text-xs px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-700 border border-emerald-100"
+                      >
+                        {c.name}
+                      </span>
+                    ))
+                  ) : (
+                    <span className="text-xs text-gray-300">—</span>
+                  )}
                 </div>
                 <div className="col-span-1 text-right font-mono font-bold">{s!.final_score}</div>
                 <div className="col-span-1 text-right font-mono text-gray-600">{s!.trend_score}</div>
-                <div className="col-span-1 text-right font-mono text-gray-600">{s!.commerce_score}</div>
                 <div className="col-span-1 text-right font-mono text-gray-600">{s!.supplier_score}</div>
-                <div className="col-span-1 text-right font-mono text-gray-600">{s!.competition_score}</div>
-                <div className="col-span-1 text-right text-xs text-gray-500">{p.alias_count}</div>
+                <div className="col-span-1 text-right font-mono text-gray-600">
+                  {p.productizable_score ?? '—'}
+                </div>
               </Link>
-            ))}
+              )
+            })}
           </div>
         )}
       </section>
     </div>
   )
+}
+
+function ProductizabilityBadge({ label }: { label: string | null }) {
+  if (!label || label === 'direct_sku') return null
+  if (label === 'theme_to_sku') {
+    return (
+      <span className="text-[10px] px-1 py-0.5 rounded bg-blue-50 text-blue-600 border border-blue-100">
+        테마
+      </span>
+    )
+  }
+  if (label === 'non_product') {
+    return (
+      <span className="text-[10px] px-1 py-0.5 rounded bg-gray-100 text-gray-400 border border-gray-200">
+        비상품
+      </span>
+    )
+  }
+  return null
 }
 
 function KpiCard({ label, value, hint }: { label: string; value: number; hint: string | number }) {
