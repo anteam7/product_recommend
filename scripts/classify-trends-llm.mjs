@@ -54,8 +54,23 @@ const SYSTEM_PROMPT = `한국 위탁 판매 상품 분류기. 입력 리스트�
 - intent_label: 5-7자 (예: "예방건강", "문제해결", "소모품")
 - description: 15자 이내 1문장 (위탁 판매 의사결정 단서)
 
+❗ 버즈 감성극성 (위탁 셀러 안전 게이트):
+이 상품이 '왜 뜨는가'를 evidence(상품명·alias·source 커뮤니티)로 추정해 분해.
+- polarity_score: -1.0 ~ 1.0 (소수 둘째자리)
+  · +1.0 = 긍정수요 우세 (좋다·어디서사요·추천·효과봄)
+  ·  0.0 = 중립정보/단순언급
+  · -1.0 = 부정·위험 우세 (리콜·부작용·사기·환불·발암·논란·품질불량)
+- buzz_positive_ratio: 0.0 ~ 1.0 (긍정 발화 비율 추정)
+- risk_flag: 다음 중 하나 또는 null
+  · "recall"  = 리콜·회수·판매중지
+  · "safety"  = 부작용·발암·안전·유해성
+  · "fraud"   = 사기·과장광고·먹튀·환불대란
+  · "quality" = 품질불량·하자·고장 다발
+  근거 신호가 없으면 반드시 null (의심만으로 플래그 금지)
+- buzz_reason: 12자 이내 극성 판단 근거 (예: "추천글 다수", "리콜 논란")
+
 예시 입력: - id="abc" name="닥터린 초임계 알티지 오메가3 60캡슐" cur_top=health aliases=2 samples=[종근당 오메가3 | 일양 오메가3] sources=[naver_shopping_hot,musinsa_best]
-예시 출력: [{"id":"abc","canonical_name":"오메가3","brand":"닥터린","category_top":"health","category_mid":"오메가3","intent_label":"예방건강","description":"혈행건강 영양제"}]`
+예시 출력: [{"id":"abc","canonical_name":"오메가3","brand":"닥터린","category_top":"health","category_mid":"오메가3","intent_label":"예방건강","description":"혈행건강 영양제","polarity_score":0.6,"buzz_positive_ratio":0.7,"risk_flag":null,"buzz_reason":"베스트셀러 수요"}]`
 
 function buildUserPrompt(items) {
   const lines = items.map(
@@ -98,6 +113,25 @@ function normalizeResult(o, fallbackId) {
   const top = ['health', 'living', 'digital', 'other'].includes(o.category_top)
     ? o.category_top
     : 'other'
+
+  // 버즈 감성극성 게이트 필드 (없거나 범위 밖이면 안전한 기본값으로 정규화)
+  const clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n))
+  const polarity =
+    typeof o.polarity_score === 'number' && Number.isFinite(o.polarity_score)
+      ? Number(clamp(o.polarity_score, -1, 1).toFixed(2))
+      : null
+  const posRatio =
+    typeof o.buzz_positive_ratio === 'number' && Number.isFinite(o.buzz_positive_ratio)
+      ? Number(clamp(o.buzz_positive_ratio, 0, 1).toFixed(2))
+      : null
+  const riskFlag = ['recall', 'safety', 'fraud', 'quality'].includes(o.risk_flag)
+    ? o.risk_flag
+    : null
+  const buzzReason =
+    typeof o.buzz_reason === 'string' && o.buzz_reason.trim()
+      ? o.buzz_reason.trim().slice(0, 40)
+      : null
+
   return {
     id,
     canonical_name: cn,
@@ -106,6 +140,10 @@ function normalizeResult(o, fallbackId) {
     category_mid: typeof o.category_mid === 'string' ? o.category_mid.trim().slice(0, 30) : '',
     intent_label: typeof o.intent_label === 'string' ? o.intent_label.trim().slice(0, 20) : '',
     description: typeof o.description === 'string' ? o.description.trim().slice(0, 80) : '',
+    polarity_score: polarity,
+    buzz_positive_ratio: posRatio,
+    risk_flag: riskFlag,
+    buzz_reason: buzzReason,
   }
 }
 
@@ -233,6 +271,22 @@ async function applyResults(results) {
           category_mid: r.category_mid,
           intent_label: r.intent_label,
           description: r.description,
+          // 버즈 감성극성 게이트 (supabase/buzz_sentiment_gate.sql 적용 후 컬럼 존재)
+          polarity_score: r.polarity_score,
+          buzz_positive_ratio: r.buzz_positive_ratio,
+          risk_flag: r.risk_flag,
+          buzz_sentiment:
+            r.polarity_score == null && r.risk_flag == null
+              ? null
+              : {
+                  positive_ratio: r.buzz_positive_ratio,
+                  polarity: r.polarity_score,
+                  risk: r.risk_flag,
+                  reason: r.buzz_reason,
+                  model: MODEL,
+                },
+          buzz_sentiment_at:
+            r.polarity_score == null && r.risk_flag == null ? null : now,
           llm_classified_at: now,
           llm_model: MODEL,
         })

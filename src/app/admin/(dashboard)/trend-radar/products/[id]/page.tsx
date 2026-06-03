@@ -17,6 +17,19 @@ interface ProductRow {
   alias_count: number
   first_seen_at: string
   last_seen_at: string
+  // 버즈 감성극성 게이트 (supabase/buzz_sentiment_gate.sql)
+  polarity_score: number | null
+  buzz_positive_ratio: number | null
+  risk_flag: string | null
+  buzz_sentiment: { reason?: string | null } | null
+  buzz_sentiment_at: string | null
+}
+
+const RISK_LABELS: Record<string, string> = {
+  recall: '리콜·회수',
+  safety: '부작용·안전',
+  fraud: '사기·과장광고',
+  quality: '품질불량',
 }
 interface AliasRow {
   alias: string
@@ -56,7 +69,8 @@ async function fetchProduct(id: string) {
   if (prodRes.error || !prodRes.data) return null
 
   return {
-    product: prodRes.data as ProductRow,
+    // buzz_* 컬럼은 generated 타입 미반영 — gen:types 시 unknown 캐스팅 제거
+    product: prodRes.data as unknown as ProductRow,
     aliases: (aliasRes.data ?? []) as AliasRow[],
     scoreHistory: (scoreRes.data ?? []) as ScoreRow[],
   }
@@ -80,7 +94,14 @@ export default async function ProductDetailPage({
           <Link href="/admin/trend-radar" className="text-sm text-gray-500 hover:text-black">
             ← 대시보드
           </Link>
-          <h1 className="text-2xl font-bold mt-1">{product.canonical_name}</h1>
+          <h1 className="text-2xl font-bold mt-1 flex items-center gap-2 flex-wrap">
+            {product.canonical_name}
+            {product.risk_flag && (
+              <span className="text-xs px-2 py-1 rounded bg-red-600 text-white font-bold align-middle">
+                ⚠ 부정버즈 · {RISK_LABELS[product.risk_flag] ?? product.risk_flag}
+              </span>
+            )}
+          </h1>
           <p className="text-sm text-gray-500 mt-1">
             {product.brand ? <span className="text-black font-medium">{product.brand}</span> : null}
             {product.brand ? ' · ' : ''}
@@ -107,6 +128,9 @@ export default async function ProductDetailPage({
           )}
         </div>
       </header>
+
+      {/* 버즈 감성극성 게이트 */}
+      <BuzzGate product={product} />
 
       {/* 4점수 카드 */}
       {latest && (
@@ -183,6 +207,93 @@ export default async function ProductDetailPage({
         first_seen: {product.first_seen_at} · last_seen: {product.last_seen_at}
       </section>
     </div>
+  )
+}
+
+function BuzzGate({ product }: { product: ProductRow }) {
+  const hasData =
+    product.polarity_score != null ||
+    product.buzz_positive_ratio != null ||
+    product.risk_flag != null
+  if (!hasData) {
+    return (
+      <section className="rounded border border-dashed border-gray-300 px-4 py-3 text-xs text-gray-400">
+        🫧 버즈 감성극성 미분석 — LLM 분류 크론(classify-trends-llm) 적재 대기 중.
+      </section>
+    )
+  }
+
+  const polarity = product.polarity_score ?? 0
+  // positive_ratio 가 없으면 polarity(-1~1)를 0~1 로 환산해 대체
+  const posRatio =
+    product.buzz_positive_ratio != null
+      ? product.buzz_positive_ratio
+      : (polarity + 1) / 2
+  const pct = Math.round(posRatio * 100)
+  const demoted = product.risk_flag != null || polarity < -0.2
+  const reason = product.buzz_sentiment?.reason
+
+  const barColor =
+    pct >= 60 ? 'bg-emerald-500' : pct >= 40 ? 'bg-amber-500' : 'bg-red-500'
+  const tone = demoted
+    ? 'border-red-300 bg-red-50'
+    : pct >= 60
+      ? 'border-emerald-200 bg-emerald-50/40'
+      : 'border-gray-200'
+
+  return (
+    <section className={`rounded border px-4 py-4 space-y-3 ${tone}`}>
+      <div className="flex items-center justify-between">
+        <h2 className="text-sm font-semibold flex items-center gap-2">
+          🫧 버즈 감성극성 게이트
+          {demoted && (
+            <span className="text-[10px] px-1.5 py-0.5 rounded bg-red-600 text-white font-bold">
+              소싱 후보 강등
+            </span>
+          )}
+        </h2>
+        <span className="text-xs font-mono text-gray-500">
+          polarity {polarity > 0 ? '+' : ''}
+          {polarity.toFixed(2)}
+        </span>
+      </div>
+
+      {/* 긍정버즈 비율 게이지 */}
+      <div>
+        <div className="flex justify-between text-xs text-gray-600 mb-1">
+          <span>긍정버즈 비율</span>
+          <span className="font-mono font-semibold">{pct}%</span>
+        </div>
+        <div className="h-3 w-full rounded-full bg-gray-200 overflow-hidden">
+          <div
+            className={`h-full ${barColor} transition-all`}
+            style={{ width: `${pct}%` }}
+          />
+        </div>
+      </div>
+
+      {product.risk_flag && (
+        <div className="text-xs text-red-800 font-medium">
+          ⚠ 위험 신호: {RISK_LABELS[product.risk_flag] ?? product.risk_flag} — 위탁 소싱 시
+          계정정지·반품 리스크. 원문 evidence 확인 후 진행.
+        </div>
+      )}
+      {!product.risk_flag && demoted && (
+        <div className="text-xs text-red-700">
+          부정 발화 우세(polarity {polarity.toFixed(2)}) — 소싱 후보에서 강등됨.
+        </div>
+      )}
+      {reason && (
+        <div className="text-xs text-gray-500">
+          판단 근거: <span className="text-gray-700">{reason}</span>
+          {product.buzz_sentiment_at && (
+            <span className="ml-2 font-mono text-gray-400">
+              {product.buzz_sentiment_at.slice(0, 19).replace('T', ' ')}
+            </span>
+          )}
+        </div>
+      )}
+    </section>
   )
 }
 

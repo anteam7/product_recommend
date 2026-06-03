@@ -64,6 +64,33 @@ async function fetchRecommend(opts: {
   return { rows, error: null as string | null }
 }
 
+interface BuzzAlertRow {
+  id: string
+  canonical_name: string
+  brand: string | null
+  polarity_score: number | null
+  buzz_positive_ratio: number | null
+  risk_flag: string | null
+}
+
+const RISK_LABELS: Record<string, string> = {
+  recall: '리콜·회수',
+  safety: '부작용·안전',
+  fraud: '사기·과장광고',
+  quality: '품질불량',
+}
+
+// 부정·위험 우세 상품 = 소싱 후보 자동 강등. buzz_sentiment_gate.sql 의 뷰에서 조회.
+async function fetchBuzzAlerts(): Promise<BuzzAlertRow[]> {
+  const sb = createAdminClient()
+  // 뷰는 generated 타입 미반영 — gen:types 시 캐스팅 제거
+  const { data } = await sb
+    .from('jimscanner_trends_buzz_alerts' as never)
+    .select('id, canonical_name, brand, polarity_score, buzz_positive_ratio, risk_flag')
+    .limit(30)
+  return (data ?? []) as unknown as BuzzAlertRow[]
+}
+
 const CATEGORIES: { code: string; label: string }[] = [
   { code: '001', label: '장건강' },
   { code: '002', label: '눈건강' },
@@ -123,6 +150,7 @@ export default async function RecommendPage({
   }
 
   const { rows, error } = await fetchRecommend({ days: validDays, minSim: validSim, imminentOnly, cate })
+  const buzzAlerts = await fetchBuzzAlerts()
 
   // KPI
   const total = rows.length
@@ -221,6 +249,43 @@ export default async function RecommendPage({
             RPC <code>jimscanner_ggsan_recommend</code> 가 DB에 적용 안 됐을 가능성. supabase/ggsan_recommend_rpc.sql 적용 필요.
           </p>
         </div>
+      )}
+
+      {/* 부정버즈 경보 — 소싱 후보 자동 강등 대상 */}
+      {buzzAlerts.length > 0 && (
+        <section className="rounded border border-red-300 bg-red-50 px-4 py-3 space-y-2">
+          <div className="flex items-center gap-2 text-sm font-semibold text-red-800">
+            ⚠ 부정버즈 경보 — 소싱 강등 후보 {buzzAlerts.length}건
+            <span className="text-[10px] font-normal text-red-600">
+              리콜·부작용·사기·품질불량 버즈로 뜬 상품. 위탁 소싱 시 계정정지·반품 리스크.
+            </span>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {buzzAlerts.map((b) => (
+              <Link
+                key={b.id}
+                href={`/admin/trend-radar/products/${b.id}`}
+                className="inline-flex items-center gap-1.5 rounded border border-red-300 bg-white px-2 py-1 text-xs hover:bg-red-100"
+              >
+                {b.risk_flag && (
+                  <span className="px-1 rounded bg-red-600 text-white text-[9px] font-bold">
+                    {RISK_LABELS[b.risk_flag] ?? b.risk_flag}
+                  </span>
+                )}
+                <span className="font-medium text-red-900">
+                  {b.brand ? `${b.brand} ` : ''}
+                  {b.canonical_name}
+                </span>
+                {b.polarity_score != null && (
+                  <span className="font-mono text-red-500">
+                    {b.polarity_score > 0 ? '+' : ''}
+                    {Number(b.polarity_score).toFixed(2)}
+                  </span>
+                )}
+              </Link>
+            ))}
+          </div>
+        </section>
       )}
 
       {/* 결과 카드 */}
