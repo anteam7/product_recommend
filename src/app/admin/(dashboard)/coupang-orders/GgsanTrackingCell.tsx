@@ -120,6 +120,13 @@ export function GgsanTrackingCell({
         {ggsanOrderStatus && <span className="text-[10px] text-gray-500">{ggsanOrderStatus}</span>}
       </div>
 
+      {/* ggsan 주문번호 — 싱크(연결)되면 상태 무관하게 항상 표시 (매입처 추적 기준키) */}
+      {ggsanOrderNo && (
+        <div className="text-[10px] text-gray-500 tabular-nums leading-tight">
+          ggsan <span className="font-medium text-gray-700">#{ggsanOrderNo}</span>
+        </div>
+      )}
+
       {/* 매입처 송장 (택배사 · 번호) */}
       {ggsanInvoiceNumber ? (
         <div className="text-[11px] text-gray-700 tabular-nums leading-tight">
