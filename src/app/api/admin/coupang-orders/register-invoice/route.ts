@@ -99,18 +99,28 @@ interface OrderRow {
 
 const MAX_ATTEMPTS = 5
 
-// 쿠팡 invoices 응답에서 "이미 등록/6개월 중복" 을 식별 (검토 C-4: 가능하면 코드 기반, 폴백으로 메시지)
-function isDuplicateInvoice(status: number, body: unknown): boolean {
+// 쿠팡 invoices 응답 파싱 — 확정 스펙(developers.coupangcorp.com 360033793014):
+//   { responseCode, responseMessage, responseList:[{ shipmentBoxId, succeed, resultCode, retryRequired, resultMessage }] }
+//   HTTP 200이어도 responseList[].succeed=false 면 부분실패(예 resultCode NOT_FOUND_SHIPMENT_BOX). 첫 라인 기준 판정.
+interface InvoicesResult { succeed: boolean | null; resultCode: string; message: string; retryRequired: boolean }
+function parseInvoicesResult(body: unknown): InvoicesResult {
+  const b = body && typeof body === 'object'
+    ? (body as { responseCode?: number; responseList?: Array<{ succeed?: boolean; resultCode?: string; resultMessage?: string; retryRequired?: boolean }> })
+    : null
+  const item = b && Array.isArray(b.responseList) ? b.responseList[0] : null
+  if (item && typeof item.succeed === 'boolean') {
+    return { succeed: item.succeed, resultCode: String(item.resultCode ?? ''), message: String(item.resultMessage ?? ''), retryRequired: !!item.retryRequired }
+  }
+  // 비표준/responseList 없음 → succeed 불명. 명백한 실패신호 텍스트 폴백.
   const text = typeof body === 'string' ? body : JSON.stringify(body ?? '')
-  // 쿠팡은 중복 송장 시 한글/영문 혼재 메시지 + 4xx 를 반환. 코드 노출이 불안정해 메시지 기반 폴백.
-  return /이미.{0,4}등록|중복.{0,4}(송장|운송장|등록)|6개월|already.{0,12}(register|exist)|duplicate/i.test(text)
+  if (/"succeed"\s*:\s*false|failResultMap|"resultCode"\s*:\s*"?FAIL|등록\s*실패/i.test(text)) {
+    return { succeed: false, resultCode: 'FAIL', message: text.slice(0, 200), retryRequired: false }
+  }
+  return { succeed: null, resultCode: String(b?.responseCode ?? ''), message: text.slice(0, 200), retryRequired: false }
 }
-
-// invoices 는 orderSheetInvoiceApplyDtos 배열 응답이라 HTTP 200이어도 라인별 부분실패 가능(검토 🟠).
-// 명백한 실패 신호를 방어. 정확한 응답 스펙은 첫 dry-run 으로 확정해야 하며 auto_upload=true 전환 전 필수(plan ⑩ Phase3 게이트).
-function invoices200HasFailure(body: unknown): boolean {
-  const text = typeof body === 'string' ? body : JSON.stringify(body ?? '')
-  return /"succeed"\s*:\s*false|failResultMap|"resultCode"\s*:\s*"?FAIL|등록\s*실패|invoiceNumberFail/i.test(text)
+// "이미 등록/6개월 중복" 식별 (resultCode 우선, 메시지 폴백)
+function isDuplicateInvoice(r: { resultCode: string; message: string }): boolean {
+  return /ALREADY|DUP|EXIST/i.test(r.resultCode) || /이미.{0,4}등록|중복.{0,4}(송장|운송장|등록)|6개월|already.{0,12}(register|exist)|duplicate/i.test(r.message)
 }
 
 export async function POST(request: NextRequest) {
@@ -252,8 +262,9 @@ export async function POST(request: NextRequest) {
   }
   const invResp = await coupangApi('POST', invPath, invBody)
   const invText = typeof invResp.body === 'string' ? invResp.body : JSON.stringify(invResp.body ?? '')
+  const invResult = parseInvoicesResult(invResp.body)
 
-  if (invResp.status === 200 && !invoices200HasFailure(invResp.body)) {
+  if (invResp.status === 200 && invResult.succeed === true) {
     // 성공 → RECEIVED + uploaded + 미러 컬럼 복사
     const uploadedAt = now()
     await admin.from('jimscanner_coupang_orders').update({
@@ -286,7 +297,7 @@ export async function POST(request: NextRequest) {
     })
   }
 
-  if (isDuplicateInvoice(invResp.status, invResp.body)) {
+  if (isDuplicateInvoice(invResult)) {
     // 6개월내 중복/이미 등록 → 성공 간주하되 약한 needs_attention(오매칭 은폐 방지, 검토 C-4)
     const uploadedAt = now()
     await admin.from('jimscanner_coupang_orders').update({
@@ -315,6 +326,24 @@ export async function POST(request: NextRequest) {
       needs_attention: true,
       message: '중복 송장 — 기등록으로 간주(확인 필요)',
     })
+  }
+
+  // 응답형식 미확인(succeed 불명) + HTTP 200 + 실패/중복 신호 없음 → 등록됐을 가능성. uploaded 로 두되 Wing 확인 플래그.
+  if (invResp.status === 200 && invResult.succeed === null) {
+    const uploadedAt = now()
+    await admin.from('jimscanner_coupang_orders').update({
+      coupang_invoice_status: 'uploaded',
+      purchase_status: 'RECEIVED',
+      coupang_invoice_uploaded_at: uploadedAt,
+      coupang_invoice_company_code: code,
+      needs_attention: true,
+      attention_reason: '쿠팡 등록응답 형식 미확인 — Wing에서 등록 확인 요망',
+      invoice_number: order.ggsan_invoice_number,
+      delivery_company: order.ggsan_carrier_name,
+      shipped_at: order.ggsan_shipped_at ?? uploadedAt,
+      last_synced_at: uploadedAt,
+    }).eq('id', order.id)
+    return NextResponse.json({ ok: true, coupang_invoice_status: 'uploaded', needs_attention: true, message: '등록 응답형식 미확인 — Wing 확인 요망' })
   }
 
   // 그 외 실패 → failed + error + attempts++ (SHIPPED 유지, 다음 cron 재시도)
