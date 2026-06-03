@@ -36,9 +36,14 @@ interface ScoreRow {
   computed_at: string
 }
 
+interface SupplierPriceRow {
+  price_krw: number | null
+  collected_at: string
+}
+
 async function fetchProduct(id: string) {
   const sb = createAdminClient()
-  const [prodRes, aliasRes, scoreRes] = await Promise.all([
+  const [prodRes, aliasRes, scoreRes, supplierRes] = await Promise.all([
     sb.from('jimscanner_trends_products').select('*').eq('id', id).single(),
     sb
       .from('jimscanner_trends_aliases')
@@ -51,6 +56,12 @@ async function fetchProduct(id: string) {
       .eq('product_id', id)
       .order('computed_at', { ascending: false })
       .limit(30),
+    sb
+      .from('jimscanner_trends_supplier')
+      .select('price_krw, collected_at')
+      .eq('product_id', id)
+      .order('collected_at', { ascending: false })
+      .limit(60),
   ])
 
   if (prodRes.error || !prodRes.data) return null
@@ -59,7 +70,53 @@ async function fetchProduct(id: string) {
     product: prodRes.data as ProductRow,
     aliases: (aliasRes.data ?? []) as AliasRow[],
     scoreHistory: (scoreRes.data ?? []) as ScoreRow[],
+    supplierHistory: (supplierRes.data ?? []) as SupplierPriceRow[],
   }
+}
+
+// 같은 timestamp 최저가 축약 후 오름차순 (오래된→최근)
+function buildCostSeries(rows: SupplierPriceRow[]): { t: string; v: number }[] {
+  const byT = new Map<string, number>()
+  for (const r of rows) {
+    if (r.price_krw == null || r.price_krw <= 0) continue
+    const cur = byT.get(r.collected_at)
+    if (cur == null || r.price_krw < cur) byT.set(r.collected_at, r.price_krw)
+  }
+  return [...byT.entries()].map(([t, v]) => ({ t, v })).sort((a, b) => a.t.localeCompare(b.t))
+}
+
+// 서버 렌더 미니 듀얼축 시저 차트 (수요 trend vs 원가 price)
+function ScissorMiniChart({
+  demand,
+  cost,
+}: {
+  demand: { v: number }[]
+  cost: { v: number }[]
+}) {
+  const W = 460
+  const H = 140
+  const PAD = 28
+  const line = (vs: number[], color: string) => {
+    if (vs.length === 0) return null
+    const min = Math.min(...vs)
+    const span = Math.max(...vs) - min || 1
+    const n = vs.length
+    const d = vs
+      .map((v, i) => {
+        const px = PAD + (n === 1 ? (W - 2 * PAD) / 2 : (i / (n - 1)) * (W - 2 * PAD))
+        const py = H - PAD - ((v - min) / span) * (H - 2 * PAD)
+        return `${i === 0 ? 'M' : 'L'}${px.toFixed(1)},${py.toFixed(1)}`
+      })
+      .join(' ')
+    return <path d={d} fill="none" stroke={color} strokeWidth={2} />
+  }
+  return (
+    <svg width={W} height={H} className="block">
+      <line x1={PAD} y1={H - PAD} x2={W - PAD} y2={H - PAD} stroke="#e5e7eb" />
+      {line(demand.map((p) => p.v), '#2563eb')}
+      {line(cost.map((p) => p.v), '#dc2626')}
+    </svg>
+  )
 }
 
 export default async function ProductDetailPage({
@@ -70,8 +127,17 @@ export default async function ProductDetailPage({
   const { id } = await params
   const data = await fetchProduct(id)
   if (!data) notFound()
-  const { product, aliases, scoreHistory } = data
+  const { product, aliases, scoreHistory, supplierHistory } = data
   const latest = scoreHistory[0]
+
+  // 시저 미니 차트용 시계열 (오래된→최근)
+  const demandSeries = [...scoreHistory].reverse().map((s) => ({ v: s.trend_score }))
+  const costSeries = buildCostSeries(supplierHistory)
+  const demandDelta = demandSeries.length > 1 ? Math.round(demandSeries[demandSeries.length - 1].v - demandSeries[0].v) : 0
+  const costDropPct =
+    costSeries.length > 1 && costSeries[0].v > 0
+      ? Math.round(((costSeries[0].v - costSeries[costSeries.length - 1].v) / costSeries[0].v) * 1000) / 10
+      : 0
 
   return (
     <div className="space-y-6 p-6">
@@ -116,6 +182,36 @@ export default async function ProductDetailPage({
           <ScoreCard label="commerce" value={latest.commerce_score} />
           <ScoreCard label="supplier" value={latest.supplier_score} />
           <ScoreCard label="competition" value={latest.competition_score} />
+        </section>
+      )}
+
+      {/* 수요-원가 시저 미니 차트 */}
+      {(demandSeries.length > 1 || costSeries.length > 1) && (
+        <section>
+          <div className="flex items-baseline justify-between mb-2">
+            <h2 className="text-sm font-semibold">수요 ↔ 원가 시저</h2>
+            <Link href="/admin/trend-radar/margin-momentum" className="text-xs text-gray-500 hover:text-black underline">
+              시저 보드 →
+            </Link>
+          </div>
+          <div className="rounded border border-gray-200 p-4 flex flex-wrap items-center gap-6">
+            <ScissorMiniChart demand={demandSeries} cost={costSeries} />
+            <div className="text-xs text-gray-600 space-y-1">
+              <div><span className="inline-block w-3 h-0.5 bg-blue-600 align-middle mr-1" /> 수요(trend) Δ {demandDelta > 0 ? '+' : ''}{demandDelta}</div>
+              <div>
+                <span className="inline-block w-3 h-0.5 bg-red-600 align-middle mr-1" /> 원가{' '}
+                {costDropPct > 0 ? `▼ ${costDropPct}% 하락 (마진 확장)` : costDropPct < 0 ? `▲ ${-costDropPct}% 상승` : '변동 없음/데이터 부족'}
+              </div>
+              {costSeries.length > 1 && (
+                <div className="text-gray-500">
+                  {costSeries[0].v.toLocaleString()}원 → {costSeries[costSeries.length - 1].v.toLocaleString()}원
+                </div>
+              )}
+              {demandDelta > 0 && costDropPct > 0 && (
+                <div className="text-emerald-600 font-medium">① 즉시소싱 신호 (골든크로스)</div>
+              )}
+            </div>
+          </div>
         </section>
       )}
 
