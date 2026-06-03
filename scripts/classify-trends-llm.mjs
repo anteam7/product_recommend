@@ -53,9 +53,14 @@ const SYSTEM_PROMPT = `한국 위탁 판매 상품 분류기. 입력 리스트�
 - category_mid: 5-10자 한국어 (예: "오메가3", "수납용품")
 - intent_label: 5-7자 (예: "예방건강", "문제해결", "소모품")
 - description: 15자 이내 1문장 (위탁 판매 의사결정 단서)
+- consumption_type: consumable | durable
+  · consumable: 다 쓰면 같은 고객이 재구매하는 소모품 (영양제·세제·필터·면도날·사료 등)
+  · durable: 한 번 사면 한동안 안 사는 1회성 내구재 (가전·수납함·공구·액세서리 등)
+- replenish_cycle_days: consumable 의 재구매 주기(일). 영양제 30, 칫솔 90 등. durable 이면 null
+- typical_purchase_qty: 1회 구매 수량(보통 1, 묶음 소구 크면 2~3)
 
 예시 입력: - id="abc" name="닥터린 초임계 알티지 오메가3 60캡슐" cur_top=health aliases=2 samples=[종근당 오메가3 | 일양 오메가3] sources=[naver_shopping_hot,musinsa_best]
-예시 출력: [{"id":"abc","canonical_name":"오메가3","brand":"닥터린","category_top":"health","category_mid":"오메가3","intent_label":"예방건강","description":"혈행건강 영양제"}]`
+예시 출력: [{"id":"abc","canonical_name":"오메가3","brand":"닥터린","category_top":"health","category_mid":"오메가3","intent_label":"예방건강","description":"혈행건강 영양제","consumption_type":"consumable","replenish_cycle_days":30,"typical_purchase_qty":1}]`
 
 function buildUserPrompt(items) {
   const lines = items.map(
@@ -106,6 +111,17 @@ function normalizeResult(o, fallbackId) {
     category_mid: typeof o.category_mid === 'string' ? o.category_mid.trim().slice(0, 30) : '',
     intent_label: typeof o.intent_label === 'string' ? o.intent_label.trim().slice(0, 20) : '',
     description: typeof o.description === 'string' ? o.description.trim().slice(0, 80) : '',
+    consumption_type: ['consumable', 'durable'].includes(o.consumption_type)
+      ? o.consumption_type
+      : null,
+    replenish_cycle_days:
+      Number.isFinite(Number(o.replenish_cycle_days)) && Number(o.replenish_cycle_days) > 0
+        ? Math.round(Number(o.replenish_cycle_days))
+        : null,
+    typical_purchase_qty:
+      Number.isFinite(Number(o.typical_purchase_qty)) && Number(o.typical_purchase_qty) > 0
+        ? Math.round(Number(o.typical_purchase_qty))
+        : 1,
   }
 }
 
@@ -233,6 +249,11 @@ async function applyResults(results) {
           category_mid: r.category_mid,
           intent_label: r.intent_label,
           description: r.description,
+          consumption_type: r.consumption_type,
+          replenish_cycle_days: r.replenish_cycle_days,
+          typical_purchase_qty: r.typical_purchase_qty,
+          consumption_classified_at: now,
+          consumption_classified_by: 'llm',
           llm_classified_at: now,
           llm_model: MODEL,
         })
