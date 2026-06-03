@@ -123,6 +123,27 @@ console.log(
   `[${new Date().toISOString()}] HTTP crons done — ${okCount} ok, ${failCount} fail in ${totalMs}ms`,
 )
 
+// compute-source-leadlag: 출처 간 리드-랙 선행지표 집계 (로컬 노드 단계).
+//   HTTP cron 으로 키워드가 적재된 뒤 돌아야 하므로 여기서 실행.
+//   filter 가 걸리면(특정 cron 만) 건너뜀. --no-leadlag 플래그도 지원.
+const skipLeadlag = args.includes('--no-leadlag') || !!filter
+if (!skipLeadlag) {
+  console.log(`[${new Date().toISOString()}] launching compute-source-leadlag`)
+  const llPath = resolvePath(__dirname, 'compute-source-leadlag.mjs')
+  const llExit = await new Promise((resolve) => {
+    const child = spawn(process.execPath, [llPath], {
+      stdio: 'inherit',
+      env: process.env,
+    })
+    child.on('exit', (code) => resolve(code ?? 0))
+    child.on('error', (err) => {
+      console.error(`  leadlag spawn error: ${err.message}`)
+      resolve(1)
+    })
+  })
+  if (llExit !== 0) failCount++
+}
+
 // classify-trends-llm: 로컬 Claude CLI 단계.
 //   filter 가 걸리면 (특정 cron 만 돌리는 경우) 건너뜀.
 //   --no-classify 플래그도 지원.
