@@ -41,6 +41,19 @@ async function fetchData() {
     .in('id', ids)
   const byId = new Map((prods ?? []).map((p: any) => [p.id, p]))
 
+  // 대표이미지 재사용도(도배율) — product_id 별 최신 1건. 신규 테이블이라 as any.
+  const { data: audits } = await (sb as any)
+    .from('jimscanner_trends_image_audit')
+    .select('product_id, reuse_ratio, collected_at')
+    .in('product_id', ids)
+    .order('collected_at', { ascending: false })
+    .limit(2000)
+  const reuseById = new Map<string, number>()
+  for (const a of (audits ?? []) as { product_id: string; reuse_ratio: number | null }[]) {
+    if (reuseById.has(a.product_id) || a.reuse_ratio == null) continue
+    reuseById.set(a.product_id, a.reuse_ratio)
+  }
+
   return {
     rows: latest.map((s) => {
       const p = byId.get(s.product_id) ?? {}
@@ -53,6 +66,7 @@ async function fetchData() {
         size: Math.max(50, s.commerce_score * 4),
         final: s.final_score,
         supplier: s.supplier_score,
+        reuse: reuseById.has(s.product_id) ? reuseById.get(s.product_id)! : null,
       }
     }),
   }
@@ -67,12 +81,17 @@ export default async function OpportunityPage() {
         <div>
           <h1 className="text-2xl font-bold">Opportunity Matrix</h1>
           <p className="text-sm text-gray-500 mt-1">
-            X = competition (오른쪽 = 경쟁 약함) · Y = trend · 크기 = commerce · 핀 후보 = 우상단 큰 점
+            X = competition (오른쪽 = 경쟁 약함) · Y = trend · 크기 = commerce · 핀 후보 = 우상단 큰 점 · <b>빨간 테두리 = 사진 도배 레드오션</b>
           </p>
         </div>
-        <Link href="/admin/trend-radar" className="text-sm text-gray-700 hover:text-black underline">
-          ← 대시보드
-        </Link>
+        <div className="flex items-center gap-4">
+          <Link href="/admin/trend-radar/image-audit" className="text-sm text-gray-700 hover:text-black underline">
+            이미지 재사용도 →
+          </Link>
+          <Link href="/admin/trend-radar" className="text-sm text-gray-700 hover:text-black underline">
+            ← 대시보드
+          </Link>
+        </div>
       </header>
 
       {rows.length === 0 ? (

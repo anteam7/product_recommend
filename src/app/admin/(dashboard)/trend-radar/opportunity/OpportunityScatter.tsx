@@ -11,6 +11,15 @@ interface Row {
   size: number
   final: number
   supplier: number
+  reuse?: number | null
+}
+
+// 도배율 → 점 테두리 색 (높을수록 빨강 = 차별화 불가 레드오션)
+function reuseRing(reuse?: number | null): { stroke: string; width: number } | null {
+  if (reuse == null) return null
+  if (reuse >= 0.7) return { stroke: '#dc2626', width: 2.5 }
+  if (reuse >= 0.4) return { stroke: '#d97706', width: 2 }
+  return { stroke: '#059669', width: 1.5 }
 }
 
 const CATEGORY_COLORS: Record<string, string> = {
@@ -71,23 +80,28 @@ export default function OpportunityScatter({ rows }: { rows: Row[] }) {
             🎯 핀 후보 (트렌드↑·경쟁↓)
           </text>
 
-          {/* 점들 */}
-          {rows.map((r) => (
-            <a key={r.id} href={`/admin/trend-radar/products/${r.id}`}>
-              <circle
-                cx={xScale(r.x)}
-                cy={yScale(r.y)}
-                r={rScale(r.size)}
-                fill={CATEGORY_COLORS[r.category] ?? '#6b7280'}
-                fillOpacity={0.55}
-                stroke={CATEGORY_COLORS[r.category] ?? '#6b7280'}
-                strokeOpacity={0.9}
-                onMouseEnter={() => setHover(r)}
-                onMouseLeave={() => setHover(null)}
-                style={{ cursor: 'pointer' }}
-              />
-            </a>
-          ))}
+          {/* 점들 — 테두리색은 도배율(reuse) 게이트 반영 */}
+          {rows.map((r) => {
+            const ring = reuseRing(r.reuse)
+            const base = CATEGORY_COLORS[r.category] ?? '#6b7280'
+            return (
+              <a key={r.id} href={`/admin/trend-radar/products/${r.id}`}>
+                <circle
+                  cx={xScale(r.x)}
+                  cy={yScale(r.y)}
+                  r={rScale(r.size)}
+                  fill={base}
+                  fillOpacity={0.55}
+                  stroke={ring ? ring.stroke : base}
+                  strokeWidth={ring ? ring.width : 1}
+                  strokeOpacity={0.9}
+                  onMouseEnter={() => setHover(r)}
+                  onMouseLeave={() => setHover(null)}
+                  style={{ cursor: 'pointer' }}
+                />
+              </a>
+            )
+          })}
         </svg>
 
         {/* hover tooltip */}
@@ -96,6 +110,10 @@ export default function OpportunityScatter({ rows }: { rows: Row[] }) {
             <div className="font-semibold">{hover.name}</div>
             <div>category: {hover.category}</div>
             <div>final: {hover.final} · trend: {hover.y} · competition: {hover.x} · supplier: {hover.supplier}</div>
+            <div>
+              사진 도배율: {hover.reuse == null ? '미측정' : `${Math.round(hover.reuse * 100)}%`}
+              {hover.reuse != null && hover.reuse >= 0.7 ? ' (레드오션)' : ''}
+            </div>
           </div>
         )}
       </div>
