@@ -193,6 +193,22 @@ async function bumpCounter(day, delta) {
 }
 
 async function fetchCandidates() {
+  // 신호강도(priority_score) desc 정렬로 LLM 예산을 고잠재 백로그에 집중.
+  // RPC(jimscanner_classify_priority) 우선, 미적용 환경이면 updated_at FIFO 폴백.
+  const { data: prioritized, error } = await sb.rpc('jimscanner_classify_priority', {
+    result_limit: PRODUCT_FETCH_LIMIT,
+  })
+  if (!error && Array.isArray(prioritized) && prioritized.length > 0) {
+    console.log(`  ordering: priority RPC (top score=${prioritized[0]?.priority_score ?? '?'})`)
+    return prioritized.map((r) => ({
+      id: r.id,
+      canonical_name: r.canonical_name,
+      category_top: r.category_top,
+      alias_count: r.alias_count,
+    }))
+  }
+  if (error) console.warn(`  priority RPC unavailable, fallback to FIFO: ${error.message}`)
+
   const { data } = await sb
     .from('jimscanner_trends_products')
     .select('id, canonical_name, category_top, alias_count, llm_classified_at, updated_at')
