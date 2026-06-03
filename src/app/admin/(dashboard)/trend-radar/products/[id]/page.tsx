@@ -35,10 +35,26 @@ interface ScoreRow {
   score_components: any
   computed_at: string
 }
+interface SerpRow {
+  keyword: string
+  listing_count: number | null
+  price_min: number | null
+  price_p25: number | null
+  price_median: number | null
+  price_p75: number | null
+  price_max: number | null
+  top_review_sum: number | null
+  avg_review: number | null
+  rocket_share: number | null
+  ad_slot_share: number | null
+  low_competition: number | null
+  low_review_saturation: number | null
+  captured_at: string
+}
 
 async function fetchProduct(id: string) {
   const sb = createAdminClient()
-  const [prodRes, aliasRes, scoreRes] = await Promise.all([
+  const [prodRes, aliasRes, scoreRes, serpRes] = await Promise.all([
     sb.from('jimscanner_trends_products').select('*').eq('id', id).single(),
     sb
       .from('jimscanner_trends_aliases')
@@ -51,6 +67,14 @@ async function fetchProduct(id: string) {
       .eq('product_id', id)
       .order('computed_at', { ascending: false })
       .limit(30),
+    // 경쟁 실측: 최신 SERP 스냅샷 (마이그레이션 trends_serp_snapshot.sql 적용 후 동작) — as any.
+    (sb as any)
+      .from('jimscanner_trends_serp_latest')
+      .select(
+        'keyword, listing_count, price_min, price_p25, price_median, price_p75, price_max, top_review_sum, avg_review, rocket_share, ad_slot_share, low_competition, low_review_saturation, captured_at',
+      )
+      .eq('product_id', id)
+      .maybeSingle(),
   ])
 
   if (prodRes.error || !prodRes.data) return null
@@ -59,6 +83,7 @@ async function fetchProduct(id: string) {
     product: prodRes.data as ProductRow,
     aliases: (aliasRes.data ?? []) as AliasRow[],
     scoreHistory: (scoreRes.data ?? []) as ScoreRow[],
+    serp: (serpRes?.data ?? null) as SerpRow | null,
   }
 }
 
@@ -70,7 +95,7 @@ export default async function ProductDetailPage({
   const { id } = await params
   const data = await fetchProduct(id)
   if (!data) notFound()
-  const { product, aliases, scoreHistory } = data
+  const { product, aliases, scoreHistory, serp } = data
   const latest = scoreHistory[0]
 
   return (
@@ -118,6 +143,9 @@ export default async function ProductDetailPage({
           <ScoreCard label="competition" value={latest.competition_score} />
         </section>
       )}
+
+      {/* 경쟁 실측 패널 — 쿠팡 SERP 스냅샷으로 competition_score 접지 */}
+      <CompetitionPanel serp={serp} competitionScore={latest?.competition_score} />
 
       {/* score 시계열 (최근 30 row) */}
       {scoreHistory.length > 1 && (
@@ -182,6 +210,131 @@ export default async function ProductDetailPage({
       <section className="text-xs text-gray-500">
         first_seen: {product.first_seen_at} · last_seen: {product.last_seen_at}
       </section>
+    </div>
+  )
+}
+
+function fmtWon(n: number | null | undefined) {
+  return n == null ? '—' : `${Number(n).toLocaleString('ko-KR')}원`
+}
+function freshness(capturedAt: string) {
+  const hrs = (Date.now() - new Date(capturedAt).getTime()) / 36e5
+  if (hrs < 24) return { label: `${Math.max(0, Math.round(hrs))}시간 전`, stale: false }
+  return { label: `${Math.round(hrs / 24)}일 전`, stale: hrs > 24 * 7 }
+}
+
+function CompetitionPanel({
+  serp,
+  competitionScore,
+}: {
+  serp: SerpRow | null
+  competitionScore?: number
+}) {
+  if (!serp) {
+    return (
+      <section className="rounded border border-dashed border-gray-300 p-4 text-sm text-gray-500">
+        <h2 className="text-sm font-semibold text-gray-700 mb-1">경쟁 실측 (쿠팡 SERP)</h2>
+        아직 실측 스냅샷이 없습니다. <code className="text-xs">scripts/collect-coupang-serp.mjs</code> 가
+        다음 수집 사이클에 적재합니다 (run-crons <code className="text-xs">--serp</code> 단계).
+      </section>
+    )
+  }
+
+  const fresh = freshness(serp.captured_at)
+  // 실가격대 박스플롯 좌표 (min ~ max 범위를 0~100%로 매핑)
+  const lo = serp.price_min ?? 0
+  const hi = serp.price_max ?? lo + 1
+  const span = Math.max(hi - lo, 1)
+  const pct = (v: number | null) => (v == null ? null : ((v - lo) / span) * 100)
+  const p25 = pct(serp.price_p25)
+  const p75 = pct(serp.price_p75)
+  const med = pct(serp.price_median)
+
+  return (
+    <section className="rounded border border-gray-200 p-4 space-y-4">
+      <div className="flex items-baseline justify-between">
+        <h2 className="text-sm font-semibold">
+          경쟁 실측 (쿠팡 SERP) · <span className="font-mono text-xs text-gray-500">“{serp.keyword}”</span>
+        </h2>
+        <span className={`text-xs ${fresh.stale ? 'text-red-500' : 'text-gray-400'}`}>
+          수집 {fresh.label}
+          {fresh.stale ? ' ⚠ 오래됨' : ''}
+        </span>
+      </div>
+
+      {/* 파생 competition 컴포넌트 */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <MetricCard
+          label="검색결과 수"
+          value={serp.listing_count != null ? `${serp.listing_count}개` : '—'}
+          sub={serp.low_competition != null ? `low_comp ${Math.round(serp.low_competition)}` : undefined}
+        />
+        <MetricCard
+          label="평균 리뷰"
+          value={serp.avg_review != null ? serp.avg_review.toLocaleString('ko-KR') : '—'}
+          sub={
+            serp.low_review_saturation != null
+              ? `low_sat ${Math.round(serp.low_review_saturation)}`
+              : undefined
+          }
+        />
+        <MetricCard
+          label="로켓 점유"
+          value={serp.rocket_share != null ? `${Math.round(serp.rocket_share * 100)}%` : '—'}
+        />
+        <MetricCard
+          label="광고 점유"
+          value={serp.ad_slot_share != null ? `${Math.round(serp.ad_slot_share * 100)}%` : '—'}
+        />
+      </div>
+
+      {/* 실가격대 박스플롯 */}
+      <div>
+        <div className="flex justify-between text-xs text-gray-500 mb-1">
+          <span>실가격대</span>
+          <span>
+            중앙값 <span className="font-semibold text-gray-700">{fmtWon(serp.price_median)}</span>
+          </span>
+        </div>
+        <div className="relative h-8 rounded bg-gray-100">
+          {/* 전체 min~max 막대 */}
+          <div className="absolute top-1/2 left-0 right-0 h-px bg-gray-300" />
+          {/* IQR 박스 */}
+          {p25 != null && p75 != null && (
+            <div
+              className="absolute top-1 bottom-1 rounded bg-blue-200/70 border border-blue-400"
+              style={{ left: `${p25}%`, width: `${Math.max(p75 - p25, 1)}%` }}
+            />
+          )}
+          {/* 중앙값 라인 */}
+          {med != null && (
+            <div className="absolute top-0 bottom-0 w-0.5 bg-blue-700" style={{ left: `${med}%` }} />
+          )}
+        </div>
+        <div className="flex justify-between text-[11px] text-gray-500 mt-1">
+          <span>{fmtWon(serp.price_min)}</span>
+          <span>P25 {fmtWon(serp.price_p25)}</span>
+          <span>P75 {fmtWon(serp.price_p75)}</span>
+          <span>{fmtWon(serp.price_max)}</span>
+        </div>
+      </div>
+
+      {competitionScore != null && (
+        <p className="text-[11px] text-gray-400">
+          현재 competition_score = {competitionScore} · 위 실측이 recompute_scores 에서
+          low_competition / low_review_saturation 으로 반영됩니다.
+        </p>
+      )}
+    </section>
+  )
+}
+
+function MetricCard({ label, value, sub }: { label: string; value: string; sub?: string }) {
+  return (
+    <div className="rounded border border-gray-200 p-3">
+      <div className="text-xs text-gray-500">{label}</div>
+      <div className="mt-1 text-lg font-semibold text-gray-800">{value}</div>
+      {sub && <div className="text-[10px] font-mono text-gray-400 mt-0.5">{sub}</div>}
     </div>
   )
 }

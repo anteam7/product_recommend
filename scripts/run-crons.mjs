@@ -11,6 +11,7 @@
  *   node --env-file=.env.local scripts/run-crons.mjs <name>       # 특정 cron 만 실행
  *   node --env-file=.env.local scripts/run-crons.mjs --list       # 목록
  *   node --env-file=.env.local scripts/run-crons.mjs --no-classify  # classify 단계 생략
+ *   node --env-file=.env.local scripts/run-crons.mjs --no-serp     # 쿠팡 SERP 실측 생략
  *
  * Windows Task Scheduler 등록 예 (PowerShell, 매일 KST 03:30):
  *   $action = New-ScheduledTaskAction -Execute "node.exe" `
@@ -142,6 +143,27 @@ if (!skipClassify) {
     })
   })
   if (classifyExit !== 0) failCount++
+}
+
+// collect-coupang-serp: 로컬 Playwright 단계 (쿠팡 SERP 실측 → competition_score 접지).
+//   Vercel 엔 헤드리스 브라우저가 없어 로컬에서만 돈다. classify 와 동일하게
+//   filter 가 걸리거나 --no-serp 플래그면 건너뜀.
+const skipSerp = args.includes('--no-serp') || !!filter
+if (!skipSerp) {
+  console.log(`[${new Date().toISOString()}] launching collect-coupang-serp (쿠팡 SERP 실측)`)
+  const serpPath = resolvePath(__dirname, 'collect-coupang-serp.mjs')
+  const serpExit = await new Promise((resolve) => {
+    const child = spawn(process.execPath, [serpPath], {
+      stdio: 'inherit',
+      env: process.env,
+    })
+    child.on('exit', (code) => resolve(code ?? 0))
+    child.on('error', (err) => {
+      console.error(`  serp spawn error: ${err.message}`)
+      resolve(1)
+    })
+  })
+  if (serpExit !== 0) failCount++
 }
 
 process.exit(failCount > 0 ? 1 : 0)
