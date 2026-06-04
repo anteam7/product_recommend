@@ -6,6 +6,7 @@ export const metadata = {
 
 const NAV = [
   { href: '/admin/trend-radar', label: '대시보드' },
+  { href: '/admin/trend-radar/funnel', label: '🔻 전환 퍼널' },
   { href: '/admin/trend-radar/recommend', label: '⭐ 추천' },
   { href: '/admin/trend-radar/news-demand', label: '📰 뉴스수요' },
   { href: '/admin/trend-radar/tv-pushes', label: 'TV 편성' },
