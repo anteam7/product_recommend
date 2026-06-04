@@ -70,9 +70,14 @@ export default async function OpportunityPage() {
             X = competition (오른쪽 = 경쟁 약함) · Y = trend · 크기 = commerce · 핀 후보 = 우상단 큰 점
           </p>
         </div>
-        <Link href="/admin/trend-radar" className="text-sm text-gray-700 hover:text-black underline">
-          ← 대시보드
-        </Link>
+        <div className="flex items-center gap-4">
+          <Link href="/admin/trend-radar/commercial-intent" className="text-sm text-emerald-700 hover:text-emerald-900 underline">
+            검색의향 vs 쇼핑클릭 갭 →
+          </Link>
+          <Link href="/admin/trend-radar" className="text-sm text-gray-700 hover:text-black underline">
+            ← 대시보드
+          </Link>
+        </div>
       </header>
 
       {rows.length === 0 ? (
