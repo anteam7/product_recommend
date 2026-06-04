@@ -1,5 +1,6 @@
 import Link from 'next/link'
 import { createAdminClient } from '@/lib/auth/admin-supabase'
+import { computeMarginWaterfall, formatKRW, type MarginWaterfall } from '@/lib/coupang/margin-waterfall'
 
 export const dynamic = 'force-dynamic'
 
@@ -41,6 +42,8 @@ const SIM_OPTIONS = [
   { v: 0.3, label: '0.30 (엄격)' },
 ] as const
 
+type ScoredRow = RecommendRow & { waterfall: MarginWaterfall | null }
+
 async function fetchRecommend(opts: {
   days: number
   minSim: number
@@ -56,11 +59,16 @@ async function fetchRecommend(opts: {
     result_limit: 200,
   } as never)
   if (error) {
-    return { rows: [] as RecommendRow[], error: error.message }
+    return { rows: [] as ScoredRow[], error: error.message }
   }
-  let rows = (data ?? []) as RecommendRow[]
-  if (opts.imminentOnly) rows = rows.filter((r) => r.is_imminent)
-  if (opts.cate) rows = rows.filter((r) => r.cate_cd === opts.cate)
+  let base = (data ?? []) as RecommendRow[]
+  if (opts.imminentOnly) base = base.filter((r) => r.is_imminent)
+  if (opts.cate) base = base.filter((r) => r.cate_cd === opts.cate)
+  // 카테고리별 쿠팡 수수료 반영 순마진 워터폴 (도매가×배수 추정)
+  const rows: ScoredRow[] = base.map((r) => ({
+    ...r,
+    waterfall: computeMarginWaterfall({ cost: r.price_krw ?? 0, cateCd: r.cate_cd }),
+  }))
   return { rows, error: null as string | null }
 }
 
@@ -105,7 +113,7 @@ function sourceLabel(s: string): string {
 export default async function RecommendPage({
   searchParams,
 }: {
-  searchParams: Promise<{ days?: string; sim?: string; imminent?: string; cate?: string }>
+  searchParams: Promise<{ days?: string; sim?: string; imminent?: string; cate?: string; margin?: string }>
 }) {
   const sp = await searchParams
   const days = parseInt(sp.days ?? '30', 10)
@@ -114,21 +122,28 @@ export default async function RecommendPage({
   const validSim = SIM_OPTIONS.some((s) => Math.abs(s.v - sim) < 0.001) ? sim : 0.2
   const imminentOnly = sp.imminent === '1'
   const cate = sp.cate ?? ''
+  // margin 필터: 'pos' = 흑자 후보만 · 'kill' = 수수료로 죽는 후보만
+  const marginFilter = sp.margin === 'pos' || sp.margin === 'kill' ? sp.margin : ''
 
   const current: Record<string, string> = {
     days: String(validDays),
     sim: String(validSim),
     imminent: imminentOnly ? '1' : '',
     cate,
+    margin: marginFilter,
   }
 
-  const { rows, error } = await fetchRecommend({ days: validDays, minSim: validSim, imminentOnly, cate })
+  const fetched = await fetchRecommend({ days: validDays, minSim: validSim, imminentOnly, cate })
+  const error = fetched.error
+  let rows = fetched.rows
+  if (marginFilter === 'pos') rows = rows.filter((r) => r.waterfall && r.waterfall.netMargin > 0)
+  else if (marginFilter === 'kill') rows = rows.filter((r) => r.waterfall && r.waterfall.netMargin <= 0)
 
   // KPI
   const total = rows.length
   const imminentCount = rows.filter((r) => r.is_imminent).length
   const tvHitCount = rows.filter((r) => r.tv_score > 0).length
-  const searchHitCount = rows.filter((r) => r.search_score > 0).length
+  const killCount = fetched.rows.filter((r) => r.waterfall && r.waterfall.netMargin <= 0).length
   const avgFinal = rows.length > 0 ? rows.reduce((s, r) => s + Number(r.final_score), 0) / rows.length : 0
 
   return (
@@ -184,6 +199,21 @@ export default async function RecommendPage({
           >
             {imminentOnly ? '✓ ' : ''}임박특가만
           </Link>
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-gray-500">순마진</span>
+            <Link
+              href={buildHref(current, { margin: marginFilter === 'pos' ? null : 'pos' })}
+              className={`px-2 py-1 text-xs rounded ${marginFilter === 'pos' ? 'bg-emerald-100 text-emerald-700 font-semibold' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}
+            >
+              흑자만
+            </Link>
+            <Link
+              href={buildHref(current, { margin: marginFilter === 'kill' ? null : 'kill' })}
+              className={`px-2 py-1 text-xs rounded ${marginFilter === 'kill' ? 'bg-rose-100 text-rose-700 font-semibold' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}
+            >
+              💀 수수료로 죽는 후보
+            </Link>
+          </div>
         </div>
         <div className="flex flex-wrap gap-1 border-t border-gray-100 pt-2">
           <Link
@@ -209,7 +239,7 @@ export default async function RecommendPage({
         <Kpi label="후보 상품" value={total} />
         <Kpi label="🔥 임박특가" value={imminentCount} highlight={imminentCount > 0} />
         <Kpi label="TV 매칭" value={tvHitCount} />
-        <Kpi label="검색 매칭" value={searchHitCount} />
+        <Kpi label="💀 수수료로 죽는 후보" value={killCount} highlight={killCount > 0} />
         <Kpi label="평균 final_score" value={avgFinal.toFixed(2)} />
       </section>
 
@@ -292,6 +322,40 @@ export default async function RecommendPage({
                       </span>
                     )}
                   </div>
+                </div>
+
+                {/* 순마진 워터폴 */}
+                <div className="text-right flex-shrink-0 w-36 space-y-1 border-r border-gray-100 pr-3">
+                  {r.waterfall ? (
+                    <>
+                      <div
+                        className={`text-lg font-bold ${
+                          r.waterfall.netMargin > 0 ? 'text-emerald-700' : 'text-rose-600'
+                        }`}
+                        title="예상판매가 − 수수료 − 배송 − 부가세 − 원가"
+                      >
+                        {r.waterfall.netMargin > 0 ? '+' : ''}
+                        {formatKRW(r.waterfall.netMargin)}
+                      </div>
+                      <div
+                        className={`text-xs font-mono ${
+                          r.waterfall.marginPct > 0 ? 'text-emerald-600' : 'text-rose-500'
+                        }`}
+                      >
+                        마진율 {r.waterfall.marginPct}%
+                      </div>
+                      {r.waterfall.killedByFee && (
+                        <div className="text-[10px] text-rose-600 font-semibold">💀 수수료로 죽음</div>
+                      )}
+                      <div className="text-[10px] text-gray-400 font-mono leading-tight pt-0.5">
+                        판매 {formatKRW(r.waterfall.salePrice)}
+                        <br />
+                        수수료 {(r.waterfall.feeRate * 100).toFixed(1)}%
+                      </div>
+                    </>
+                  ) : (
+                    <div className="text-gray-400 text-xs">원가 X</div>
+                  )}
                 </div>
 
                 {/* 점수 + 가격 */}
