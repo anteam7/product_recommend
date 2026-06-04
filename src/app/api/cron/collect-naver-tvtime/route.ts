@@ -30,24 +30,71 @@ const UA =
 interface Slot {
   product: string
   time: string
+  channel: string | null
 }
 
 function safeKeyword(s: string, max = 200): string {
   return s.replace(/\s+/g, ' ').trim().slice(0, max)
 }
 
+// 홈쇼핑 채널 정규화 사전 — 위젯 HTML 내 등장 위치로 각 슬롯의 편성사를 추정.
+// 채널 다중성(여러 사가 같은 상품을 편성)이 '프로 MD 다중 검증' 신호의 핵심.
+const CHANNEL_PATTERNS: { canon: string; re: RegExp }[] = [
+  { canon: 'GS샵', re: /GS\s*샵|GS\s*SHOP|지에스샵/i },
+  { canon: 'CJ온스타일', re: /CJ\s*온스타일|CJ\s*ONSTYLE|온스타일/i },
+  { canon: '롯데홈쇼핑', re: /롯데\s*(홈쇼핑|원티비|onetv)?/i },
+  { canon: '현대홈쇼핑', re: /현대\s*(홈쇼핑|hmall)?/i },
+  { canon: 'NS홈쇼핑', re: /NS\s*(홈쇼핑|shop)?/i },
+  { canon: '공영쇼핑', re: /공영\s*쇼핑/i },
+  { canon: '신세계쇼핑', re: /신세계\s*(쇼핑|tv)?/i },
+  { canon: 'SK스토아', re: /SK\s*스토아|SK\s*stoa/i },
+  { canon: '쇼핑엔티', re: /쇼핑\s*엔티|쇼핑엔티|shopnt/i },
+  { canon: '홈앤쇼핑', re: /홈\s*앤\s*쇼핑|홈앤쇼핑|home\s*&?\s*shopping/i },
+  { canon: 'K쇼핑', re: /K\s*쇼핑/i },
+  { canon: 'W쇼핑', re: /W\s*쇼핑|더블유\s*쇼핑/i },
+]
+
+// 위젯 HTML 에서 각 채널명이 처음/매번 등장하는 위치(index)를 모아 정렬.
+// 슬롯 li 의 위치보다 앞선 가장 가까운 채널 마커를 그 슬롯의 편성사로 본다.
+function buildChannelMarkers(widget: string): { idx: number; canon: string }[] {
+  const markers: { idx: number; canon: string }[] = []
+  for (const { canon, re } of CHANNEL_PATTERNS) {
+    const g = new RegExp(re.source, re.flags.includes('g') ? re.flags : re.flags + 'g')
+    let m: RegExpExecArray | null
+    while ((m = g.exec(widget)) !== null) {
+      markers.push({ idx: m.index, canon })
+      if (m.index === g.lastIndex) g.lastIndex++ // zero-width 방어
+    }
+  }
+  return markers.sort((a, b) => a.idx - b.idx)
+}
+
+function channelAt(markers: { idx: number; canon: string }[], pos: number): string | null {
+  let found: string | null = null
+  for (const mk of markers) {
+    if (mk.idx <= pos) found = mk.canon
+    else break
+  }
+  return found
+}
+
 function extractSlots(html: string): Slot[] {
   const tvtimeIdx = html.indexOf('tvtime')
   if (tvtimeIdx < 0) return []
   const widget = html.slice(Math.max(0, tvtimeIdx - 1000), tvtimeIdx + 80000)
+  const markers = buildChannelMarkers(widget)
 
   const slots: Slot[] = []
   const liRe = /<li[^>]*>[\s\S]*?<\/li>/g
-  for (const m of widget.matchAll(liRe)) {
+  let m: RegExpExecArray | null
+  while ((m = liRe.exec(widget)) !== null) {
     const li = m[0]
+    const liPos = m.index
     if (!/[01]?\d:[0-5]\d/.test(li)) continue
     const text = li.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()
     if (text.length > 250 || !/[가-힣]{2,}/.test(text)) continue
+
+    const channel = channelAt(markers, liPos)
 
     const tokens = text.split(/(\d{1,2}:[0-5]\d)/g)
     let prevTime = ''
@@ -60,18 +107,18 @@ function extractSlots(html: string): Slot[] {
       if (!tok || tok.length < 3) continue
       const next = tokens[i + 1]?.trim()
       if (next && /^\d{1,2}:[0-5]\d$/.test(next)) {
-        slots.push({ product: safeKeyword(tok), time: next })
+        slots.push({ product: safeKeyword(tok), time: next, channel })
       } else if (prevTime) {
-        slots.push({ product: safeKeyword(tok), time: prevTime })
+        slots.push({ product: safeKeyword(tok), time: prevTime, channel })
       }
     }
   }
 
-  // dedupe (product+time)
+  // dedupe (product+time+channel)
   const seen = new Set<string>()
   const out: Slot[] = []
   for (const s of slots) {
-    const k = s.product + '|' + s.time
+    const k = s.product + '|' + s.time + '|' + (s.channel ?? '')
     if (seen.has(k)) continue
     seen.add(k)
     if (s.product.length >= 3 && s.product.length <= 80) out.push(s)
@@ -141,12 +188,16 @@ export async function GET(request: NextRequest) {
       source: SOURCE,
       category: s.time,
       category_top: 'shopping_tv',
+      channel: s.channel, // 채널 다중성(MD 검증) 신호 — trends_v5_tv_channel.sql 적용 후 채워짐
       collected_at: collectedAt,
     }))
 
     let inserted = 0
     if (rows.length > 0) {
-      const { error: kwErr } = await sb.from('jimscanner_trends_keywords').insert(rows)
+      // channel 컬럼은 trends_v5_tv_channel.sql 적용 후 존재 — 생성 타입 미반영분 as any 캐스팅
+      const { error: kwErr } = await sb
+        .from('jimscanner_trends_keywords')
+        .insert(rows as any)
       if (kwErr) throw new Error(`keywords insert: ${kwErr.message}`)
       inserted = rows.length
     }

@@ -186,6 +186,27 @@ export default async function TrendRadarPage({
         ))}
       </nav>
 
+      {/* 📺 채널중복 MD검증 보드 callout */}
+      <Link
+        href="/admin/trend-radar/tv-validated"
+        className="block rounded border border-indigo-200 bg-indigo-50/50 px-4 py-3 hover:bg-indigo-50 transition-colors"
+      >
+        <div className="flex items-center justify-between flex-wrap gap-2">
+          <div>
+            <div className="text-sm font-semibold">
+              📺 TV 채널중복 MD검증 보드{' '}
+              <span className="text-xs font-normal text-gray-500 ml-1">
+                빈도 대신 &lsquo;몇 개 홈쇼핑사가 같은 상품을 편성했나&rsquo;로 재집계
+              </span>
+            </div>
+            <div className="text-xs text-gray-600 mt-0.5">
+              여러 사가 반복 편성 = 프로 MD 다중 검증된 대중 위너 · 3사+ ⨯ ggsan 소싱가능 최상단
+            </div>
+          </div>
+          <span className="text-xs text-gray-500">검증 보드 →</span>
+        </div>
+      </Link>
+
       {/* 🔥 TV ↔ ggsan 매칭 callout */}
       <Link
         href="/admin/trend-radar/tv-ggsan-match"
