@@ -1,6 +1,7 @@
 import Link from 'next/link'
 import { createAdminClient } from '@/lib/auth/admin-supabase'
 import OpportunityScatter from './OpportunityScatter'
+import ReturnMarginTable, { type ReturnMarginRow } from './ReturnMarginTable'
 
 export const dynamic = 'force-dynamic'
 
@@ -11,6 +12,15 @@ interface ScoreRow {
   supplier_score: number
   competition_score: number
   final_score: number
+  computed_at: string
+}
+
+// jimscanner_trends_return_risk — 마이그레이션(supabase/trends_return_risk.sql) 적용 후 상태 가정.
+interface ReturnRiskRow {
+  product_id: string
+  estimated_return_rate: number
+  effective_margin_ratio: number | null
+  surface_margin_ratio: number | null
   computed_at: string
 }
 
@@ -33,13 +43,41 @@ async function fetchData() {
   }
 
   const ids = latest.map((s) => s.product_id)
-  if (ids.length === 0) return { rows: [] }
+  if (ids.length === 0) return { rows: [], returnRows: [] as ReturnMarginRow[] }
 
   const { data: prods } = await sb
     .from('jimscanner_trends_products')
     .select('id, canonical_name, category_top')
     .in('id', ids)
   const byId = new Map((prods ?? []).map((p: any) => [p.id, p]))
+
+  // 반품·교환 보정 실효마진 (product 별 latest). 미적용 환경에선 에러 무시.
+  // 마이그레이션 후 타입 미생성 구간이므로 as any 캐스팅.
+  const { data: risks } = await (sb as any)
+    .from('jimscanner_trends_return_risk')
+    .select('product_id, estimated_return_rate, effective_margin_ratio, surface_margin_ratio, computed_at')
+    .in('product_id', ids)
+    .order('computed_at', { ascending: false })
+    .limit(4000)
+  const riskById = new Map<string, ReturnRiskRow>()
+  for (const r of (risks ?? []) as ReturnRiskRow[]) {
+    if (!riskById.has(r.product_id)) riskById.set(r.product_id, r)
+  }
+
+  const returnRows: ReturnMarginRow[] = latest.map((s) => {
+    const p = byId.get(s.product_id) ?? {}
+    const r = riskById.get(s.product_id)
+    return {
+      id: s.product_id,
+      name: (p as any).canonical_name ?? '?',
+      category: (p as any).category_top ?? 'all',
+      commerce: s.commerce_score,
+      final: s.final_score,
+      returnRate: r?.estimated_return_rate ?? null,
+      surfaceMargin: r?.surface_margin_ratio ?? null,
+      effectiveMargin: r?.effective_margin_ratio ?? null,
+    }
+  })
 
   return {
     rows: latest.map((s) => {
@@ -55,11 +93,12 @@ async function fetchData() {
         supplier: s.supplier_score,
       }
     }),
+    returnRows,
   }
 }
 
 export default async function OpportunityPage() {
-  const { rows } = await fetchData()
+  const { rows, returnRows } = await fetchData()
 
   return (
     <div className="space-y-6 p-6">
@@ -82,6 +121,8 @@ export default async function OpportunityPage() {
       ) : (
         <OpportunityScatter rows={rows} />
       )}
+
+      {returnRows.length > 0 && <ReturnMarginTable rows={returnRows} />}
     </div>
   )
 }
