@@ -1,5 +1,6 @@
 import Link from 'next/link'
 import { createAdminClient } from '@/lib/auth/admin-supabase'
+import DecisionButtons, { reasonLabel, type CurrentDecision } from './DecisionButtons'
 
 export const dynamic = 'force-dynamic'
 
@@ -18,6 +19,7 @@ interface RecommendRow {
   search_score: number
   raw_score: number
   imminent_bonus: number
+  decision_penalty?: number
   final_score: number
 
   tv_match_count: number
@@ -26,6 +28,29 @@ interface RecommendRow {
   search_match_count: number
   search_top_keyword: string
   search_sources: string[]
+
+  // 기각사유 학습 신호 (RPC 마이그레이션 후 채워짐)
+  rejected_siblings?: number
+  top_reject_reason?: string
+}
+
+interface DecisionRow {
+  goods_no: string
+  cate_cd: string | null
+  decision: string
+  reason_code: string | null
+  expires_at: string | null
+  decided_at: string
+}
+
+async function fetchDecisions(): Promise<DecisionRow[]> {
+  const sb = createAdminClient()
+  // 테이블은 supabase/trends_decisions.sql 에 정의 — generated 타입 미반영이라 캐스팅.
+  const { data } = await sb
+    .from('jimscanner_trends_decisions' as never)
+    .select('goods_no, cate_cd, decision, reason_code, expires_at, decided_at')
+    .order('decided_at', { ascending: false })
+  return (data ?? []) as unknown as DecisionRow[]
 }
 
 const DAYS_OPTIONS = [
@@ -122,7 +147,35 @@ export default async function RecommendPage({
     cate,
   }
 
-  const { rows, error } = await fetchRecommend({ days: validDays, minSim: validSim, imminentOnly, cate })
+  const [{ rows, error }, decisions] = await Promise.all([
+    fetchRecommend({ days: validDays, minSim: validSim, imminentOnly, cate }),
+    fetchDecisions(),
+  ])
+
+  // goods_no → 현재 결정 (버튼 상태)
+  const decisionByGoods = new Map<string, CurrentDecision>()
+  for (const d of decisions) {
+    if (!decisionByGoods.has(d.goods_no)) {
+      decisionByGoods.set(d.goods_no, {
+        decision: d.decision,
+        reason_code: d.reason_code,
+        expires_at: d.expires_at,
+      })
+    }
+  }
+
+  // 기각 사유 분포 (영구 rejected 기준)
+  const nowMs = Date.now()
+  const rejectedDecisions = decisions.filter((d) => d.decision === 'rejected')
+  const snoozedActive = decisions.filter(
+    (d) => d.decision === 'snoozed' && (!d.expires_at || new Date(d.expires_at).getTime() > nowMs),
+  )
+  const reasonDist = new Map<string, number>()
+  for (const d of rejectedDecisions) {
+    const code = d.reason_code ?? 'other'
+    reasonDist.set(code, (reasonDist.get(code) ?? 0) + 1)
+  }
+  const reasonDistSorted = [...reasonDist.entries()].sort((a, b) => b[1] - a[1])
 
   // KPI
   const total = rows.length
@@ -213,6 +266,30 @@ export default async function RecommendPage({
         <Kpi label="평균 final_score" value={avgFinal.toFixed(2)} />
       </section>
 
+      {/* 기각 사유 분포·재출현 분석 */}
+      {(rejectedDecisions.length > 0 || snoozedActive.length > 0) && (
+        <section className="rounded border border-rose-200 bg-rose-50/40 px-4 py-3 space-y-2">
+          <div className="flex items-baseline justify-between">
+            <h2 className="text-sm font-semibold text-rose-900">🚫 기각 사유 분포 · 재출현 차단</h2>
+            <span className="text-xs text-rose-700">
+              영구 기각 {rejectedDecisions.length}건 · 활성 스누즈 {snoozedActive.length}건
+            </span>
+          </div>
+          {reasonDistSorted.length > 0 && (
+            <div className="flex flex-wrap gap-2">
+              {reasonDistSorted.map(([code, count]) => (
+                <span key={code} className="text-xs rounded bg-white border border-rose-200 px-2 py-1 text-rose-800">
+                  {reasonLabel(code)} <strong className="font-mono">{count}</strong>
+                </span>
+              ))}
+            </div>
+          )}
+          <p className="text-[11px] text-rose-700/80">
+            같은 카테고리에서 반복 기각된 사유는 신규 후보 점수에 패널티(×0.55~1.0)로 자동 반영됩니다.
+          </p>
+        </section>
+      )}
+
       {/* 에러 */}
       {error && (
         <div className="rounded border border-red-300 bg-red-50 px-4 py-3 text-sm text-red-800">
@@ -235,16 +312,16 @@ export default async function RecommendPage({
         </div>
       ) : (
         <div className="space-y-2">
-          {rows.map((r, i) => (
-            <a
+          {rows.map((r, i) => {
+            const penalty = r.decision_penalty == null ? 1 : Number(r.decision_penalty)
+            const penalized = penalty < 0.999
+            return (
+            <div
               key={r.goods_no}
-              href={r.detail_url ?? '#'}
-              target="_blank"
-              rel="noopener"
-              className={`block rounded border overflow-hidden hover:shadow-sm transition-all ${
+              className={`block rounded border overflow-hidden transition-all ${
                 r.is_imminent
-                  ? 'border-red-200 bg-red-50/40 hover:bg-red-50'
-                  : 'border-gray-200 hover:bg-gray-50'
+                  ? 'border-red-200 bg-red-50/40'
+                  : 'border-gray-200'
               }`}
             >
               <div className="flex items-start gap-3 p-3">
@@ -254,7 +331,12 @@ export default async function RecommendPage({
                 </div>
 
                 {/* 이미지 */}
-                <div className="w-20 h-20 bg-gray-100 rounded overflow-hidden flex-shrink-0 relative">
+                <a
+                  href={r.detail_url ?? '#'}
+                  target="_blank"
+                  rel="noopener"
+                  className="w-20 h-20 bg-gray-100 rounded overflow-hidden flex-shrink-0 relative block"
+                >
                   {r.image_url && (
                     // eslint-disable-next-line @next/next/no-img-element
                     <img src={r.image_url} alt="" loading="lazy" className="w-full h-full object-cover" />
@@ -264,13 +346,19 @@ export default async function RecommendPage({
                       임박
                     </span>
                   )}
-                </div>
+                </a>
 
                 {/* 본문 */}
                 <div className="flex-1 min-w-0 space-y-1">
-                  <div className="text-sm font-medium leading-snug" title={r.title}>
+                  <a
+                    href={r.detail_url ?? '#'}
+                    target="_blank"
+                    rel="noopener"
+                    className="text-sm font-medium leading-snug hover:underline block"
+                    title={r.title}
+                  >
                     {r.title}
-                  </div>
+                  </a>
                   <div className="text-xs text-gray-500">
                     {r.cate_label ?? r.cate_cd} · {r.goods_no}
                   </div>
@@ -291,6 +379,22 @@ export default async function RecommendPage({
                         from {r.search_sources.map(sourceLabel).join(', ')}
                       </span>
                     )}
+                    {penalized && (
+                      <span className="bg-rose-100 text-rose-700 px-2 py-0.5 rounded" title="같은 카테고리에서 운영자가 반복 기각한 후보">
+                        ⚠ 기각학습 패널티 ×{penalty.toFixed(2)}
+                        {r.rejected_siblings ? ` (동일군 ${r.rejected_siblings}건` : ''}
+                        {r.top_reject_reason ? ` · ${reasonLabel(r.top_reject_reason)})` : r.rejected_siblings ? ')' : ''}
+                      </span>
+                    )}
+                  </div>
+                  {/* 운영자 판단 버튼 */}
+                  <div className="pt-1.5">
+                    <DecisionButtons
+                      goodsNo={r.goods_no}
+                      cateCd={r.cate_cd}
+                      title={r.title}
+                      current={decisionByGoods.get(r.goods_no) ?? null}
+                    />
                   </div>
                 </div>
 
@@ -306,11 +410,13 @@ export default async function RecommendPage({
                     <div>TV {Number(r.tv_score).toFixed(2)} × 1.5</div>
                     <div>검색 {Number(r.search_score).toFixed(2)} × 1.0</div>
                     {r.is_imminent && <div className="text-red-600">× 1.3 (임박)</div>}
+                    {penalized && <div className="text-rose-600">× {penalty.toFixed(2)} (기각학습)</div>}
                   </div>
                 </div>
               </div>
-            </a>
-          ))}
+            </div>
+            )
+          })}
         </div>
       )}
 

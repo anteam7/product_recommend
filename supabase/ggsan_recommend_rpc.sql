@@ -31,6 +31,7 @@ RETURNS TABLE (
   search_score real,
   raw_score real,
   imminent_bonus real,
+  decision_penalty real,
   final_score real,
   -- 매칭 근거
   tv_match_count int,
@@ -38,7 +39,10 @@ RETURNS TABLE (
   tv_total_pushes int,
   search_match_count int,
   search_top_keyword text,
-  search_sources text[]
+  search_sources text[],
+  -- 기각사유 학습 신호
+  rejected_siblings int,
+  top_reject_reason text
 )
 LANGUAGE sql
 STABLE
@@ -128,6 +132,29 @@ AS $$
     GROUP BY goods_no
   ),
 
+  -- 4.5) 운영자 기각사유 학습 신호
+  --   active_decisions: 현재 유효한 결정 (스누즈는 만료 전만)
+  active_decisions AS (
+    SELECT goods_no, cate_cd, decision, reason_code, expires_at
+    FROM jimscanner_trends_decisions
+    WHERE decision IN ('rejected', 'snoozed')
+      AND (decision <> 'snoozed' OR expires_at IS NULL OR expires_at > now())
+  ),
+  --   숨길 goods_no (rejected = 영구, snoozed = 만료 전)
+  hidden_goods AS (
+    SELECT goods_no FROM active_decisions
+  ),
+  --   카테고리별 기각 누적 (같은 cate_cd 신규 후보에 패널티 가산)
+  reject_by_cate AS (
+    SELECT
+      cate_cd,
+      COUNT(*)::int AS reject_count,
+      (ARRAY_AGG(reason_code ORDER BY expires_at NULLS FIRST))[1] AS top_reason
+    FROM active_decisions
+    WHERE decision = 'rejected' AND cate_cd IS NOT NULL
+    GROUP BY cate_cd
+  ),
+
   -- 5) ggsan 상품에 점수 매핑 (시그널 1개 이상 있는 것만)
   scored AS (
     SELECT
@@ -140,11 +167,18 @@ AS $$
       COALESCE(tv.tv_total_pushes, 0) AS tv_total_pushes,
       COALESCE(s.search_match_count, 0) AS search_match_count,
       COALESCE(s.search_top_keyword, '') AS search_top_keyword,
-      COALESCE(s.search_sources, ARRAY[]::text[]) AS search_sources
+      COALESCE(s.search_sources, ARRAY[]::text[]) AS search_sources,
+      COALESCE(rc.reject_count, 0) AS rejected_siblings,
+      COALESCE(rc.top_reason, '') AS top_reject_reason,
+      -- 같은 카테고리 기각 누적 → 점수 하향 (decay, 0.55 까지 바닥)
+      GREATEST(0.55, 1.0 / (1.0 + 0.15 * COALESCE(rc.reject_count, 0)))::real AS decision_penalty
     FROM jimscanner_ggsan_products gp
     LEFT JOIN tv_agg tv ON tv.goods_no = gp.goods_no
     LEFT JOIN search_agg s ON s.goods_no = gp.goods_no
-    WHERE tv.tv_score IS NOT NULL OR s.search_score IS NOT NULL
+    LEFT JOIN reject_by_cate rc ON rc.cate_cd = gp.cate_cd
+    WHERE (tv.tv_score IS NOT NULL OR s.search_score IS NOT NULL)
+      -- 운영자가 기각/스누즈한 후보는 큐에서 숨김
+      AND gp.goods_no NOT IN (SELECT goods_no FROM hidden_goods)
   )
 
   SELECT
@@ -161,23 +195,29 @@ AS $$
     s.search_score,
     (s.tv_score * 1.5 + s.search_score * 1.0)::real AS raw_score,
     (CASE WHEN s.is_imminent THEN 1.3 ELSE 1.0 END)::real AS imminent_bonus,
+    s.decision_penalty,
     ((s.tv_score * 1.5 + s.search_score * 1.0)
-       * (CASE WHEN s.is_imminent THEN 1.3 ELSE 1.0 END))::real AS final_score,
+       * (CASE WHEN s.is_imminent THEN 1.3 ELSE 1.0 END)
+       * s.decision_penalty)::real AS final_score,
     s.tv_match_count,
     s.tv_top_keyword,
     s.tv_total_pushes,
     s.search_match_count,
     s.search_top_keyword,
-    s.search_sources
+    s.search_sources,
+    s.rejected_siblings,
+    s.top_reject_reason
   FROM scored s
   WHERE ((s.tv_score * 1.5 + s.search_score * 1.0)
-           * (CASE WHEN s.is_imminent THEN 1.3 ELSE 1.0 END)) >= min_score
+           * (CASE WHEN s.is_imminent THEN 1.3 ELSE 1.0 END)
+           * s.decision_penalty) >= min_score
   ORDER BY
     -- 임박특가 우선
     (CASE WHEN s.is_imminent THEN 1 ELSE 0 END) DESC,
-    -- final_score
+    -- final_score (기각사유 패널티 반영)
     ((s.tv_score * 1.5 + s.search_score * 1.0)
-       * (CASE WHEN s.is_imminent THEN 1.3 ELSE 1.0 END)) DESC
+       * (CASE WHEN s.is_imminent THEN 1.3 ELSE 1.0 END)
+       * s.decision_penalty) DESC
   LIMIT result_limit;
 $$;
 
