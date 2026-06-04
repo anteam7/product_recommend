@@ -41,6 +41,12 @@ async function fetchData() {
     .in('id', ids)
   const byId = new Map((prods ?? []).map((p: any) => [p.id, p]))
 
+  // 컴백(재출현) 상품 id 집합 — VIEW jimscanner_trends_comeback (generated 타입 미반영)
+  const { data: comeback } = await sb
+    .from('jimscanner_trends_comeback' as never)
+    .select('product_id')
+  const comebackIds = new Set<string>(((comeback ?? []) as unknown as { product_id: string }[]).map((c) => c.product_id))
+
   return {
     rows: latest.map((s) => {
       const p = byId.get(s.product_id) ?? {}
@@ -53,13 +59,22 @@ async function fetchData() {
         size: Math.max(50, s.commerce_score * 4),
         final: s.final_score,
         supplier: s.supplier_score,
+        comeback: comebackIds.has(s.product_id),
       }
     }),
   }
 }
 
-export default async function OpportunityPage() {
-  const { rows } = await fetchData()
+export default async function OpportunityPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ comeback?: string }>
+}) {
+  const sp = await searchParams
+  const comebackOnly = sp.comeback === '1'
+  const { rows: allRows } = await fetchData()
+  const comebackCount = allRows.filter((r) => r.comeback).length
+  const rows = comebackOnly ? allRows.filter((r) => r.comeback) : allRows
 
   return (
     <div className="space-y-6 p-6">
@@ -74,6 +89,22 @@ export default async function OpportunityPage() {
           ← 대시보드
         </Link>
       </header>
+
+      {/* 칩 필터 */}
+      <div className="flex flex-wrap gap-1">
+        <Link
+          href="/admin/trend-radar/opportunity"
+          className={`px-3 py-1 text-xs rounded ${!comebackOnly ? 'bg-black text-white font-semibold' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}
+        >
+          전체
+        </Link>
+        <Link
+          href="/admin/trend-radar/opportunity?comeback=1"
+          className={`px-3 py-1 text-xs rounded ${comebackOnly ? 'bg-emerald-600 text-white font-semibold' : 'bg-emerald-50 text-emerald-700 hover:bg-emerald-100 border border-emerald-200'}`}
+        >
+          🔁 컴백만 ({comebackCount})
+        </Link>
+      </div>
 
       {rows.length === 0 ? (
         <div className="rounded border border-dashed border-gray-300 p-12 text-center text-gray-500">
