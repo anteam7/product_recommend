@@ -1,7 +1,11 @@
 import { NextResponse, type NextRequest } from 'next/server'
 import { createClient as createSupabaseClient } from '@supabase/supabase-js'
 import { createClient, isAdminEmail } from '@/lib/auth/server'
-import { collectNaverSearchTrends, collectNaverShoppingTrends } from '@/lib/trends/collect'
+import {
+  collectNaverSearchTrends,
+  collectNaverShoppingTrends,
+  collectNaverSeasonal,
+} from '@/lib/trends/collect'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -29,12 +33,17 @@ export async function POST(request: NextRequest) {
     const r = await collectNaverShoppingTrends(admin, 'admin')
     return NextResponse.json({ results: [r] })
   }
+  if (body.source === 'naver_seasonal') {
+    const r = await collectNaverSeasonal(admin, 'admin')
+    return NextResponse.json({ results: [r] })
+  }
   if (body.source === 'all' || !body.source) {
-    const [a, b] = await Promise.all([
+    const [a, b, c] = await Promise.all([
       collectNaverSearchTrends(admin, 'admin'),
       collectNaverShoppingTrends(admin, 'admin'),
+      collectNaverSeasonal(admin, 'admin'),
     ])
-    return NextResponse.json({ results: [a, b] })
+    return NextResponse.json({ results: [a, b, c] })
   }
   return NextResponse.json({ error: `unknown source: ${body.source}` }, { status: 400 })
 }

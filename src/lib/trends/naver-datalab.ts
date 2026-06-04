@@ -116,6 +116,15 @@ export function dateNDaysAgoKst(daysAgo: number): string {
   return kst.toISOString().slice(0, 10)
 }
 
+/** N개월 전 달의 1일 (YYYY-MM-01, KST) — monthly 시계열 startDate 용 */
+export function monthStartNMonthsAgoKst(monthsAgo: number): string {
+  const now = new Date()
+  const kst = new Date(now.getTime() + 9 * 3600_000)
+  kst.setUTCDate(1)
+  kst.setUTCMonth(kst.getUTCMonth() - monthsAgo)
+  return kst.toISOString().slice(0, 10)
+}
+
 /** 청크: 길이 N 단위로 분할 */
 export function chunk<T>(arr: T[], size: number): T[][] {
   const out: T[][] = []
