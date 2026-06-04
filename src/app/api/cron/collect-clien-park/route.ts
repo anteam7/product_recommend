@@ -1,5 +1,6 @@
 import { NextResponse, type NextRequest } from 'next/server'
 import { insertMarketRaw, isAuthorizedCron, type MarketRawInsert } from '@/lib/market-signals'
+import { looksLikeAsk } from '@/lib/demand-asks'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -37,20 +38,26 @@ export async function GET(request: NextRequest) {
 
   const rows: MarketRawInsert[] = []
   const seen = new Set<string>()
+  let askCount = 0
   let m: RegExpExecArray | null
   while ((m = re.exec(html)) !== null) {
     const [, hrefRel, id, rawTitle] = m
     const title = rawTitle.trim()
-    if (!title || !looksRelevant(title)) continue
+    if (!title) continue
+    // 직구 시그널이거나 '추천요청' 패턴이면 적재 (추천요청은 능동 구매수요 신호)
+    const isAsk = looksLikeAsk(title)
+    if (!looksRelevant(title) && !isAsk) continue
     if (seen.has(id)) continue
     seen.add(id)
+    if (isAsk) askCount++
     rows.push({
       source: 'clien_park',
       dedup_key: id,
       source_url: `https://www.clien.net${hrefRel}`,
       title,
       external_id: id,
-      metadata: { board: 'park' },
+      // is_demand_ask: extract-demand-asks 크론이 본문/댓글 fetch + LLM 추출 대상으로 사용
+      metadata: { board: 'park', is_demand_ask: isAsk },
     })
   }
 
@@ -58,6 +65,7 @@ export async function GET(request: NextRequest) {
   return NextResponse.json({
     ok: true,
     matched: rows.length,
+    demand_asks: askCount,
     inserted: result.inserted,
     executed_at: new Date().toISOString(),
   })

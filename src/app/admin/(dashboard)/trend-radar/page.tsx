@@ -216,6 +216,27 @@ export default async function TrendRadarPage({
         </div>
       </Link>
 
+      {/* 🙋 군중추천 위너 발굴 callout */}
+      <Link
+        href="/admin/trend-radar/demand-asks"
+        className="block rounded border border-indigo-200 bg-indigo-50 px-4 py-3 hover:bg-indigo-100 transition-colors"
+      >
+        <div className="flex items-center justify-between flex-wrap gap-2">
+          <div>
+            <div className="text-sm font-semibold">
+              🙋 군중추천 위너 발굴{' '}
+              <span className="text-xs font-normal text-gray-500 ml-1">
+                커뮤니티 &apos;추천 좀&apos; 요청 마이닝 → 댓글에서 검증된 위너 추출
+              </span>
+            </div>
+            <div className="text-xs text-gray-600 mt-0.5">
+              반복 추천요청(=미해결 능동수요) 랭킹 + 군중이 골라준 추천 상품 리더보드
+            </div>
+          </div>
+          <span className="text-xs text-gray-500">보러가기 →</span>
+        </div>
+      </Link>
+
       {/* TV 편성 push Top 20 */}
       <section className="rounded border border-gray-200 p-4 bg-amber-50/40">
         <div className="flex items-baseline justify-between mb-3">
