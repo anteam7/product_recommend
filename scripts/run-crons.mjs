@@ -123,6 +123,27 @@ console.log(
   `[${new Date().toISOString()}] HTTP crons done — ${okCount} ok, ${failCount} fail in ${totalMs}ms`,
 )
 
+// collect-autocomplete: 자동완성 수요 트리 수집 (로컬 전용 — Vercel 엔 fetch 차단 가능성↑).
+//   HTTP cron 이 아니라 Supabase 직접 적재 스크립트이므로 여기서 spawn.
+//   filter 가 걸리면 건너뜀. --no-autocomplete 플래그로도 생략 가능.
+const skipAutocomplete = args.includes('--no-autocomplete') || !!filter
+if (!skipAutocomplete) {
+  console.log(`[${new Date().toISOString()}] launching collect-autocomplete`)
+  const acPath = resolvePath(__dirname, 'collect-autocomplete.mjs')
+  const acExit = await new Promise((resolve) => {
+    const child = spawn(process.execPath, [acPath], {
+      stdio: 'inherit',
+      env: process.env,
+    })
+    child.on('exit', (code) => resolve(code ?? 0))
+    child.on('error', (err) => {
+      console.error(`  autocomplete spawn error: ${err.message}`)
+      resolve(1)
+    })
+  })
+  if (acExit !== 0) failCount++
+}
+
 // classify-trends-llm: 로컬 Claude CLI 단계.
 //   filter 가 걸리면 (특정 cron 만 돌리는 경우) 건너뜀.
 //   --no-classify 플래그도 지원.
