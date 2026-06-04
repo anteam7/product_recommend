@@ -35,10 +35,20 @@ interface ScoreRow {
   score_components: any
   computed_at: string
 }
+// jimscanner_trends_rivalry — 마이그레이션 후 타입 미생성이라 as any 캐스팅.
+interface RivalryRow {
+  from_product_id: string | null
+  to_product_id: string | null
+  from_name: string
+  to_name: string
+  relation: 'vs' | 'replace'
+  mention_count: number
+  sample_quote: string | null
+}
 
 async function fetchProduct(id: string) {
   const sb = createAdminClient()
-  const [prodRes, aliasRes, scoreRes] = await Promise.all([
+  const [prodRes, aliasRes, scoreRes, rivalRes] = await Promise.all([
     sb.from('jimscanner_trends_products').select('*').eq('id', id).single(),
     sb
       .from('jimscanner_trends_aliases')
@@ -51,6 +61,12 @@ async function fetchProduct(id: string) {
       .eq('product_id', id)
       .order('computed_at', { ascending: false })
       .limit(30),
+    (sb as any)
+      .from('jimscanner_trends_rivalry')
+      .select('from_product_id, to_product_id, from_name, to_name, relation, mention_count, sample_quote')
+      .or(`from_product_id.eq.${id},to_product_id.eq.${id}`)
+      .order('mention_count', { ascending: false })
+      .limit(50),
   ])
 
   if (prodRes.error || !prodRes.data) return null
@@ -59,6 +75,7 @@ async function fetchProduct(id: string) {
     product: prodRes.data as ProductRow,
     aliases: (aliasRes.data ?? []) as AliasRow[],
     scoreHistory: (scoreRes.data ?? []) as ScoreRow[],
+    rivalry: (rivalRes?.error ? [] : (rivalRes?.data ?? [])) as RivalryRow[],
   }
 }
 
@@ -70,8 +87,16 @@ export default async function ProductDetailPage({
   const { id } = await params
   const data = await fetchProduct(id)
   if (!data) notFound()
-  const { product, aliases, scoreHistory } = data
+  const { product, aliases, scoreHistory, rivalry } = data
   const latest = scoreHistory[0]
+
+  // 경쟁 구도: 이 상품 관점에서 '이겨야 할 incumbent'(내가 challenger=from) vs '나를 위협하는 challenger'(내가 incumbent=to)
+  const mustBeat = rivalry
+    .filter((r) => r.from_product_id === product.id || r.from_name === product.canonical_name)
+    .map((r) => ({ name: r.to_name, relation: r.relation, mentions: r.mention_count, quote: r.sample_quote }))
+  const threatenedBy = rivalry
+    .filter((r) => r.to_product_id === product.id || r.to_name === product.canonical_name)
+    .map((r) => ({ name: r.from_name, relation: r.relation, mentions: r.mention_count, quote: r.sample_quote }))
 
   return (
     <div className="space-y-6 p-6">
@@ -116,6 +141,62 @@ export default async function ProductDetailPage({
           <ScoreCard label="commerce" value={latest.commerce_score} />
           <ScoreCard label="supplier" value={latest.supplier_score} />
           <ScoreCard label="competition" value={latest.competition_score} />
+        </section>
+      )}
+
+      {/* 경쟁 구도 (rivalry 마이닝) */}
+      {(mustBeat.length > 0 || threatenedBy.length > 0) && (
+        <section>
+          <h2 className="text-sm font-semibold mb-2">
+            ⚔️ 경쟁 구도{' '}
+            <Link href="/admin/trend-radar/rivalry" className="text-xs font-normal text-gray-400 hover:text-black">
+              전체 보기 →
+            </Link>
+          </h2>
+          <div className="grid gap-3 md:grid-cols-2">
+            <div className="rounded border border-red-200 p-3">
+              <div className="text-xs font-semibold text-red-700 mb-2">이겨야 할 incumbent ({mustBeat.length})</div>
+              {mustBeat.length === 0 ? (
+                <div className="text-xs text-gray-400">—</div>
+              ) : (
+                <ul className="space-y-1">
+                  {mustBeat.map((r, i) => (
+                    <li key={i} className="text-sm flex items-baseline justify-between gap-2">
+                      <span>
+                        {r.name}{' '}
+                        <span className="text-[10px] text-gray-400">
+                          {r.relation === 'replace' ? '대체' : 'vs'}
+                        </span>
+                      </span>
+                      <span className="text-xs font-mono text-gray-500">{r.mentions}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+            <div className="rounded border border-amber-200 p-3">
+              <div className="text-xs font-semibold text-amber-700 mb-2">
+                나를 위협하는 challenger ({threatenedBy.length})
+              </div>
+              {threatenedBy.length === 0 ? (
+                <div className="text-xs text-gray-400">—</div>
+              ) : (
+                <ul className="space-y-1">
+                  {threatenedBy.map((r, i) => (
+                    <li key={i} className="text-sm flex items-baseline justify-between gap-2">
+                      <span>
+                        {r.name}{' '}
+                        <span className="text-[10px] text-gray-400">
+                          {r.relation === 'replace' ? '대체' : 'vs'}
+                        </span>
+                      </span>
+                      <span className="text-xs font-mono text-gray-500">{r.mentions}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          </div>
         </section>
       )}
 
