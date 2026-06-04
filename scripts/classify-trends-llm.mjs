@@ -53,9 +53,24 @@ const SYSTEM_PROMPT = `한국 위탁 판매 상품 분류기. 입력 리스트�
 - category_mid: 5-10자 한국어 (예: "오메가3", "수납용품")
 - intent_label: 5-7자 (예: "예방건강", "문제해결", "소모품")
 - description: 15자 이내 1문장 (위탁 판매 의사결정 단서)
+- regulatory_regime: 한국 인증 레짐 추정. 다음 중 정확히 하나 선택:
+  · "건강기능식품": 영양제·건기식 (홍삼·유산균·오메가3·루테인 등)
+  · "의료기기": 혈압계·체온계·온열기·마사지기(의료)·보청기·콘택트렌즈 등
+  · "전기KC": 전기·전자제품 (충전기·가전·LED조명·배터리·전동)
+  · "생활용품KC": 생활·주방·위생용품 (세제·플라스틱용기·청소도구)
+  · "화장품기능성": 화장품·기능성화장품 (미백·주름·자외선차단)
+  · "어린이안전": 만13세 이하 어린이제품 (완구·유아용품)
+  · "전안법섬유": 섬유·의류·가죽·신발
+  · "식품": 일반 가공·신선식품 (건기식 아님)
+  · "해당없음": 위 규제 부담 낮은 잡화·소품
+- consignment_blocker: 위탁 판매 차단 강도. 다음 중 정확히 하나:
+  · "blocker": 의료기기·건강기능식품 → 면허·신고 필요, 일반 위탁 사실상 불가
+  · "high": 전기KC·화장품기능성·어린이안전 → 인증 보유 도매처 없으면 등록 불가
+  · "low": 생활용품KC·전안법섬유·식품 → 도매처가 인증 보유 시 무난
+  · "none": 해당없음 → 위탁 즉시 판매 가능
 
 예시 입력: - id="abc" name="닥터린 초임계 알티지 오메가3 60캡슐" cur_top=health aliases=2 samples=[종근당 오메가3 | 일양 오메가3] sources=[naver_shopping_hot,musinsa_best]
-예시 출력: [{"id":"abc","canonical_name":"오메가3","brand":"닥터린","category_top":"health","category_mid":"오메가3","intent_label":"예방건강","description":"혈행건강 영양제"}]`
+예시 출력: [{"id":"abc","canonical_name":"오메가3","brand":"닥터린","category_top":"health","category_mid":"오메가3","intent_label":"예방건강","description":"혈행건강 영양제","regulatory_regime":"건강기능식품","consignment_blocker":"blocker"}]`
 
 function buildUserPrompt(items) {
   const lines = items.map(
@@ -98,6 +113,21 @@ function normalizeResult(o, fallbackId) {
   const top = ['health', 'living', 'digital', 'other'].includes(o.category_top)
     ? o.category_top
     : 'other'
+  const REGIMES = [
+    '건강기능식품', '의료기기', '전기KC', '생활용품KC',
+    '화장품기능성', '어린이안전', '전안법섬유', '식품', '해당없음',
+  ]
+  const regime = REGIMES.includes(o.regulatory_regime) ? o.regulatory_regime : '해당없음'
+  // 레짐별 기본 차단 강도 (LLM 값이 비거나 불일치하면 레짐에서 역산)
+  const REGIME_BLOCKER = {
+    건강기능식품: 'blocker', 의료기기: 'blocker',
+    전기KC: 'high', 화장품기능성: 'high', 어린이안전: 'high',
+    생활용품KC: 'low', 전안법섬유: 'low', 식품: 'low',
+    해당없음: 'none',
+  }
+  const blocker = ['none', 'low', 'high', 'blocker'].includes(o.consignment_blocker)
+    ? o.consignment_blocker
+    : (REGIME_BLOCKER[regime] ?? 'none')
   return {
     id,
     canonical_name: cn,
@@ -106,6 +136,8 @@ function normalizeResult(o, fallbackId) {
     category_mid: typeof o.category_mid === 'string' ? o.category_mid.trim().slice(0, 30) : '',
     intent_label: typeof o.intent_label === 'string' ? o.intent_label.trim().slice(0, 20) : '',
     description: typeof o.description === 'string' ? o.description.trim().slice(0, 80) : '',
+    regulatory_regime: regime,
+    consignment_blocker: blocker,
   }
 }
 
@@ -233,6 +265,8 @@ async function applyResults(results) {
           category_mid: r.category_mid,
           intent_label: r.intent_label,
           description: r.description,
+          regulatory_regime: r.regulatory_regime,
+          consignment_blocker: r.consignment_blocker,
           llm_classified_at: now,
           llm_model: MODEL,
         })

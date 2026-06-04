@@ -11,7 +11,18 @@ interface Row {
   size: number
   final: number
   supplier: number
+  regime?: string | null
+  blocker?: string
 }
+
+// 위탁 차단 강도별 배지
+const BLOCKER_BADGE: Record<string, { icon: string; label: string; cls: string }> = {
+  blocker: { icon: '⛔', label: '위탁불가', cls: 'bg-red-100 text-red-700' },
+  high: { icon: '⚠️', label: '인증필요', cls: 'bg-amber-100 text-amber-800' },
+  low: { icon: '🛡️', label: '경미', cls: 'bg-gray-100 text-gray-600' },
+  none: { icon: '✅', label: '즉시판매', cls: 'bg-emerald-100 text-emerald-700' },
+}
+const isHeavy = (b?: string) => b === 'blocker' || b === 'high'
 
 const CATEGORY_COLORS: Record<string, string> = {
   health: '#10b981',
@@ -71,31 +82,40 @@ export default function OpportunityScatter({ rows }: { rows: Row[] }) {
             🎯 핀 후보 (트렌드↑·경쟁↓)
           </text>
 
-          {/* 점들 */}
-          {rows.map((r) => (
-            <a key={r.id} href={`/admin/trend-radar/products/${r.id}`}>
-              <circle
-                cx={xScale(r.x)}
-                cy={yScale(r.y)}
-                r={rScale(r.size)}
-                fill={CATEGORY_COLORS[r.category] ?? '#6b7280'}
-                fillOpacity={0.55}
-                stroke={CATEGORY_COLORS[r.category] ?? '#6b7280'}
-                strokeOpacity={0.9}
-                onMouseEnter={() => setHover(r)}
-                onMouseLeave={() => setHover(null)}
-                style={{ cursor: 'pointer' }}
-              />
-            </a>
-          ))}
+          {/* 점들 — 인증부담(blocker/high)은 회색 처리해 헛소싱 차단 */}
+          {rows.map((r) => {
+            const heavy = isHeavy(r.blocker)
+            const color = heavy ? '#9ca3af' : CATEGORY_COLORS[r.category] ?? '#6b7280'
+            return (
+              <a key={r.id} href={`/admin/trend-radar/products/${r.id}`}>
+                <circle
+                  cx={xScale(r.x)}
+                  cy={yScale(r.y)}
+                  r={rScale(r.size)}
+                  fill={color}
+                  fillOpacity={heavy ? 0.2 : 0.55}
+                  stroke={color}
+                  strokeOpacity={heavy ? 0.5 : 0.9}
+                  strokeDasharray={r.blocker === 'blocker' ? '3,2' : ''}
+                  onMouseEnter={() => setHover(r)}
+                  onMouseLeave={() => setHover(null)}
+                  style={{ cursor: 'pointer' }}
+                />
+              </a>
+            )
+          })}
         </svg>
 
         {/* hover tooltip */}
         {hover && (
-          <div className="absolute top-2 right-2 rounded bg-black/85 text-white text-xs px-3 py-2 max-w-xs">
+          <div className="absolute top-2 right-2 rounded bg-black/85 text-white text-xs px-3 py-2 max-w-xs space-y-1">
             <div className="font-semibold">{hover.name}</div>
             <div>category: {hover.category}</div>
             <div>final: {hover.final} · trend: {hover.y} · competition: {hover.x} · supplier: {hover.supplier}</div>
+            <div>
+              🛡️ {BLOCKER_BADGE[hover.blocker ?? 'none']?.icon} {BLOCKER_BADGE[hover.blocker ?? 'none']?.label}
+              {hover.regime && hover.regime !== '해당없음' ? ` · ${hover.regime}` : ''}
+            </div>
           </div>
         )}
       </div>
@@ -122,10 +142,20 @@ export default function OpportunityScatter({ rows }: { rows: Row[] }) {
               <Link
                 key={r.id}
                 href={`/admin/trend-radar/products/${r.id}`}
-                className="block px-2 py-1 rounded hover:bg-gray-50"
+                className={`flex items-center gap-2 px-2 py-1 rounded hover:bg-gray-50 ${
+                  isHeavy(r.blocker) ? 'opacity-50' : ''
+                }`}
               >
-                <span className="font-mono text-gray-500 mr-2">{r.final}</span>
-                {r.name}
+                <span className="font-mono text-gray-500">{r.final}</span>
+                {(() => {
+                  const b = BLOCKER_BADGE[r.blocker ?? 'none']
+                  return b ? (
+                    <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${b.cls}`}>
+                      {b.icon} {r.regime && r.regime !== '해당없음' ? r.regime : b.label}
+                    </span>
+                  ) : null
+                })()}
+                <span className="truncate">{r.name}</span>
               </Link>
             ))}
           {rows.filter((r) => r.y >= 60 && r.x >= 60).length === 0 && (
