@@ -28,6 +28,30 @@ interface RecommendRow {
   search_sources: string[]
 }
 
+// 자기잠식(카니발라이제이션) 충돌 — jimscanner_cannibalization_check RPC 출력
+interface CannibalConflict {
+  candidate_title: string
+  conflict_seller_product_id: string | null
+  conflict_source_goods_no: string | null
+  conflict_title: string
+  similarity_pct: number
+  conflict_status: string
+  conflict_list_price_krw: number | null
+  conflict_margin_pct: number | null
+  conflict_sales_count: number
+}
+
+// 잠식 위험 임계: 이 % 이상이면 발굴 랭킹에서 디스카운트
+const CANNIBAL_RISK_THRESHOLD = 45
+
+// 위험도(%)에 따른 final_score 디스카운트 계수
+function cannibalDiscount(riskPct: number): number {
+  if (riskPct < CANNIBAL_RISK_THRESHOLD) return 1.0
+  // 45% → ×0.85, 70% → ×0.6, 90%+ → ×0.4 선형 근사
+  const over = (riskPct - CANNIBAL_RISK_THRESHOLD) / (100 - CANNIBAL_RISK_THRESHOLD)
+  return Math.max(0.4, 1.0 - over * 0.6)
+}
+
 const DAYS_OPTIONS = [
   { v: 7, label: '7일' },
   { v: 14, label: '14일' },
@@ -62,6 +86,26 @@ async function fetchRecommend(opts: {
   if (opts.imminentOnly) rows = rows.filter((r) => r.is_imminent)
   if (opts.cate) rows = rows.filter((r) => r.cate_cd === opts.cate)
   return { rows, error: null as string | null }
+}
+
+// 후보 title 배열 → 충돌 SKU 맵 (candidate_title → 충돌 목록, 유사도 desc)
+async function fetchCannibalization(titles: string[]): Promise<Map<string, CannibalConflict[]>> {
+  const map = new Map<string, CannibalConflict[]>()
+  const uniq = Array.from(new Set(titles.filter((t) => t && t.trim().length > 0)))
+  if (uniq.length === 0) return map
+  const sb = createAdminClient()
+  // RPC는 supabase/cannibalization_check_rpc.sql 에 정의 — generated 타입 미반영, 캐스팅 사용
+  const { data, error } = await sb.rpc('jimscanner_cannibalization_check' as never, {
+    candidate_titles: uniq,
+    min_sim: 0.3,
+  } as never)
+  if (error) return map
+  for (const c of (data ?? []) as CannibalConflict[]) {
+    const arr = map.get(c.candidate_title) ?? []
+    arr.push(c)
+    map.set(c.candidate_title, arr)
+  }
+  return map
 }
 
 const CATEGORIES: { code: string; label: string }[] = [
@@ -124,11 +168,33 @@ export default async function RecommendPage({
 
   const { rows, error } = await fetchRecommend({ days: validDays, minSim: validSim, imminentOnly, cate })
 
+  // 자기잠식 게이트: 후보 title 들을 자사 등록 SKU 와 교차대조
+  const cannibalMap = await fetchCannibalization(rows.map((r) => r.title))
+  const ranked = rows
+    .map((r) => {
+      const conflicts = cannibalMap.get(r.title) ?? []
+      const riskPct = conflicts.length > 0 ? Math.max(...conflicts.map((c) => c.similarity_pct)) : 0
+      const discount = cannibalDiscount(riskPct)
+      return {
+        row: r,
+        conflicts,
+        riskPct,
+        atRisk: riskPct >= CANNIBAL_RISK_THRESHOLD,
+        adjustedScore: Number(r.final_score) * discount,
+      }
+    })
+    // 디스카운트 반영 재정렬 (임박특가 우선은 유지)
+    .sort((a, b) => {
+      if (a.row.is_imminent !== b.row.is_imminent) return a.row.is_imminent ? -1 : 1
+      return b.adjustedScore - a.adjustedScore
+    })
+
   // KPI
   const total = rows.length
   const imminentCount = rows.filter((r) => r.is_imminent).length
   const tvHitCount = rows.filter((r) => r.tv_score > 0).length
   const searchHitCount = rows.filter((r) => r.search_score > 0).length
+  const cannibalCount = ranked.filter((r) => r.atRisk).length
   const avgFinal = rows.length > 0 ? rows.reduce((s, r) => s + Number(r.final_score), 0) / rows.length : 0
 
   return (
@@ -205,11 +271,12 @@ export default async function RecommendPage({
       </div>
 
       {/* KPI */}
-      <section className="grid grid-cols-2 md:grid-cols-5 gap-3">
+      <section className="grid grid-cols-2 md:grid-cols-6 gap-3">
         <Kpi label="후보 상품" value={total} />
         <Kpi label="🔥 임박특가" value={imminentCount} highlight={imminentCount > 0} />
         <Kpi label="TV 매칭" value={tvHitCount} />
         <Kpi label="검색 매칭" value={searchHitCount} />
+        <Kpi label={`⚠ 잠식 위험 (≥${CANNIBAL_RISK_THRESHOLD}%)`} value={cannibalCount} highlight={cannibalCount > 0} />
         <Kpi label="평균 final_score" value={avgFinal.toFixed(2)} />
       </section>
 
@@ -235,16 +302,18 @@ export default async function RecommendPage({
         </div>
       ) : (
         <div className="space-y-2">
-          {rows.map((r, i) => (
+          {ranked.map(({ row: r, conflicts, riskPct, atRisk }, i) => (
             <a
               key={r.goods_no}
               href={r.detail_url ?? '#'}
               target="_blank"
               rel="noopener"
               className={`block rounded border overflow-hidden hover:shadow-sm transition-all ${
-                r.is_imminent
-                  ? 'border-red-200 bg-red-50/40 hover:bg-red-50'
-                  : 'border-gray-200 hover:bg-gray-50'
+                atRisk
+                  ? 'border-rose-300 bg-rose-50/50 hover:bg-rose-50'
+                  : r.is_imminent
+                    ? 'border-red-200 bg-red-50/40 hover:bg-red-50'
+                    : 'border-gray-200 hover:bg-gray-50'
               }`}
             >
               <div className="flex items-start gap-3 p-3">
@@ -292,6 +361,40 @@ export default async function RecommendPage({
                       </span>
                     )}
                   </div>
+
+                  {/* 자기잠식 게이트 */}
+                  {conflicts.length > 0 && (
+                    <div className="flex flex-wrap items-center gap-1.5 pt-1.5">
+                      <span
+                        className={`px-2 py-0.5 rounded text-xs font-semibold ${
+                          atRisk ? 'bg-rose-600 text-white' : 'bg-amber-100 text-amber-800'
+                        }`}
+                      >
+                        {atRisk ? '🚨' : '⚠'} 잠식 위험 {riskPct}%
+                      </span>
+                      {conflicts.slice(0, 3).map((c) => (
+                        <span
+                          key={c.conflict_source_goods_no ?? c.conflict_seller_product_id ?? c.conflict_title}
+                          className="px-2 py-0.5 rounded bg-white border border-rose-200 text-rose-700 text-[11px]"
+                          title={c.conflict_title}
+                        >
+                          {c.conflict_status === 'SELLING' ? '🟢' : '🟡'}{' '}
+                          {(c.conflict_title || c.conflict_source_goods_no || '?').slice(0, 16)} ·{' '}
+                          {c.similarity_pct}%
+                          {c.conflict_sales_count > 0 && ` · ${c.conflict_sales_count}건판매`}
+                          {c.conflict_margin_pct != null && ` · ${Number(c.conflict_margin_pct).toFixed(0)}%마진`}
+                        </span>
+                      ))}
+                      {conflicts.length > 3 && (
+                        <span className="text-[11px] text-gray-500">+{conflicts.length - 3}</span>
+                      )}
+                    </div>
+                  )}
+                  {atRisk && (
+                    <div className="text-[11px] text-rose-700 pt-0.5">
+                      → 신규 소싱 대신 기존 SKU 광고·가격 강화 권장 (트래픽/광고비 분산 방지)
+                    </div>
+                  )}
                 </div>
 
                 {/* 점수 + 가격 */}

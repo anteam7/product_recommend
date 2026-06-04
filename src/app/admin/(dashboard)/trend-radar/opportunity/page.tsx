@@ -41,18 +41,51 @@ async function fetchData() {
     .in('id', ids)
   const byId = new Map((prods ?? []).map((p: any) => [p.id, p]))
 
+  // 자기잠식 게이트: 후보 canonical_name 을 자사 등록 SKU 와 교차대조
+  const names = Array.from(
+    new Set(
+      latest
+        .map((s) => (byId.get(s.product_id) as any)?.canonical_name)
+        .filter((n: unknown): n is string => typeof n === 'string' && n.trim().length > 0),
+    ),
+  )
+  const cannibalMap = new Map<string, { riskPct: number; conflictTitle: string | null }>()
+  if (names.length > 0) {
+    // RPC는 supabase/cannibalization_check_rpc.sql 에 정의 — generated 타입 미반영, 캐스팅 사용
+    const { data: conflicts } = await sb.rpc('jimscanner_cannibalization_check' as never, {
+      candidate_titles: names,
+      min_sim: 0.3,
+    } as never)
+    for (const c of (conflicts ?? []) as Array<{
+      candidate_title: string
+      similarity_pct: number
+      conflict_title: string | null
+    }>) {
+      const prev = cannibalMap.get(c.candidate_title)
+      if (!prev || c.similarity_pct > prev.riskPct) {
+        cannibalMap.set(c.candidate_title, { riskPct: c.similarity_pct, conflictTitle: c.conflict_title })
+      }
+    }
+  }
+  const RISK_THRESHOLD = 45
+
   return {
     rows: latest.map((s) => {
       const p = byId.get(s.product_id) ?? {}
+      const name = (p as any).canonical_name ?? '?'
+      const conflict = cannibalMap.get(name)
       return {
         id: s.product_id,
-        name: (p as any).canonical_name ?? '?',
+        name,
         category: (p as any).category_top ?? 'all',
         x: s.competition_score,        // 경쟁 약함 → 점수 높음 → 오른쪽
         y: s.trend_score,              // 트렌드 강함 → 위
         size: Math.max(50, s.commerce_score * 4),
         final: s.final_score,
         supplier: s.supplier_score,
+        cannibal: (conflict?.riskPct ?? 0) >= RISK_THRESHOLD,
+        riskPct: conflict?.riskPct ?? 0,
+        conflictTitle: conflict?.conflictTitle ?? null,
       }
     }),
   }
@@ -67,7 +100,7 @@ export default async function OpportunityPage() {
         <div>
           <h1 className="text-2xl font-bold">Opportunity Matrix</h1>
           <p className="text-sm text-gray-500 mt-1">
-            X = competition (오른쪽 = 경쟁 약함) · Y = trend · 크기 = commerce · 핀 후보 = 우상단 큰 점
+            X = competition (오른쪽 = 경쟁 약함) · Y = trend · 크기 = commerce · 핀 후보 = 우상단 큰 점 · 🚨 빨강 점선 = 자기잠식 위험
           </p>
         </div>
         <Link href="/admin/trend-radar" className="text-sm text-gray-700 hover:text-black underline">

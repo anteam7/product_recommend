@@ -11,6 +11,9 @@ interface Row {
   size: number
   final: number
   supplier: number
+  cannibal?: boolean   // 자사 등록 SKU 와 잠식 충돌
+  riskPct?: number     // 최대 중복도 %
+  conflictTitle?: string | null
 }
 
 const CATEGORY_COLORS: Record<string, string> = {
@@ -78,10 +81,12 @@ export default function OpportunityScatter({ rows }: { rows: Row[] }) {
                 cx={xScale(r.x)}
                 cy={yScale(r.y)}
                 r={rScale(r.size)}
-                fill={CATEGORY_COLORS[r.category] ?? '#6b7280'}
-                fillOpacity={0.55}
-                stroke={CATEGORY_COLORS[r.category] ?? '#6b7280'}
-                strokeOpacity={0.9}
+                fill={r.cannibal ? '#e11d48' : CATEGORY_COLORS[r.category] ?? '#6b7280'}
+                fillOpacity={r.cannibal ? 0.5 : 0.55}
+                stroke={r.cannibal ? '#e11d48' : CATEGORY_COLORS[r.category] ?? '#6b7280'}
+                strokeWidth={r.cannibal ? 2.5 : 1}
+                strokeOpacity={0.95}
+                strokeDasharray={r.cannibal ? '3,2' : ''}
                 onMouseEnter={() => setHover(r)}
                 onMouseLeave={() => setHover(null)}
                 style={{ cursor: 'pointer' }}
@@ -96,6 +101,12 @@ export default function OpportunityScatter({ rows }: { rows: Row[] }) {
             <div className="font-semibold">{hover.name}</div>
             <div>category: {hover.category}</div>
             <div>final: {hover.final} · trend: {hover.y} · competition: {hover.x} · supplier: {hover.supplier}</div>
+            {hover.cannibal && (
+              <div className="mt-1 text-rose-300">
+                🚨 자기잠식 위험 {hover.riskPct}% — 충돌 SKU &quot;{(hover.conflictTitle ?? '').slice(0, 24)}&quot;
+                <br />→ 신규 소싱 대신 기존 SKU 강화 권장
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -108,6 +119,10 @@ export default function OpportunityScatter({ rows }: { rows: Row[] }) {
             {cat}
           </span>
         ))}
+        <span className="flex items-center gap-1">
+          <span className="inline-block w-3 h-3 rounded-full border-2 border-dashed border-rose-600" />
+          🚨 자기잠식 위험
+        </span>
       </div>
 
       {/* 우상단 sub-list */}
