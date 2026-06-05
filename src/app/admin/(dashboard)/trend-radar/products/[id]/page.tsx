@@ -35,10 +35,20 @@ interface ScoreRow {
   score_components: any
   computed_at: string
 }
+interface BriefRow {
+  verdict: 'go' | 'watch' | 'pass'
+  confidence: number
+  top_reasons: string[]
+  biggest_blocker: string | null
+  recommended_action: string | null
+  suggested_price_band: string | null
+  model: string | null
+  generated_at: string
+}
 
 async function fetchProduct(id: string) {
   const sb = createAdminClient()
-  const [prodRes, aliasRes, scoreRes] = await Promise.all([
+  const [prodRes, aliasRes, scoreRes, briefRes] = await Promise.all([
     sb.from('jimscanner_trends_products').select('*').eq('id', id).single(),
     sb
       .from('jimscanner_trends_aliases')
@@ -51,6 +61,15 @@ async function fetchProduct(id: string) {
       .eq('product_id', id)
       .order('computed_at', { ascending: false })
       .limit(30),
+    // brief 테이블은 마이그레이션(supabase/trends_briefs.sql) 후 — 미적용 시 error 무시.
+    (sb as any)
+      .from('jimscanner_trends_briefs')
+      .select(
+        'verdict, confidence, top_reasons, biggest_blocker, recommended_action, suggested_price_band, model, generated_at',
+      )
+      .eq('product_id', id)
+      .order('generated_at', { ascending: false })
+      .limit(1),
   ])
 
   if (prodRes.error || !prodRes.data) return null
@@ -59,7 +78,14 @@ async function fetchProduct(id: string) {
     product: prodRes.data as ProductRow,
     aliases: (aliasRes.data ?? []) as AliasRow[],
     scoreHistory: (scoreRes.data ?? []) as ScoreRow[],
+    brief: ((briefRes as any)?.data?.[0] ?? null) as BriefRow | null,
   }
+}
+
+const VERDICT_STYLE: Record<BriefRow['verdict'], { label: string; badge: string; emoji: string }> = {
+  go: { label: 'GO', badge: 'bg-emerald-100 text-emerald-700 border-emerald-300', emoji: '🟢' },
+  watch: { label: 'WATCH', badge: 'bg-amber-100 text-amber-700 border-amber-300', emoji: '🟡' },
+  pass: { label: 'PASS', badge: 'bg-rose-100 text-rose-700 border-rose-300', emoji: '🔴' },
 }
 
 export default async function ProductDetailPage({
@@ -70,7 +96,7 @@ export default async function ProductDetailPage({
   const { id } = await params
   const data = await fetchProduct(id)
   if (!data) notFound()
-  const { product, aliases, scoreHistory } = data
+  const { product, aliases, scoreHistory, brief } = data
   const latest = scoreHistory[0]
 
   return (
@@ -107,6 +133,9 @@ export default async function ProductDetailPage({
           )}
         </div>
       </header>
+
+      {/* Go/No-Go 의사결정 브리프 */}
+      {brief && <BriefCard brief={brief} />}
 
       {/* 4점수 카드 */}
       {latest && (
@@ -183,6 +212,59 @@ export default async function ProductDetailPage({
         first_seen: {product.first_seen_at} · last_seen: {product.last_seen_at}
       </section>
     </div>
+  )
+}
+
+function BriefCard({ brief }: { brief: BriefRow }) {
+  const v = VERDICT_STYLE[brief.verdict] ?? VERDICT_STYLE.watch
+  return (
+    <section className="rounded-lg border border-gray-200 bg-white p-5 shadow-sm">
+      <div className="flex items-center justify-between mb-3">
+        <div className="flex items-center gap-3">
+          <span className={`text-sm font-bold px-3 py-1 rounded-full border ${v.badge}`}>
+            {v.emoji} {v.label}
+          </span>
+          <span className="text-xs text-gray-500">
+            확신도 {(brief.confidence * 100).toFixed(0)}%
+          </span>
+          {brief.suggested_price_band && (
+            <span className="text-xs px-2 py-0.5 rounded bg-blue-50 text-blue-700 font-medium">
+              권장가 {brief.suggested_price_band}
+            </span>
+          )}
+        </div>
+        <span className="text-[10px] text-gray-400 font-mono">
+          브리프 {brief.generated_at.slice(0, 16).replace('T', ' ')}
+          {brief.model ? ` · ${brief.model}` : ''}
+        </span>
+      </div>
+
+      {brief.top_reasons.length > 0 && (
+        <ul className="space-y-1 mb-3">
+          {brief.top_reasons.map((r, i) => (
+            <li key={i} className="text-sm text-gray-800 flex gap-2">
+              <span className="text-gray-400">•</span>
+              <span>{r}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      <div className="grid md:grid-cols-2 gap-3">
+        {brief.biggest_blocker && (
+          <div className="rounded border border-rose-100 bg-rose-50/50 p-3">
+            <div className="text-[10px] uppercase text-rose-500 font-semibold mb-1">최대 블로커</div>
+            <div className="text-sm text-gray-800">{brief.biggest_blocker}</div>
+          </div>
+        )}
+        {brief.recommended_action && (
+          <div className="rounded border border-emerald-100 bg-emerald-50/50 p-3">
+            <div className="text-[10px] uppercase text-emerald-600 font-semibold mb-1">다음 액션</div>
+            <div className="text-sm text-gray-800">{brief.recommended_action}</div>
+          </div>
+        )}
+      </div>
+    </section>
   )
 }
 
