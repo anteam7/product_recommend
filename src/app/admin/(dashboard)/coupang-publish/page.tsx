@@ -406,7 +406,8 @@ export default async function CoupangPublishPage({
               </tr>
             )}
             {rows.map((r) => {
-              const sLabel = STATUS_LABELS[r.status]
+              // 미지의 status(예: 쿠팡 raw 한글 '심사중')도 행 렌더가 죽지 않도록 폴백 — 단 1건이 페이지 전체를 500 내던 버그 방지
+              const sLabel = STATUS_LABELS[r.status] ?? { label: r.status, cls: 'bg-gray-100 text-gray-600' }
               const coupangUrl = r.product_id
                 ? `https://www.coupang.com/vp/products/${r.product_id}`
                 : null
