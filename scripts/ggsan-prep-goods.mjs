@@ -58,12 +58,15 @@ function extractRule(html) {
   for (const re of [/([\d,]{4,})\s*원\s*이상\s*판매\s*부탁/g, /절대\s*준수[^0-9]{0,15}(?:1개\s*)?([\d,]{4,})\s*원/g, /폐쇄몰[^0-9]{0,10}([\d,]{4,})\s*원\s*이상/g]) {
     let m; while ((m = re.exec(text))) { const n = parseInt(m[1].replace(/,/g, '')); if (n >= 1000 && n <= 1000000) cands.push(n) }
   }
-  const textMin = cands.length ? Math.max(...cands) : null
-  // 수량별(묶음) 절대준수 MSP — 단품 상세에 "N개 묶음 X원" 적힌 경우(예: 4150 "1개 12,400 / 2개 묶음 23,810 / 3개 묶음 34,970"). 절대준수 구간 내에서만 파싱.
+  // 수량별(묶음) 절대준수 MSP — "1개 12,900 / 2개 25,500 / ... / 6개 73,500원 이상 판매 부탁" 형태. 절대준수 구간 내에서만 파싱.
   const tiered = {}
-  const seg = text.match(/(?:절대\s*준수|판매가격\s*절대준수)[^]{0,160}/)
+  const seg = text.match(/(?:절대\s*준수|판매가격\s*절대준수)[^]{0,200}/)
   if (seg) { for (const mm of seg[0].matchAll(/(\d+)\s*개\s*(?:묶음)?\s*([\d,]{4,})\s*원/g)) { const n = parseInt(mm[1]); const p = parseInt(mm[2].replace(/,/g, '')); if (n >= 1 && n <= 12 && p >= 1000 && p <= 2000000) tiered[n] = p } }
-  return { closed_mall: closedMall, text_min_price: textMin, tiered_msp: Object.keys(tiered).length > 1 ? tiered : null }
+  // 단품(1개) MSP 우선: 수량별 표기가 있으면 tiered[1](1개가)을 단품 절대준수가로 채택.
+  // (과거 max(cands)가 "6개 N원 이상 판매부탁"의 묶음 최고가를 잡아 단품 MSP를 과대 산정하던 버그 → 단품 등록가가 MSP 미만으로 오판정)
+  const tieredCount = Object.keys(tiered).length
+  const textMin = tieredCount >= 2 ? (tiered[1] || Math.min(...Object.values(tiered))) : (cands.length ? Math.max(...cands) : null)
+  return { closed_mall: closedMall, text_min_price: textMin, tiered_msp: tieredCount > 1 ? tiered : null }
 }
 function sign(method, urlPath) { const dt = new Date().toISOString().substring(2, 19).replace(/[-:]/g, '') + 'Z'; return { dt, sig: crypto.createHmac('sha256', env.COUPANG_SECRET_KEY).update(dt + method + urlPath).digest('hex') } }
 async function predictCategory(productName) {
