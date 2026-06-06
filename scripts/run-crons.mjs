@@ -1,16 +1,14 @@
 #!/usr/bin/env node
 /**
- * 로컬 cron runner — Vercel Hobby 플랜의 cron 한도(2개) 우회용.
+ * 로컬 cron runner — Vercel Hobby 플랜의 cron 한도 우회용.
  *
- * vercel.json 에 정의된 12개 HTTP cron endpoint 를 순차 호출한 뒤,
- * 마지막에 classify-trends-llm 을 로컬 Claude Code CLI 로 처리한다
- * (Vercel 에선 claude 바이너리가 없어 못 돌리므로 분리).
+ * 현재는 환율/요율(update-rates)과 배송료(refresh-shipping-rates) 갱신만
+ * 수행한다. (트렌드 수집/LLM 분류 cron은 비활성화되어 제거됨)
  *
  * 사용법:
  *   node --env-file=.env.local scripts/run-crons.mjs              # 전체 실행
  *   node --env-file=.env.local scripts/run-crons.mjs <name>       # 특정 cron 만 실행
  *   node --env-file=.env.local scripts/run-crons.mjs --list       # 목록
- *   node --env-file=.env.local scripts/run-crons.mjs --no-classify  # classify 단계 생략
  *
  * Windows Task Scheduler 등록 예 (PowerShell, 매일 KST 03:30):
  *   $action = New-ScheduledTaskAction -Execute "node.exe" `
@@ -21,28 +19,12 @@
  *     -Action $action -Trigger $trigger -RunLevel Limited
  */
 
-import { spawn } from 'node:child_process'
-import { fileURLToPath } from 'node:url'
-import { dirname, resolve as resolvePath } from 'node:path'
-
-const __dirname = dirname(fileURLToPath(import.meta.url))
-
 const BASE_URL =
   process.env.CRON_RUNNER_BASE_URL ?? 'https://product-recommend-nine.vercel.app'
 
 const CRONS = [
   '/api/cron/update-rates',
   '/api/cron/refresh-shipping-rates',
-  '/api/cron/collect-naver-search-trends',
-  '/api/cron/collect-naver-shopping-trends',
-  '/api/cron/collect-google-suggest',
-  '/api/cron/collect-naver-news',
-  '/api/cron/collect-naver-blog',
-  '/api/cron/collect-clien-park',
-  '/api/cron/collect-quasarzone-sale',
-  '/api/cron/collect-kca-press',
-  '/api/cron/collect-gsc-daily',
-  '/api/cron/collect-naver-tvtime',
 ]
 
 const SECRET = process.env.CRON_SECRET
@@ -122,26 +104,5 @@ const totalMs = Date.now() - t0
 console.log(
   `[${new Date().toISOString()}] HTTP crons done — ${okCount} ok, ${failCount} fail in ${totalMs}ms`,
 )
-
-// classify-trends-llm: 로컬 Claude CLI 단계.
-//   filter 가 걸리면 (특정 cron 만 돌리는 경우) 건너뜀.
-//   --no-classify 플래그도 지원.
-const skipClassify = args.includes('--no-classify') || !!filter
-if (!skipClassify) {
-  console.log(`[${new Date().toISOString()}] launching classify-trends-llm (claude CLI)`)
-  const scriptPath = resolvePath(__dirname, 'classify-trends-llm.mjs')
-  const classifyExit = await new Promise((resolve) => {
-    const child = spawn(process.execPath, [scriptPath], {
-      stdio: 'inherit',
-      env: process.env,
-    })
-    child.on('exit', (code) => resolve(code ?? 0))
-    child.on('error', (err) => {
-      console.error(`  classify spawn error: ${err.message}`)
-      resolve(1)
-    })
-  })
-  if (classifyExit !== 0) failCount++
-}
 
 process.exit(failCount > 0 ? 1 : 0)
