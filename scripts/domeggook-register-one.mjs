@@ -39,7 +39,8 @@ const vr = await fetch(`${DBASE}?ver=4.1&mode=getItemView&aid=${DKEY}&no=${NO}&o
 const dgg = (JSON.parse(await vr.text())?.domeggook) || {}
 if (!dgg.basis) { console.error('도매꾹 상품 조회 실패'); process.exit(1) }
 const title = dgg.basis.title
-const domePrice = parseInt(dgg.price?.dome) || 0
+// 무재고 위탁 실제 매입가 = 도매매(supply) 가격. 도매꾹(dome)은 직접매입가(더 쌈)이므로 위탁 원가로 쓰면 안 됨.
+const domePrice = parseInt(dgg.price?.supply ?? dgg.price?.dome) || 0
 const fromOversea = !!dgg.deli?.fromOversea
 const rep = dgg.thumb?.original || dgg.thumb?.large
 const contents = dgg.desc?.contents || ''
