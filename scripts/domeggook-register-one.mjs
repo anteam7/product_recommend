@@ -43,7 +43,12 @@ const domePrice = parseInt(dgg.price?.dome) || 0
 const fromOversea = !!dgg.deli?.fromOversea
 const rep = dgg.thumb?.original || dgg.thumb?.large
 const contents = dgg.desc?.contents || ''
-const contentImgs = [...new Set((contents.match(/https?:\/\/[^"'\s)]+\.(?:jpe?g|png|gif|webp)/gi) || []))].slice(0, 12)
+// 상세 이미지: 공급사 배송/반품 안내 boilerplate 제외 + 다운로드 가능(쿠팡이 못 받으면 승인반려)한 것만.
+const BOILER = /배송|반품|교환|환불|인트로|문의|공지|delivery|return|exchange|notice|intro|구매안내|cs/i
+async function downloadable(u) { try { const r = await fetch(u); return r.status === 200 && /image\//.test(r.headers.get('content-type') || '') } catch { return false } }
+const rawImgs = [...new Set((contents.match(/https?:\/\/[^"'\s)]+\.(?:jpe?g|png|gif|webp)/gi) || []))]
+const contentImgs = []
+for (const u of rawImgs.slice(0, 20)) { if (BOILER.test(decodeURIComponent(u))) continue; if (await downloadable(u)) contentImgs.push(u); if (contentImgs.length >= 12) break }
 const name = (NAME_OVERRIDE || title).slice(0, 100)
 
 // 2) 쿠팡 카테고리 예측
