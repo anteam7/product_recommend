@@ -127,19 +127,22 @@ export async function POST(request: NextRequest) {
     changes.push('메모')
   }
 
-  // 3.5) ggsan 발주(주문)번호 — 수동입력만(자동캡처/휴리스틱 없음). 매칭 린치핀.
-  //      10~18자리 숫자 검증. 저장 시 ggsan_match_method='manual'. 빈 문자열은 해제(null).
+  // 3.5) 매입처 발주(주문)번호 — 수동입력만(자동캡처/휴리스틱 없음). 매칭 린치핀.
+  //      ggsan: 숫자 10~18자리 / 유픽B2B(Cafe24): YYYYMMDD-NNNNNNN. 저장 시 ggsan_match_method='manual'.
+  //      유픽 번호(하이픈 포함)는 ggsan 송장추적 크론이 형식으로 식별해 건너뜀(추적은 ggsan만).
   if (body.ggsan_order_no !== undefined) {
     const raw = String(body.ggsan_order_no).replace(/\s/g, '')
     if (raw === '') {
       update.ggsan_order_no = null
       update.ggsan_match_method = null
-      changes.push('ggsan 주문번호 해제')
+      changes.push('매입처 주문번호 해제')
     } else {
-      if (!/^\d{10,18}$/.test(raw)) return NextResponse.json({ error: 'ggsan 주문번호 형식 오류(숫자 10~18자리)' }, { status: 400 })
+      if (!/^\d{10,18}$/.test(raw) && !/^\d{8}-\d{6,9}$/.test(raw)) {
+        return NextResponse.json({ error: '주문번호 형식 오류 — ggsan: 숫자 10~18자리 / 유픽: 20260612-0000123 형식' }, { status: 400 })
+      }
       update.ggsan_order_no = raw
       update.ggsan_match_method = 'manual'
-      changes.push(`ggsan 주문번호 ${raw}`)
+      changes.push(`매입처 주문번호 ${raw}`)
     }
   }
 

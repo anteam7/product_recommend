@@ -94,8 +94,8 @@ export function PurchaseStatusCell({ id, status, orderedAt, ggsanOrderNo }: Prop
       {showOrderNo && (
         <div className="flex flex-col items-center gap-0.5 mt-0.5">
           <input
-            type="text" inputMode="numeric"
-            value={orderNo} disabled={noSaving} placeholder="ggsan 주문번호"
+            type="text"
+            value={orderNo} disabled={noSaving} placeholder="매입처 주문번호"
             onChange={(e) => { setOrderNo(e.target.value); setNoOk(false); setNoErr(null) }}
             onBlur={saveOrderNo}
             onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur() }}
