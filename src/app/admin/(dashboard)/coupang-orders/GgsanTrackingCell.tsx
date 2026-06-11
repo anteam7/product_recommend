@@ -65,6 +65,8 @@ export function GgsanTrackingCell({
 
   // 발송 신호: 송장이 있거나 coupang_invoice_status 가 none 이상으로 진행됐으면 발송됨
   const shipped = Boolean(ggsanInvoiceNumber) || invStatus !== 'none'
+  // 유픽B2B(Cafe24) 주문번호는 하이픈 포함(YYYYMMDD-NNNNNNN) — ggsan 자동추적 대상 아님
+  const isUpickNo = Boolean(ggsanOrderNo && ggsanOrderNo.includes('-'))
 
   async function register() {
     setBusy(true)
@@ -120,10 +122,11 @@ export function GgsanTrackingCell({
         {ggsanOrderStatus && <span className="text-[10px] text-gray-500">{ggsanOrderStatus}</span>}
       </div>
 
-      {/* ggsan 주문번호 — 싱크(연결)되면 상태 무관하게 항상 표시 (매입처 추적 기준키) */}
+      {/* 매입처 주문번호 — 싱크(연결)되면 상태 무관하게 항상 표시 (매입처 추적 기준키).
+          하이픈 포함(Cafe24)이면 유픽 — 자동추적 없음(송장 수동입력) */}
       {ggsanOrderNo && (
         <div className="text-[10px] text-gray-500 tabular-nums leading-tight">
-          ggsan <span className="font-medium text-gray-700">#{ggsanOrderNo}</span>
+          {isUpickNo ? '유픽' : 'ggsan'} <span className="font-medium text-gray-700">#{ggsanOrderNo}</span>
         </div>
       )}
 
@@ -135,7 +138,7 @@ export function GgsanTrackingCell({
           {ggsanShippedAt && <div className="text-[10px] text-gray-400">{fmtDate(ggsanShippedAt)}</div>}
         </div>
       ) : (
-        ggsanOrderNo && <div className="text-[10px] text-gray-400">송장 대기</div>
+        ggsanOrderNo && <div className="text-[10px] text-gray-400">{isUpickNo ? '송장 수동입력 (자동추적 없음)' : '송장 대기'}</div>
       )}
 
       {/* 쿠팡 등록 상태 배지 + 액션 */}
