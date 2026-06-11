@@ -52,12 +52,13 @@ const BIZ_INFO = {
 }
 
 // 보이는 Chrome 띄우기 (결제는 사람이 — 브라우저는 닫지 않음)
-async function openBrowser() {
+// onDialog 미지정 시 모든 대화상자 수락
+async function openBrowser(onDialog) {
   let chromium
   try { ({ chromium } = await import('playwright')) } catch { ({ chromium } = await import('playwright-core')) }
   const browser = await chromium.launch({ channel: 'chrome', headless: false })
   const ctx = await browser.newContext()
-  ctx.on('dialog', (d) => d.accept().catch(() => {}))
+  ctx.on('dialog', (d) => { try { (onDialog ? onDialog(d) : d.accept()).catch(() => {}) } catch { /* noop */ } })
   const page = await ctx.newPage()
   return { ctx, page }
 }
@@ -109,7 +110,8 @@ async function runFlowGgsan(goodsNo, qty, recipient) {
 // 필드 구조는 scripts/_upick-order-probe.mjs 정찰 결과 기준 (Cafe24 표준 orderform)
 const UPICK_BASE = env.UPICKB2B_BASE_URL || 'https://upickb2b.com'
 async function runFlowUpick(goodsNo, qty, recipient, detailUrl) {
-  const { ctx, page } = await openBrowser()
+  // "동일상품이 장바구니에 N개 있습니다. 함께 구매하시겠습니까?" → 취소(현재 선택 수량만) — 수락하면 잔여 장바구니가 합산됨
+  const { ctx, page } = await openBrowser((d) => (/함께 구매/.test(d.message()) ? d.dismiss() : d.accept()))
   // 1) 로그인 (Cafe24: member_id / member_passwd)
   await page.goto(`${UPICK_BASE}/member/login.html`, { waitUntil: 'domcontentloaded', timeout: 30000 })
   await page.fill('input[name=member_id]', env.UPICKB2B_USER)
@@ -129,20 +131,26 @@ async function runFlowUpick(goodsNo, qty, recipient, detailUrl) {
   await page.waitForTimeout(5000)
   const op = ctx.pages().find((p) => /\/order\/orderform/.test(p.url())) || page
   if (!/\/order\/orderform/.test(op.url())) return { ok: false, msg: '주문서로 이동 실패 — 품절/옵션 필요 여부 확인' }
-  // 4) 수령인(주문자동일 해제 후 직접입력) + 세금계산서 신청 (readonly 대비 JS set)
-  await op.evaluate(({ rcp, biz }) => {
+  // 4) 수령인: "주문자 정보와 동일" 해제 → Cafe24 클리어 핸들러가 비동기로 필드를 비우므로
+  //    반드시 0.8초 기다린 뒤 입력 (해제 직후 바로 넣으면 전부 지워짐 — _upick-order-probe2 검증)
+  const same = op.locator('#sameaddr0')
+  if (await same.isChecked().catch(() => false)) { await same.click({ force: true }); await op.waitForTimeout(800) }
+  const fillIf = async (sel, v) => { const l = op.locator(sel).first(); if (await l.count()) { await l.evaluate((el) => el.removeAttribute('readonly')); await l.fill(v).catch(() => {}) } }
+  await fillIf('#rname', recipient.name)
+  await fillIf('#rzipcode1', recipient.zip)
+  await fillIf('#raddr1', recipient.addr1)
+  await fillIf('#raddr2', recipient.addr2)
+  await fillIf('#rphone1_', recipient.phone)
+  // 세금계산서 신청(개인사업자) + 사업자 정보 (readonly 대비 JS set)
+  await op.evaluate((biz) => {
     const set = (sel, v) => { const el = document.querySelector(sel); if (el) { el.removeAttribute('readonly'); el.value = v; el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })) } }
-    const same = document.querySelector('#sameaddr0')
-    if (same && same.checked) same.click() // "주문자 정보와 동일" 해제 → 직접 입력
-    set('#rname', rcp.name); set('#rzipcode1', rcp.zip); set('#raddr1', rcp.addr1); set('#raddr2', rcp.addr2); set('#rphone1_', rcp.phone)
-    // 세금계산서 신청(개인사업자) + 사업자 정보
     const tx = document.querySelector('#tax_request_regist0'); if (tx && !tx.checked) tx.click()
     const ty = document.querySelector('#tax_request_company_type0'); if (ty && !ty.checked) ty.click()
     set('#tax_request_company_regno', biz.busiNo); set('#tax_request_company_name', biz.company); set('#tax_request_president_name', biz.ceo)
     set('#tax_request_company_condition', biz.service); set('#tax_request_company_line', biz.item)
     set('#tax_request_zipcode', biz.zip); set('#tax_request_address1', biz.addr1); set('#tax_request_address2', biz.addr2)
     set('#tax_request_name', biz.ceo)
-  }, { rcp: recipient, biz: BIZ_INFO })
+  }, BIZ_INFO)
   await op.bringToFront().catch(() => {})
   return { ok: true, msg: '주문서 작성 완료 — 열린 U-PICK 창에서 금액·배송지·결제수단 확인 후 [결제하기]를 직접 누르세요' }
 }
