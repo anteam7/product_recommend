@@ -4,6 +4,7 @@ import { PurchaseStatusCell } from './PurchaseStatusCell'
 import { PurchaseCostCell } from './PurchaseCostCell'
 import { InvoiceCell } from './InvoiceCell'
 import { GgsanTrackingCell } from './GgsanTrackingCell'
+import PurchaseButton from './PurchaseButton'
 
 export const dynamic = 'force-dynamic'
 
@@ -48,7 +49,8 @@ interface OrderRow {
   ordered_at: string
   last_synced_at: string | null
   raw_payload?: { receiver?: { name?: string; postCode?: string; addr1?: string; addr2?: string; safeNumber?: string; receiverNumber?: string } } | null
-  // 조인: 매입처(ggsan) 바로가기용
+  // 조인: 매입처 바로가기용 (listings.source: ggsan | upickb2b | domeggook | manual)
+  supplier_source?: string | null
   ggsan_goods_no?: string | null
   ggsan_url?: string | null
   // ggsan↔쿠팡 송장 동기화 컬럼 (select('*') 라 쿼리 변경 불필요, 타입만)
@@ -91,6 +93,14 @@ const SORT_OPTIONS = [
   { v: 'price_desc', label: '주문금액 높은순' },
 ] as const
 type SortKey = (typeof SORT_OPTIONS)[number]['v']
+
+// 매입처(listings.source) 표시명 — 결제진행(ggsan 자동주문)은 ggsan 소스에만 노출
+const SUPPLIER_LABELS: Record<string, string> = {
+  ggsan: '건강산',
+  upickb2b: '유픽B2B',
+  domeggook: '도매꾹',
+  manual: '수동',
+}
 
 const PAGE_SIZE = 50
 
@@ -137,23 +147,24 @@ async function fetchData(opts: {
   const { data, count } = await query
   const rows = (data ?? []) as unknown as OrderRow[]
 
-  // 매입처(ggsan) 바로가기: listing에서 goods_no / detail_url 조인
+  // 매입처 바로가기: listing에서 source / goods_no / detail_url 조인
   const spids = [...new Set(rows.map((r) => r.seller_product_id).filter(Boolean))] as number[]
   if (spids.length > 0) {
     const { data: listings } = await sb
       .from('jimscanner_coupang_listings')
-      .select('seller_product_id, source_goods_no, source_detail_url')
+      .select('seller_product_id, source, source_goods_no, source_detail_url')
       .in('seller_product_id', spids)
-    const lmap = new Map<number, { source_goods_no: string | null; source_detail_url: string | null }>(
-      ((listings ?? []) as unknown as Array<{ seller_product_id: number; source_goods_no: string | null; source_detail_url: string | null }>)
+    const lmap = new Map<number, { source: string | null; source_goods_no: string | null; source_detail_url: string | null }>(
+      ((listings ?? []) as unknown as Array<{ seller_product_id: number; source: string | null; source_goods_no: string | null; source_detail_url: string | null }>)
         .map((l) => [l.seller_product_id, l]),
     )
     for (const r of rows) {
       const l = r.seller_product_id ? lmap.get(r.seller_product_id) : undefined
       const goodsNo = l?.source_goods_no ?? null
+      r.supplier_source = l?.source ?? null
       r.ggsan_goods_no = goodsNo
       r.ggsan_url = l?.source_detail_url
-        ?? (goodsNo ? `https://www.ggsan.com/goods/goods_view.php?goodsNo=${goodsNo}` : null)
+        ?? (goodsNo && l?.source === 'ggsan' ? `https://www.ggsan.com/goods/goods_view.php?goodsNo=${goodsNo}` : null)
     }
   }
   // 수령인(배송지) 가공: raw_payload.receiver → 우편번호/전체주소/연락처 (목록 표시 + 결제진행용)
@@ -390,9 +401,9 @@ export default async function CoupangOrdersPage({
                           target="_blank"
                           rel="noreferrer noopener"
                           className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded bg-amber-100 text-amber-700 font-semibold hover:bg-amber-200"
-                          title="건강산(ggsan) 상세페이지에서 매입"
+                          title={`매입처(${SUPPLIER_LABELS[r.supplier_source ?? ''] ?? r.supplier_source ?? '미상'}) 상세페이지에서 매입`}
                         >
-                          🛒 건강산 매입{r.ggsan_goods_no ? ` ${r.ggsan_goods_no}` : ''} →
+                          🛒 {SUPPLIER_LABELS[r.supplier_source ?? ''] ?? r.supplier_source ?? '매입처'} 매입{r.ggsan_goods_no ? ` ${r.ggsan_goods_no}` : ''} →
                         </a>
                       )}
                     </div>
@@ -404,18 +415,10 @@ export default async function CoupangOrdersPage({
                         {r.receiver_phone ? <span className="text-gray-400"> · {r.receiver_phone}</span> : null}
                       </div>
                     )}
-                    {r.purchase_status === 'PENDING' && r.ggsan_goods_no && (
+                    {r.purchase_status === 'PENDING' && r.ggsan_goods_no && r.supplier_source === 'ggsan' && (
                       <div className="mt-1">
-                        <a
-                          href={`http://127.0.0.1:39201/order?id=${r.order_id}`}
-                          target="_blank"
-                          rel="noreferrer noopener"
-                          className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-blue-600 text-white text-[11px] font-semibold hover:bg-blue-700"
-                          title="로컬 헬퍼로 ggsan 주문서 자동작성 → 결제 직전 정지(결제는 직접)"
-                        >
-                          💳 결제진행
-                        </a>
-                        <span className="text-[10px] text-gray-400 ml-1">로컬 헬퍼 실행 필요</span>
+                        <PurchaseButton orderId={r.order_id} />
+                        <span className="text-[10px] text-gray-400 ml-1">헬퍼 꺼져 있으면 자동 기동</span>
                       </div>
                     )}
                   </td>
@@ -491,7 +494,7 @@ export default async function CoupangOrdersPage({
         ℹ️ 흐름: 쿠팡 주문 자동 수집(매시간) → 🛒 건강산 매입 → 발주완료 후 <strong>ggsan 주문번호 입력</strong>(매입 상태 칸) → 매시간 ggsan 추적 크론이 <strong>송장 발급을 감지하면 &lsquo;매입처발송&rsquo;으로 전이</strong>합니다.
         <br />※ 송장은 <strong>쿠팡에 자동 등록</strong>됩니다 — 반자동 모드에서는 &lsquo;매입처 추적&rsquo; 칸의 <strong>[확인·등록]</strong> 버튼을 눌러 등록(쿠팡 등록 성공 시 &lsquo;발송완료&rsquo;). 자동 모드에서는 크론이 바로 등록합니다.
         <br />※ <strong>⚠ 확인 필요</strong> 배너/표시(미결제·매칭실패·등록실패·반품·택배사 미매핑)는 사람 확인이 필요한 돈·배송 직결 건입니다.
-        <br />※ <strong>💳 결제진행</strong>(미발주·매입처 연결 건): 로컬 헬퍼(<code>node --env-file=.env.local scripts/order-server.mjs</code>)가 PC에 떠 있어야 작동 — 클릭 시 ggsan 주문서를 자동 작성하고 <strong>결제 직전에 멈춥니다</strong>(실결제는 직접).
+        <br />※ <strong>💳 결제진행</strong>(미발주·건강산 매입 건만): 클릭 시 ggsan 주문서를 자동 작성하고 <strong>결제 직전에 멈춥니다</strong>(실결제는 직접). 로컬 헬퍼(127.0.0.1:39201)가 꺼져 있으면 <code>jimorder://</code> 프로토콜로 자동 기동 — 이 PC에서만 작동.
       </div>
     </div>
   )

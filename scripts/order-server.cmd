@@ -1,25 +1,21 @@
 @echo off
-REM ───────────────────────────────────────────────────────────────
-REM order-server keep-alive 런처 (결제진행 버튼이 호출하는 127.0.0.1:39201)
-REM   - 로그온 시 자동 시작용. 죽으면 5초 후 재시작.
-REM   - 이미 39201 리스닝 중이면 중복 실행하지 않음.
-REM
-REM Windows 작업 등록(로그온 트리거, 사용자 세션 — Playwright Chrome 표시 필요):
-REM   $a = New-ScheduledTaskAction -Execute "C:\Web\jimscanner-personal\scripts\order-server.cmd"
-REM   $t = New-ScheduledTaskTrigger -AtLogOn
-REM   $s = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
-REM   Register-ScheduledTask -TaskName "jimscanner-order-server" -Action $a -Trigger $t -Settings $s -RunLevel Limited -Force
-REM ───────────────────────────────────────────────────────────────
+REM ----------------------------------------------------------------
+REM order-server keep-alive launcher (127.0.0.1:39201)
+REM - ASCII only: cmd.exe misparses UTF-8 Korean comments (CP949).
+REM - Auto-start at logon (Startup .vbs runs this hidden).
+REM - If port 39201 already listening, do not start a duplicate.
+REM - If node exits, restart after 5s.
+REM Log: %TEMP%\order-server.log
+REM ----------------------------------------------------------------
 cd /d C:\Web\jimscanner-personal
 :loop
 netstat -ano | findstr ":39201 " >nul
 if %errorlevel%==0 (
-  REM 이미 떠 있음 — 30초 후 재점검
-  timeout /t 30 /nobreak >nul
+  ping -n 31 127.0.0.1 >nul
   goto loop
 )
-echo [%date% %time%] order-server 시작
-node --env-file=.env.local scripts\order-server.mjs
-echo [%date% %time%] order-server 종료 — 5초 후 재시작
-timeout /t 5 /nobreak >nul
+echo [%date% %time%] order-server start >> "%TEMP%\order-server.log"
+node --env-file=.env.local scripts\order-server.mjs >> "%TEMP%\order-server.log" 2>&1
+echo [%date% %time%] order-server exited, restarting in 5s >> "%TEMP%\order-server.log"
+ping -n 6 127.0.0.1 >nul
 goto loop
