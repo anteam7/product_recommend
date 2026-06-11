@@ -415,7 +415,7 @@ export default async function CoupangOrdersPage({
                         {r.receiver_phone ? <span className="text-gray-400"> · {r.receiver_phone}</span> : null}
                       </div>
                     )}
-                    {r.purchase_status === 'PENDING' && r.ggsan_goods_no && r.supplier_source === 'ggsan' && (
+                    {r.purchase_status === 'PENDING' && r.ggsan_goods_no && ['ggsan', 'upickb2b'].includes(r.supplier_source ?? '') && (
                       <div className="mt-1">
                         <PurchaseButton orderId={r.order_id} />
                         <span className="text-[10px] text-gray-400 ml-1">헬퍼 꺼져 있으면 자동 기동</span>
@@ -494,7 +494,7 @@ export default async function CoupangOrdersPage({
         ℹ️ 흐름: 쿠팡 주문 자동 수집(매시간) → 🛒 건강산 매입 → 발주완료 후 <strong>ggsan 주문번호 입력</strong>(매입 상태 칸) → 매시간 ggsan 추적 크론이 <strong>송장 발급을 감지하면 &lsquo;매입처발송&rsquo;으로 전이</strong>합니다.
         <br />※ 송장은 <strong>쿠팡에 자동 등록</strong>됩니다 — 반자동 모드에서는 &lsquo;매입처 추적&rsquo; 칸의 <strong>[확인·등록]</strong> 버튼을 눌러 등록(쿠팡 등록 성공 시 &lsquo;발송완료&rsquo;). 자동 모드에서는 크론이 바로 등록합니다.
         <br />※ <strong>⚠ 확인 필요</strong> 배너/표시(미결제·매칭실패·등록실패·반품·택배사 미매핑)는 사람 확인이 필요한 돈·배송 직결 건입니다.
-        <br />※ <strong>💳 결제진행</strong>(미발주·건강산 매입 건만): 클릭 시 ggsan 주문서를 자동 작성하고 <strong>결제 직전에 멈춥니다</strong>(실결제는 직접). 로컬 헬퍼(127.0.0.1:39201)가 꺼져 있으면 <code>jimorder://</code> 프로토콜로 자동 기동 — 이 PC에서만 작동.
+        <br />※ <strong>💳 결제진행</strong>(미발주·건강산/유픽B2B 매입 건): 클릭 시 매입처 주문서를 자동 작성하고 <strong>결제 직전에 멈춥니다</strong>(실결제는 직접). 로컬 헬퍼(127.0.0.1:39201)가 꺼져 있으면 <code>jimorder://</code> 프로토콜로 자동 기동 — 이 PC에서만 작동.
       </div>
     </div>
   )

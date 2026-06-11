@@ -38,7 +38,7 @@ export default function PurchaseButton({ orderId }: { orderId: number }) {
       onClick={onClick}
       disabled={busy}
       className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-blue-600 text-white text-[11px] font-semibold hover:bg-blue-700 disabled:opacity-60"
-      title="로컬 헬퍼로 ggsan 주문서 자동작성 → 결제 직전 정지(결제는 직접). 헬퍼가 꺼져 있으면 자동 기동."
+      title="로컬 헬퍼로 매입처(건강산/유픽B2B) 주문서 자동작성 → 결제 직전 정지(결제는 직접). 헬퍼가 꺼져 있으면 자동 기동."
     >
       💳 결제진행{busy ? '…' : ''}
     </button>

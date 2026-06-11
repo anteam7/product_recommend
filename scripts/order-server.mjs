@@ -24,21 +24,24 @@ const PORT = Number(env.ORDER_SERVER_PORT || 39201)
 const BASE = env.GGSAN_BASE_URL || 'https://www.ggsan.com'
 const esc = (s) => String(s ?? '').replace(/[<>&"]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;' }[c]))
 
-// 주문 → ggsan goods_no + 수령인 해석
+// 자동주문 지원 매입처 (listings.source → 표시명)
+const SUPPORTED_SOURCES = { ggsan: '건강산', upickb2b: '유픽B2B' }
+
+// 주문 → 매입처(source) + goods_no + 수령인 해석
 async function resolveOrder(orderId) {
   const { data: o } = await sb.from('jimscanner_coupang_orders')
     .select('order_id, seller_product_id, product_name, option_name, shipping_count, raw_payload, purchase_status')
     .eq('order_id', orderId).single()
   if (!o) return { error: `주문 #${orderId} 을(를) 찾을 수 없습니다` }
-  const { data: L } = await sb.from('jimscanner_coupang_listings').select('source, source_goods_no').eq('seller_product_id', o.seller_product_id).limit(1)
-  const src = L?.[0]?.source
-  if (src && src !== 'ggsan') return { error: `ggsan 매입 상품이 아닙니다 (매입처: ${src}) — 해당 매입처에서 직접 주문하세요`, order: o }
+  const { data: L } = await sb.from('jimscanner_coupang_listings').select('source, source_goods_no, source_detail_url').eq('seller_product_id', o.seller_product_id).limit(1)
+  const src = L?.[0]?.source || 'ggsan' // 구버전 listing은 source 미기록 → ggsan 간주
+  if (!SUPPORTED_SOURCES[src]) return { error: `자동주문 미지원 매입처(${src}) — 해당 매입처에서 직접 주문하세요`, order: o }
   const goodsNo = L?.[0]?.source_goods_no
-  if (!goodsNo) return { error: '매입처(ggsan) 미연결 — 이 주문 상품의 listing에 source_goods_no가 없습니다', order: o }
+  if (!goodsNo) return { error: '매입처 미연결 — 이 주문 상품의 listing에 source_goods_no가 없습니다', order: o }
   const rc = o.raw_payload?.receiver || {}
   const recipient = { name: rc.name || '', zip: rc.postCode || '', addr1: rc.addr1 || '', addr2: rc.addr2 || '', phone: rc.safeNumber || rc.receiverNumber || '' }
   if (!recipient.name || !recipient.addr1) return { error: '수령인 주소 정보가 부족합니다(raw_payload.receiver)', order: o }
-  return { order: o, goodsNo, recipient }
+  return { order: o, source: src, sourceLabel: SUPPORTED_SOURCES[src], goodsNo, detailUrl: L?.[0]?.source_detail_url || null, recipient }
 }
 
 // 세금계산서 발행용 사업자 정보 (결제진행 자동주문 시 주문서에 입력). 더모어커머스.
@@ -48,14 +51,20 @@ const BIZ_INFO = {
   zip: '08368', addr1: '서울특별시 구로구 항동로 72(항동, 하버라인 4단지)', addr2: '404-601',
 }
 
-// Playwright: ggsan 주문서 자동 작성 → 결제 직전 정지 (브라우저 열어둠)
-async function runFlow(goodsNo, qty, recipient) {
+// 보이는 Chrome 띄우기 (결제는 사람이 — 브라우저는 닫지 않음)
+async function openBrowser() {
   let chromium
   try { ({ chromium } = await import('playwright')) } catch { ({ chromium } = await import('playwright-core')) }
   const browser = await chromium.launch({ channel: 'chrome', headless: false })
   const ctx = await browser.newContext()
   ctx.on('dialog', (d) => d.accept().catch(() => {}))
   const page = await ctx.newPage()
+  return { ctx, page }
+}
+
+// Playwright: ggsan 주문서 자동 작성 → 결제 직전 정지 (브라우저 열어둠)
+async function runFlowGgsan(goodsNo, qty, recipient) {
+  const { ctx, page } = await openBrowser()
   // 1) 로그인
   await page.goto(`${BASE}/member/login.php`, { waitUntil: 'domcontentloaded', timeout: 30000 })
   await page.fill('input[name=loginId]', env.GGSAN_USER)
@@ -96,6 +105,48 @@ async function runFlow(goodsNo, qty, recipient) {
   return { ok: true, msg: '주문서 작성 완료 — 열린 ggsan 창에서 금액·배송지 확인 후 [결제하기]를 직접 누르세요' }
 }
 
+// Playwright: upickb2b(Cafe24) 주문서 자동 작성 → 결제 직전 정지 (브라우저 열어둠)
+// 필드 구조는 scripts/_upick-order-probe.mjs 정찰 결과 기준 (Cafe24 표준 orderform)
+const UPICK_BASE = env.UPICKB2B_BASE_URL || 'https://upickb2b.com'
+async function runFlowUpick(goodsNo, qty, recipient, detailUrl) {
+  const { ctx, page } = await openBrowser()
+  // 1) 로그인 (Cafe24: member_id / member_passwd)
+  await page.goto(`${UPICK_BASE}/member/login.html`, { waitUntil: 'domcontentloaded', timeout: 30000 })
+  await page.fill('input[name=member_id]', env.UPICKB2B_USER)
+  await page.fill('input[name=member_passwd]', env.UPICKB2B_PASS)
+  await Promise.all([
+    page.waitForNavigation({ timeout: 15000 }).catch(() => {}),
+    page.evaluate(() => { const f = document.querySelector('input[name=member_passwd]')?.form; if (f) (f.requestSubmit ? f.requestSubmit() : f.submit()) }),
+  ])
+  await page.waitForTimeout(1500)
+  if (/member\/login/.test(page.url())) return { ok: false, msg: 'U-PICK 로그인 실패 — 자격증명 확인 필요' }
+  // 2) 상품 페이지 + 수량
+  await page.goto(detailUrl || `${UPICK_BASE}/product/x/${goodsNo}/category/1/display/1/`, { waitUntil: 'domcontentloaded', timeout: 30000 })
+  await page.waitForTimeout(1200)
+  if (qty > 1) await page.evaluate((q) => { const el = document.querySelector('input#quantity, input[name="quantity_opt[]"]'); if (el) { el.value = String(q); el.dispatchEvent(new Event('change', { bubbles: true })); el.dispatchEvent(new Event('blur', { bubbles: true })) } }, qty)
+  // 3) BUY IT NOW → 주문서
+  await page.evaluate(() => { const b = [...document.querySelectorAll('a.btnSubmit, button, input')].find((x) => /^BUY IT NOW$/.test((x.innerText || x.value || '').trim())); if (b) { b.scrollIntoView({ block: 'center' }); b.click() } })
+  await page.waitForTimeout(5000)
+  const op = ctx.pages().find((p) => /\/order\/orderform/.test(p.url())) || page
+  if (!/\/order\/orderform/.test(op.url())) return { ok: false, msg: '주문서로 이동 실패 — 품절/옵션 필요 여부 확인' }
+  // 4) 수령인(주문자동일 해제 후 직접입력) + 세금계산서 신청 (readonly 대비 JS set)
+  await op.evaluate(({ rcp, biz }) => {
+    const set = (sel, v) => { const el = document.querySelector(sel); if (el) { el.removeAttribute('readonly'); el.value = v; el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })) } }
+    const same = document.querySelector('#sameaddr0')
+    if (same && same.checked) same.click() // "주문자 정보와 동일" 해제 → 직접 입력
+    set('#rname', rcp.name); set('#rzipcode1', rcp.zip); set('#raddr1', rcp.addr1); set('#raddr2', rcp.addr2); set('#rphone1_', rcp.phone)
+    // 세금계산서 신청(개인사업자) + 사업자 정보
+    const tx = document.querySelector('#tax_request_regist0'); if (tx && !tx.checked) tx.click()
+    const ty = document.querySelector('#tax_request_company_type0'); if (ty && !ty.checked) ty.click()
+    set('#tax_request_company_regno', biz.busiNo); set('#tax_request_company_name', biz.company); set('#tax_request_president_name', biz.ceo)
+    set('#tax_request_company_condition', biz.service); set('#tax_request_company_line', biz.item)
+    set('#tax_request_zipcode', biz.zip); set('#tax_request_address1', biz.addr1); set('#tax_request_address2', biz.addr2)
+    set('#tax_request_name', biz.ceo)
+  }, { rcp: recipient, biz: BIZ_INFO })
+  await op.bringToFront().catch(() => {})
+  return { ok: true, msg: '주문서 작성 완료 — 열린 U-PICK 창에서 금액·배송지·결제수단 확인 후 [결제하기]를 직접 누르세요' }
+}
+
 const htmlPage = (res, body) => { res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }); res.end(`<!doctype html><html lang=ko><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><body style="font-family:system-ui,sans-serif;max-width:620px;margin:48px auto;padding:0 18px;line-height:1.6;color:#111">${body}</body></html>`) }
 
 http.createServer(async (req, res) => {
@@ -110,25 +161,27 @@ http.createServer(async (req, res) => {
     }
     if (u.pathname === '/order') {
       const r = await resolveOrder(u.searchParams.get('id'))
-      if (r.error) { htmlPage(res, `<h2>⚠ ${esc(r.error)}</h2><p>이 주문은 자동 진행할 수 없습니다. ggsan에서 직접 주문해 주세요.</p>`); return }
-      htmlPage(res, `<h2>🛒 ggsan 자동 주문 확인</h2>
+      if (r.error) { htmlPage(res, `<h2>⚠ ${esc(r.error)}</h2><p>이 주문은 자동 진행할 수 없습니다. 매입처에서 직접 주문해 주세요.</p>`); return }
+      htmlPage(res, `<h2>🛒 ${esc(r.sourceLabel)} 자동 주문 확인</h2>
         <table style="border-collapse:collapse;width:100%"><tbody>
         <tr><td style="padding:6px 8px;color:#666">상품</td><td style="padding:6px 8px"><b>${esc(r.order.product_name)}</b>${r.order.option_name ? '<br><span style="color:#888;font-size:13px">' + esc(r.order.option_name) + '</span>' : ''}</td></tr>
         <tr><td style="padding:6px 8px;color:#666">수량</td><td style="padding:6px 8px">${r.order.shipping_count}</td></tr>
-        <tr><td style="padding:6px 8px;color:#666">매입처</td><td style="padding:6px 8px">ggsan #${esc(r.goodsNo)}</td></tr>
+        <tr><td style="padding:6px 8px;color:#666">매입처</td><td style="padding:6px 8px">${esc(r.sourceLabel)} #${esc(r.goodsNo)}</td></tr>
         <tr><td style="padding:6px 8px;color:#666">수령인</td><td style="padding:6px 8px"><b>${esc(r.recipient.name)}</b> · ${esc(r.recipient.zip)}<br>${esc(r.recipient.addr1)} ${esc(r.recipient.addr2)}<br>${esc(r.recipient.phone)}</td></tr>
         </tbody></table>
-        <p style="background:#fef3c7;color:#92400e;padding:10px 12px;border-radius:8px">⚠ <b>결제 직전까지만</b> 자동 작성합니다. 열리는 ggsan 창에서 <b>금액·배송지를 확인한 뒤 직접 [결제하기]</b>를 누르세요.</p>
-        <p><a href="/run?id=${esc(u.searchParams.get('id'))}" style="display:inline-block;background:#2563eb;color:#fff;padding:12px 24px;border-radius:8px;text-decoration:none;font-weight:600">결제진행 시작 → (ggsan 창 열림, ~1분)</a></p>`)
+        <p style="background:#fef3c7;color:#92400e;padding:10px 12px;border-radius:8px">⚠ <b>결제 직전까지만</b> 자동 작성합니다. 열리는 ${esc(r.sourceLabel)} 창에서 <b>금액·배송지를 확인한 뒤 직접 [결제하기]</b>를 누르세요.</p>
+        <p><a href="/run?id=${esc(u.searchParams.get('id'))}" style="display:inline-block;background:#2563eb;color:#fff;padding:12px 24px;border-radius:8px;text-decoration:none;font-weight:600">결제진행 시작 → (${esc(r.sourceLabel)} 창 열림, ~1분)</a></p>`)
       return
     }
     if (u.pathname === '/run') {
       const r = await resolveOrder(u.searchParams.get('id'))
       if (r.error) { htmlPage(res, `<h2>⚠ ${esc(r.error)}</h2>`); return }
-      const out = await runFlow(r.goodsNo, r.order.shipping_count, r.recipient)
+      const out = r.source === 'upickb2b'
+        ? await runFlowUpick(r.goodsNo, r.order.shipping_count, r.recipient, r.detailUrl)
+        : await runFlowGgsan(r.goodsNo, r.order.shipping_count, r.recipient)
       htmlPage(res, out.ok
-        ? `<h2>✓ ${esc(out.msg)}</h2><p>열린 ggsan 창으로 가서 결제를 마치세요. 이 탭은 닫으셔도 됩니다.</p>`
-        : `<h2>✗ ${esc(out.msg)}</h2><p>다시 시도하거나 ggsan에서 직접 주문하세요.</p>`)
+        ? `<h2>✓ ${esc(out.msg)}</h2><p>열린 ${esc(r.sourceLabel)} 창으로 가서 결제를 마치세요. 이 탭은 닫으셔도 됩니다.</p>`
+        : `<h2>✗ ${esc(out.msg)}</h2><p>다시 시도하거나 ${esc(r.sourceLabel)}에서 직접 주문하세요.</p>`)
       return
     }
     htmlPage(res, `<h2>주문 자동화 헬퍼 가동 중</h2><p>관리자 페이지의 <b>결제진행</b> 버튼으로 호출됩니다. (포트 ${PORT})</p>`)
