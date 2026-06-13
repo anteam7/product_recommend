@@ -46,7 +46,50 @@ const sb = createClient(env.NEXT_PUBLIC_SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_
 // ── args ──
 const LIMIT = parseInt((process.argv.find((a) => a.startsWith('--limit=')) || '').split('=')[1] || '0') || 0
 const APPLY = process.argv.includes('--apply')
+const FROM_FILE = process.argv.includes('--from-file')
 const sleep = (ms) => new Promise((s) => setTimeout(s, ms))
+
+// ── --from-file 모드: 저장된 proposals JSON 직접 적용 ──
+if (FROM_FILE && APPLY) {
+  const fPath = path.join(__dirname, '..', '.tmp', 'naver-name-proposals.json')
+  let proposals
+  try { proposals = JSON.parse(readFileSync(fPath, 'utf8')) } catch {
+    console.error('.tmp/naver-name-proposals.json 없음. 먼저 분석을 실행하세요.')
+    process.exit(1)
+  }
+  const improved = proposals.filter((p) => p.improvement)
+  console.log(`파일에서 ${improved.length}건 적용 시작 (스킵된 항목 ${proposals.length - improved.length}건)`)
+  console.log('\n⚠ 주의: 상품명 Full PUT → TEMPORARY_SAVE 강등(오프라인) 가능. 변경 후 승인 재요청 필수.\n')
+  let done = 0, fail = 0
+  for (const [i, p] of improved.entries()) {
+    try {
+      const g = await naverApi('GET', `/v2/products/origin-products/${p.origin_product_no}`)
+      if (!g || g.status !== 200) {
+        console.log(`✗ [${i + 1}/${improved.length}] GET 실패 (${g?.status ?? 'null'}) — ${p.origin_product_no}`)
+        fail++; continue
+      }
+      const op = g.body.originProduct
+      const channelProd = g.body.smartstoreChannelProduct ?? { storeKeepExclusiveProduct: false, naverShoppingRegistration: true, channelProductDisplayStatusType: 'ON' }
+      op.name = p.proposed
+      const r = await naverApi('PUT', `/v2/products/origin-products/${p.origin_product_no}`, { originProduct: op, smartstoreChannelProduct: channelProd })
+      if (r && r.status === 200) {
+        await sb.from('jimscanner_naver_listings').update({ name: p.proposed }).eq('origin_product_no', p.origin_product_no)
+        console.log(`✓ [${i + 1}/${improved.length}] "${p.name.slice(0, 40)}" → "${p.proposed.slice(0, 40)}"`)
+        done++
+      } else {
+        console.log(`✗ [${i + 1}/${improved.length}] PUT ${r?.status ?? 'null'} — ${JSON.stringify(r?.body ?? null).slice(0, 120)}`)
+        fail++
+      }
+    } catch (e) {
+      console.log(`✗ [${i + 1}/${improved.length}] 예외: ${e.message}`)
+      fail++
+    }
+    await sleep(400)
+  }
+  console.log(`\n완료: 성공 ${done}건 / 실패 ${fail}건`)
+  if (done > 0) console.log('네이버 파트너센터에서 TEMPORARY_SAVE 강등 상품의 승인 재요청을 확인하세요.')
+  process.exit(0)
+}
 
 // ── 사전 검증 ──
 if (!env.NAVER_OPENAPI_CLIENT_ID || !env.NAVER_OPENAPI_CLIENT_SECRET) {
