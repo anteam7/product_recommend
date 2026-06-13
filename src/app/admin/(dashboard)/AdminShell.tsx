@@ -116,6 +116,12 @@ const NAV_GROUPS: NavGroup[] = [
         icon: '💡',
         match: (p) => p.startsWith('/admin/improvement-ideas'),
       },
+      {
+        href: '/admin/agent-log',
+        label: '에이전트 로그',
+        icon: '🤖',
+        match: (p) => p.startsWith('/admin/agent-log'),
+      },
     ],
   },
 ]

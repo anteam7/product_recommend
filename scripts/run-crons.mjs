@@ -86,6 +86,26 @@ function summarize(body) {
   return Object.keys(picked).length ? JSON.stringify(picked) : ''
 }
 
+// ops-sweep 루프: cron 완료 후 자동 실행 (Loop Engineering L1)
+async function runOpsLoop() {
+  try {
+    const { execFile } = await import('node:child_process')
+    const { promisify } = await import('node:util')
+    const execFileAsync = promisify(execFile)
+    const scriptPath = new URL('./local-loop-ops-sweep.mjs', import.meta.url).pathname.replace(/^\/([A-Z]:)/, '$1')
+    const envFilePath = new URL('../.env.local', import.meta.url).pathname.replace(/^\/([A-Z]:)/, '$1')
+    const { stdout, stderr } = await execFileAsync(
+      process.execPath,
+      [`--env-file=${envFilePath}`, scriptPath],
+      { timeout: 60_000 }
+    )
+    if (stdout) process.stdout.write(stdout)
+    if (stderr) process.stderr.write(stderr)
+  } catch (e) {
+    console.error('[ops-loop] 실행 실패:', e instanceof Error ? e.message : String(e))
+  }
+}
+
 const t0 = Date.now()
 console.log(`[${new Date().toISOString()}] running ${targets.length} cron(s) → ${BASE_URL}`)
 
@@ -104,5 +124,13 @@ const totalMs = Date.now() - t0
 console.log(
   `[${new Date().toISOString()}] HTTP crons done — ${okCount} ok, ${failCount} fail in ${totalMs}ms`,
 )
+
+// ops-sweep 루프 자동 실행 (Loop Engineering: cron 완료 후 건강 상태 기록)
+console.log(`[${new Date().toISOString()}] ops-sweep 루프 시작...`)
+try {
+  await runOpsLoop()
+} catch (e) {
+  console.error('[ops-loop] 예상치 못한 오류:', e instanceof Error ? e.message : String(e))
+}
 
 process.exit(failCount > 0 ? 1 : 0)
