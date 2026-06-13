@@ -11,11 +11,16 @@
 - ✅ 표준카테고리 재배정 96건 완료 (naver-recategorize.mjs — 검색 적합도 확보)
 - ✅ **태그 보강 352건 완료** (naver-update-tags.mjs, 2026-06-13): 금지어 자동필터+재시도로 352/352 성공, 3~10개 성분·효능 태그 보강
 
+**완료 (이번 세션):**
+- ✅ **상품명 키워드 최적화 83건** (naver-keyword-optimize.mjs, --from-file --apply): 83/83 성공 0 실패. 파트너센터 TEMPORARY_SAVE 강등 → 승인 재요청 필요.
+
 **다음 할 일 (우선순위순):**
-1. **스토어 전시카테고리 보완** (~5분, 판매자센터 로그인 필요): 재분류로 새 표준카테고리로 옮긴 상품 일부가 전시카테고리에서 빠짐. `/d/v2/display-config/category-menu`에서 카테고리 단위 연결 추가 —
+1. **파트너센터 승인 재요청** (수동): 상품명 변경 83건이 TEMPORARY_SAVE 강등됨 → 네이버 파트너센터에서 일괄 승인 요청
+2. **스토어 전시카테고리 보완** (~5분, 판매자센터 로그인 필요): 재분류로 새 표준카테고리로 옮긴 상품 일부가 전시카테고리에서 빠짐. 카테고리 단위 연결 추가 —
    눈·두뇌건강←포스파티딜세린·은행잎추출물 / 관절·뼈건강←콘드로이친·MSM·보스웰리아·초록입홍합 / 유산균·장건강←효소·프리바이오틱스 / 오메가3·혈행←폴리코사놀·크릴오일 / 건강즙·스틱←건강즙/과일즙 소분류 / 미네랄·기타←밀크씨슬·바나바·셀레늄
-2. **상품명 키워드 최적화** (Phase 1-2): `node --env-file=.env.local scripts/naver-keyword-optimize.mjs --limit=20` 로 분석 → 검토 후 `--apply`
-3. **네이버 주문 동기화 크론** (Phase 4-1): Commerce API pay-order → DB, local-cron-orders-sync 미러
+3. ✅ **네이버 주문 동기화 크론** (Phase 4-1): `local-cron-naver-orders-sync.mjs` 완성, `jimscanner_naver_orders` 테이블 생성, Windows 작업 스케줄러(`Naver-Orders-Sync`) 시간당 등록 완료.
+   - 엔드포인트: `GET /v1/pay-order/seller/product-orders?from=...&to=...` (UTC ISO, 최대 24h 창)
+   - 초기 백필: `node scripts/local-cron-naver-orders-sync.mjs --backfill`
 4. 혜택 설정(쿠폰·리뷰 적립금) — 사용자 금액 결정 대기 + 유픽 MSP 정책(쿠폰 적용가) 확인
 5. 광고: 보류 해제 시 Phase 3 표의 1~5번으로 시작 (글루타치온 3박스 최우선)
 
