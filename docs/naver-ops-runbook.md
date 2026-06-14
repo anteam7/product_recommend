@@ -159,3 +159,5 @@ node --env-file=.env.local scripts/naver-price-compete.mjs [--limit=N]
 | 2026-06-14 | 상품명 키워드 최적화 | 83건 | naver-keyword-optimize.mjs | 쇼핑검색량 기반, SALE 유지 확인 |
 | 2026-06-14 | 주문 동기화 크론 구축 | - | local-cron-naver-orders-sync.mjs | Naver-Orders-Sync 작업 스케줄러 등록 |
 | 2026-06-14 | 전시카테고리 보완 | 6개 카테고리 | 수동(파트너센터) | 건강즙49/눈뇌11/관절13/유산균9/오메가7/미네랄21 |
+| 2026-06-14 | 태그 재보강 | 352건 | naver-update-tags.mjs --live | 전체 재실행, 업데이트 352/스킵 0/실패 0 |
+| 2026-06-14 | 브랜드명 오류 수정 | 2건 | node 인라인 | 만사형통(송침유 → 만사형통 (13569375264, 13569375257) |
