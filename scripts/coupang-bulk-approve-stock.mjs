@@ -81,8 +81,8 @@ for (let i = 0; i < listings.length; i++) {
     }
     approved++
 
-    // 2. GET → vendorItemId 추출
-    await new Promise((s) => setTimeout(s, 1500))
+    // 2. GET → vendorItemId 추출 (승인 직후 vendorItemId 활성화 대기)
+    await new Promise((s) => setTimeout(s, 4000))
     const detail = await api('GET', `/v2/providers/seller_api/apis/api/v1/marketplace/seller-products/${pid}`)
     const d = detail.body?.data
     const items = (d?.items ?? []).filter((it) => it.vendorItemId)
@@ -102,7 +102,11 @@ for (let i = 0; i < listings.length; i++) {
     for (const it of items) {
       const vid = encodeURIComponent(String(it.vendorItemId))
       const qty = await api('PUT', `/v2/providers/seller_api/apis/api/v1/marketplace/vendor-items/${vid}/quantities/${NEW_QTY}`)
-      if (qty.status === 200 && (qty.body?.code === 'SUCCESS' || qty.body?.code === 200)) qtyOk++
+      if (qty.status === 200 && (qty.body?.code === 'SUCCESS' || qty.body?.code === 200)) {
+        qtyOk++
+      } else {
+        console.error(`  재고설정 실패 vendorItemId=${it.vendorItemId}: ${JSON.stringify(qty.body).slice(0, 150)}`)
+      }
       vendorItemIds.push(it.vendorItemId)
       await new Promise((s) => setTimeout(s, 200))
     }
