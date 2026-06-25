@@ -104,3 +104,15 @@ PGPASSWORD='...' node scripts/apply-sql.mjs supabase/seller_scenario_runs.sql
 | `/admin/personas` | 부서별 로스터 + 조직도 토글 + 상세(미션·KPI·위임 시드) |
 | `/admin/scenarios` | 주기별 시나리오 카드 + 상세(협업 흐름·게이트·▶ 실행) |
 | `/admin/execution-logs` | 운영 일지(작업 단위 실행 로그, 24h 요약·필터) |
+
+> **배포 상태(2026-06-26)**: main 배포 완료 → 라이브 어드민(`product-recommend-nine.vercel.app/admin/personas` 등, 로그인 필요)에서 확인 가능. 공개 홈에는 노출 안 됨.
+
+## 8. 다음 작업 (TODO)
+
+1. **시나리오 로컬 러너** (핵심 미구현) — `jimscanner_seller_scenario_runs` 큐를 폴링 →
+   시나리오 `steps`를 Claude CLI로 순서대로 실행 → 게이트(🚦) 단계에서 승인 대기로 정지 →
+   단계마다 `logExecution()`으로 `jimscanner_seller_execution_logs`에 기록.
+   현재 `/admin/scenarios`의 **▶ 지금 실행**은 큐 등록까지만 동작한다.
+   참고: `scripts/run-crons.mjs`·`scripts/loop-master-coupang.mjs` 패턴, 자식 spawn 시 `ANTHROPIC_API_KEY` 제거 필수.
+2. (선택) 실제 크론/루프 스크립트에 `scripts/lib/execution-log.mjs`의 `logExecution()` 호출을 삽입해 운영 일지 실데이터 채우기.
+3. (선택) `npm run gen:types` 후 `execution-log.ts`의 `as unknown as SupabaseClient` 캐스팅 해제.
