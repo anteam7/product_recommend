@@ -41,6 +41,30 @@ const NAV_GROUPS: NavGroup[] = [
     ],
   },
   {
+    id: 'org',
+    label: '조직 & 에이전트',
+    items: [
+      {
+        href: '/admin/personas',
+        label: '팀 페르소나',
+        icon: '🧑‍💼',
+        match: (p) => p.startsWith('/admin/personas'),
+      },
+      {
+        href: '/admin/scenarios',
+        label: '작업 시나리오',
+        icon: '🗺️',
+        match: (p) => p.startsWith('/admin/scenarios'),
+      },
+      {
+        href: '/admin/execution-logs',
+        label: '운영 일지',
+        icon: '📒',
+        match: (p) => p.startsWith('/admin/execution-logs'),
+      },
+    ],
+  },
+  {
     id: 'discovery',
     label: '위탁 발굴',
     items: [

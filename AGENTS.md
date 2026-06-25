@@ -24,6 +24,7 @@
 | [`CLAUDE.md`](./CLAUDE.md) | 하네스 규칙 (작업 순서, 제약, DB 연결) |
 | [`platform_direction.md`](./platform_direction.md) | **최우선 방향 정의서** (파이프라인, 쿠팡 연동, 로드맵) |
 | [`docs/architecture.md`](./docs/architecture.md) | 발굴→소싱→등록→운영 파이프라인 아키텍처 |
+| [`docs/personas-and-scenarios.md`](./docs/personas-and-scenarios.md) | 팀 페르소나·작업 시나리오·운영 일지 (셀러 조직 시뮬레이션, 이커머스 프레임워크 근거) |
 | [`docs/phase-roadmap.md`](./docs/phase-roadmap.md) | 단계별 로드맵 |
 | [`docs/tech-stack.md`](./docs/tech-stack.md) | 기술 스택 & 개발 환경 |
 | [`docs/database.md`](./docs/database.md) | Supabase DB 연결 & 테이블 인벤토리 |
