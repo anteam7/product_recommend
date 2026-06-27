@@ -106,6 +106,27 @@ async function runOpsLoop() {
   }
 }
 
+// 위탁 소싱 도출 루프: 짐스캐너 트렌드 → 도매매(위탁) → 시장가 → 마진 후보 갱신 (cron 완료 후)
+// 쿠팡 CDP(9222)가 안 떠 있으면 스크립트가 자동으로 네이버 시장가만 사용한다.
+async function runSourcingLoop() {
+  try {
+    const { execFile } = await import('node:child_process')
+    const { promisify } = await import('node:util')
+    const execFileAsync = promisify(execFile)
+    const scriptPath = new URL('./domeme-sourcing-from-trends.mjs', import.meta.url).pathname.replace(/^\/([A-Z]:)/, '$1')
+    const envFilePath = new URL('../.env.local', import.meta.url).pathname.replace(/^\/([A-Z]:)/, '$1')
+    const { stdout, stderr } = await execFileAsync(
+      process.execPath,
+      [`--env-file=${envFilePath}`, scriptPath, '--days=7', '--limit=50', '--max-per-kw=2'],
+      { timeout: 600_000, maxBuffer: 16 * 1024 * 1024 },
+    )
+    if (stdout) process.stdout.write(stdout)
+    if (stderr) process.stderr.write(stderr)
+  } catch (e) {
+    console.error('[sourcing-loop] 실행 실패:', e instanceof Error ? e.message : String(e))
+  }
+}
+
 const t0 = Date.now()
 console.log(`[${new Date().toISOString()}] running ${targets.length} cron(s) → ${BASE_URL}`)
 
@@ -131,6 +152,14 @@ try {
   await runOpsLoop()
 } catch (e) {
   console.error('[ops-loop] 예상치 못한 오류:', e instanceof Error ? e.message : String(e))
+}
+
+// 위탁 소싱 도출 루프 자동 실행 (트렌드 → 도매매 → 시장가 → 마진 후보)
+console.log(`[${new Date().toISOString()}] 위탁 소싱 도출 루프 시작...`)
+try {
+  await runSourcingLoop()
+} catch (e) {
+  console.error('[sourcing-loop] 예상치 못한 오류:', e instanceof Error ? e.message : String(e))
 }
 
 process.exit(failCount > 0 ? 1 : 0)
