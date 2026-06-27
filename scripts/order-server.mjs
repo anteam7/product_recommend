@@ -51,6 +51,10 @@ const BIZ_INFO = {
   zip: '08368', addr1: '서울특별시 구로구 항동로 72(항동, 하버라인 4단지)', addr2: '404-601',
 }
 
+// ggsan 일반결제(무통장입금) 자동선택값 — 입금자명은 사업자 대표명(BIZ_INFO.ceo) 재사용(신규 PII 미도입),
+// 입금은행은 공개 은행명 키워드로 매칭(계좌번호는 주문서 드롭다운에서 선택, 소스 미저장).
+const GGSAN_DEPOSIT = { depositorName: BIZ_INFO.ceo, bankKeyword: '국민은행' }
+
 // 보이는 Chrome 띄우기 (결제는 사람이 — 브라우저는 닫지 않음)
 // onDialog 미지정 시 모든 대화상자 수락
 async function openBrowser(onDialog) {
@@ -86,7 +90,7 @@ async function runFlowGgsan(goodsNo, qty, recipient) {
   const op = ctx.pages().find((p) => /\/order\/order\.php/.test(p.url())) || page
   if (!/\/order\//.test(op.url())) return { ok: false, msg: '주문서로 이동 실패 — 품절/옵션 필요 여부 확인' }
   // 4) 배송지=직접입력 + 수령인 입력 (readonly 대비 JS set)
-  await op.evaluate(({ rcp, biz }) => {
+  await op.evaluate(({ rcp, biz, dep }) => {
     const set = (n, v) => { const el = document.querySelector(`[name="${n}"]`); if (el) { el.removeAttribute('readonly'); el.value = v; el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })) } }
     // 배송지=직접입력 + 수령인
     const rs = [...document.querySelectorAll('input[name=shipping]')]
@@ -100,7 +104,18 @@ async function runFlowGgsan(goodsNo, qty, recipient) {
     set('taxBusiNo', biz.busiNo); set('taxCompany', biz.company); set('taxCeoNm', biz.ceo)
     set('taxService', biz.service); set('taxItem', biz.item)
     set('taxZonecode', biz.zip); set('taxAddress', biz.addr1); set('taxAddressSub', biz.addr2)
-  }, { rcp: recipient, biz: BIZ_INFO })
+    // 결제수단 = 일반결제(무통장입금) + 입금자명 + 입금은행 선택
+    let payRadio = document.querySelector('input[name=settleKind][value="gb"]')
+    if (!payRadio) payRadio = [...document.querySelectorAll('input[name=settleKind]')].find((r) => /무통장|일반결제/.test((document.querySelector(`label[for="${r.id}"]`)?.innerText) || r.parentElement?.innerText || ''))
+    if (payRadio && !payRadio.checked) { payRadio.checked = true; payRadio.click(); payRadio.dispatchEvent(new Event('change', { bubbles: true })) }
+    set('bankSender', dep.depositorName) // 입금자명
+    // 입금은행: 국민은행(건강산) 계좌 옵션 선택 (계좌번호는 옵션 text에서 매칭, 소스 미저장)
+    const bankSel = document.querySelector('select[name=bankAccount]')
+    if (bankSel) {
+      const opt = [...bankSel.options].find((o) => o.value && o.text.includes(dep.bankKeyword))
+      if (opt) { bankSel.value = opt.value; bankSel.dispatchEvent(new Event('change', { bubbles: true })) }
+    }
+  }, { rcp: recipient, biz: BIZ_INFO, dep: GGSAN_DEPOSIT })
   await op.bringToFront().catch(() => {})
   // 브라우저는 닫지 않는다 — 사장님이 금액 확인 후 결제하기
   return { ok: true, msg: '주문서 작성 완료 — 열린 ggsan 창에서 금액·배송지 확인 후 [결제하기]를 직접 누르세요' }
