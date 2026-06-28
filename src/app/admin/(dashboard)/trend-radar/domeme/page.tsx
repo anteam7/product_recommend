@@ -17,6 +17,8 @@ interface SourcingRow {
   trend_sources: string[] | null
   market_source: string | null
   market_price: number | null
+  market_n: number | null
+  low_confidence: boolean | null
   safe_cost: number | null
   est_margin_krw: number | null
   est_margin_rate: number | null
@@ -226,11 +228,21 @@ export default async function DomemeSourcingPage({
                   </div>
 
                   <div className="text-right flex-shrink-0 space-y-1">
-                    {badge && <div className={`inline-block text-xs px-2 py-0.5 rounded ${badge.cls}`}>{badge.label}</div>}
+                    <div className="flex items-center justify-end gap-1">
+                      {r.low_confidence && (
+                        <span
+                          title="시장가 저신뢰: 유사 비교상품이 부족하거나, 시장 최저가가 도매가의 6배 이상이라 가성비 비교가가 없습니다(키워드-등급 불일치 의심). 마진이 과대평가됐을 수 있으니 직접 확인하세요."
+                          className="inline-block text-[10px] font-semibold px-1.5 py-0.5 rounded bg-orange-100 text-orange-700 cursor-help"
+                        >
+                          ⚠ 검증필요
+                        </span>
+                      )}
+                      {badge && <div className={`inline-block text-xs px-2 py-0.5 rounded ${badge.cls}`}>{badge.label}</div>}
+                    </div>
                     <div className="text-2xl font-bold font-mono text-sky-700">{Number(r.sourcing_score ?? 0).toFixed(0)}</div>
                     <div className="text-[10px] text-gray-500 font-mono space-y-0.5">
                       <div>공급 {r.supply_price?.toLocaleString() ?? '—'}원</div>
-                      <div>시장 {r.market_price?.toLocaleString() ?? '—'}원 ({r.market_source})</div>
+                      <div>시장 {r.market_price?.toLocaleString() ?? '—'}원 ({r.market_source}{r.market_n ? `·비교 ${r.market_n}` : ''})</div>
                       {r.est_margin_krw != null && <div className="text-emerald-700">+{r.est_margin_krw.toLocaleString()}원</div>}
                     </div>
                   </div>

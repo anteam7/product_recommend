@@ -17,7 +17,9 @@ CREATE TABLE IF NOT EXISTS jimscanner_domeme_sourcing_candidates (
   trend_sources       text[],                           -- 신호 출처 소스들
   -- 시장가/마진
   market_source       text,                             -- 'coupang' | 'naver'
-  market_price        integer,                          -- 경쟁 시장가 중앙값
+  market_price        integer,                          -- 경쟁 시장가(유사상품 하위30분위)
+  market_n            integer,                          -- 시장가 산정에 쓴 유사 비교상품 수
+  low_confidence      boolean DEFAULT false,            -- 저신뢰(비교상품 부족 or 시장가≥도매가×6 = 등급 불일치 의심)
   safe_cost           integer,                          -- 안전원가(목표순익 충족 상한)
   est_margin_krw      integer,                          -- 시장가 판매 시 예상 순이익(원)
   est_margin_rate     numeric,                          -- 예상 순마진율(%)

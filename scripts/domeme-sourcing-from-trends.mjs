@@ -62,9 +62,10 @@ function sim(a, b) { const A = bigrams(a), B = bigrams(b); if (!A.size || !B.siz
 // (1) 키워드 전체가 아니라 '이 도매매 상품과 유사한 경쟁상품'만으로 산정 → 무관 매칭 제거.
 // (2) 중앙값 대신 '하위 30분위'(가성비 판매가) 사용 — 노브랜드 도매상품은 브랜드 프리미엄(중앙~상위)이 아니라
 //     경쟁 분포의 저가대에서 팔리므로. 중앙값은 브랜드가에 끌려 마진을 과대평가함.
-const MKT_SIM = 0.18    // 시장가에 포함할 도매매상품↔경쟁상품 제목 유사도 하한
-const MKT_MIN_N = 3     // 유사 상품 최소 개수(미만이면 키워드 전체로 폴백·신뢰도 낮음 표시)
-const MKT_PCTL = 0.30   // 가성비 판매 가정: 유사 경쟁상품 가격의 하위 30분위
+const MKT_SIM = 0.18      // 시장가에 포함할 도매매상품↔경쟁상품 제목 유사도 하한
+const MKT_MIN_N = 3       // 유사 상품 최소 개수(미만이면 키워드 전체로 폴백·신뢰도 낮음 표시)
+const MKT_PCTL = 0.30     // 가성비 판매 가정: 유사 경쟁상품 가격의 하위 30분위
+const MKT_RATIO_FLAG = 6  // 시장가가 도매가의 N배 이상이면 '저신뢰'(가성비 비교상품 부재 = 등급 불일치 의심)
 function estimateMarket(items, title) {
   if (!items || !items.length) return { price: null, n: 0, anchored: false }
   const scored = items.map((it) => ({ p: it.price, s: sim(title, it.title || '') })).filter((x) => x.p > 0)
@@ -264,6 +265,9 @@ async function upsert(finals) {
     supply_price: c.price, moq: c.moq, inventory: c.inventory ?? null, overseas: c.overseas ?? null, category_hint: c.category ?? null,
     trend_keyword: c.trend_keyword, trend_signal: c.trend_signal, trend_sources: c.trend_sources,
     market_source: c.market_source, market_price: c.market_price, safe_cost: c.safe_cost,
+    market_n: c.market_n ?? null,
+    // 저신뢰: 유사 비교상품 부족(폴백) 또는 시장가가 도매가의 N배 이상(가성비 비교상품 부재=등급 불일치 의심)
+    low_confidence: !c.market_anchored || (c.price > 0 && c.market_price >= c.price * MKT_RATIO_FLAG),
     est_margin_krw: c.est_margin_krw, est_margin_rate: c.est_margin_rate, sourcing_score: c.sourcing_score,
     image_url: c.image_url ?? null, detail_url: c.url, last_sourced_at: nowIso,
   }))
