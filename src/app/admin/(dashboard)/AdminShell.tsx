@@ -5,7 +5,7 @@ import { usePathname } from 'next/navigation'
 import { useEffect, useState } from 'react'
 import LogoutButton from '../LogoutButton'
 
-type BadgeKey = 'gov_new_24h'
+type BadgeKey = 'gov_new_24h' | 'work_escalated'
 
 type NavItem = {
   href: string
@@ -44,6 +44,13 @@ const NAV_GROUPS: NavGroup[] = [
     id: 'org',
     label: '조직 & 에이전트',
     items: [
+      {
+        href: '/admin/work-console',
+        label: '작업 콘솔',
+        icon: '🛰️',
+        match: (p) => p.startsWith('/admin/work-console'),
+        badgeKey: 'work_escalated',
+      },
       {
         href: '/admin/personas',
         label: '팀 페르소나',
@@ -254,8 +261,27 @@ function SidebarContent({
     return () => { cancelled = true }
   }, [])
 
+  // 작업 콘솔 — 확인 필요(escalated) 작업 수 배지 (폴링)
+  const [workBadge, setWorkBadge] = useState<number | null>(null)
+  useEffect(() => {
+    let cancelled = false
+    const load = () =>
+      fetch('/api/admin/work-instructions', { cache: 'no-store' })
+        .then((r) => (r.ok ? r.json() : null))
+        .then((data) => {
+          if (cancelled || !data?.items) return
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          setWorkBadge((data.items as any[]).filter((i) => i?.status === 'escalated').length)
+        })
+        .catch(() => {})
+    load()
+    const t = setInterval(load, 15000)
+    return () => { cancelled = true; clearInterval(t) }
+  }, [])
+
   const badgeValues: Record<BadgeKey, number | null> = {
     gov_new_24h: govBadge,
+    work_escalated: workBadge,
   }
 
   // 그룹별 접힘 상태. 활성 메뉴가 있는 그룹은 항상 펼쳐진 상태로 시작.
@@ -339,7 +365,9 @@ function SidebarContent({
                             title={
                               item.badgeKey === 'gov_new_24h'
                                 ? `24시간 내 새 정부 공지 ${badgeValue}건`
-                                : undefined
+                                : item.badgeKey === 'work_escalated'
+                                  ? `확인 필요한 작업 ${badgeValue}건`
+                                  : undefined
                             }
                             className="text-[10px] font-semibold px-1.5 py-0.5 rounded-full bg-rose-500 text-white"
                           >
