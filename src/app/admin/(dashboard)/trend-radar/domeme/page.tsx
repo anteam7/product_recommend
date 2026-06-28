@@ -124,9 +124,9 @@ export default async function DomemeSourcingPage({
       </header>
 
       <div className="rounded border border-sky-200 bg-sky-50 px-4 py-3 text-xs text-sky-900">
-        <strong>도출 방식</strong> · 트렌드 키워드를 도매매 <code>getItemList(market=supply)</code> 로 검색해 제목 유사도로 매칭 →
-        쿠팡(크롬 CDP, 사람처럼 검색)·네이버 쇼핑 OpenAPI 의 경쟁 시장가 중앙값으로 마진 산정.
-        시장가 출처가 키워드 기준이라 <strong>제목이 다른 상품군과 섞이면 마진이 과대평가될 수 있음</strong> — 근거 키워드를 보고 판단.
+        <strong>도출 방식</strong> · 트렌드 키워드를 도매매 <code>getItemList(market=supply)</code> 로 검색(MOQ≥2·해외출고 제외) → 제목 유사도 매칭 →
+        경쟁 시장가는 <strong>유사 상품만 추려 하위 30분위(가성비 판매가)</strong>로 산정(중앙값은 브랜드 프리미엄에 끌려 과대평가됨).
+        단, 키워드 자체가 브랜드 상품군(예: 무신사 트렌드)이면 노브랜드 비교가가 없어 <strong>여전히 시장가가 높게 잡힐 수 있음</strong> — 근거 키워드·시장가를 같이 보고 판단.
         {lastRun && <> · 최근 도출 <strong>{new Date(lastRun).toLocaleString('ko-KR')}</strong></>}
       </div>
 
@@ -245,6 +245,8 @@ export default async function DomemeSourcingPage({
         <div className="font-semibold text-gray-700">📐 sourcing_score 공식</div>
         <code className="block bg-gray-50 px-3 py-2 rounded font-mono text-[11px] leading-relaxed">
           sourcing_score = 트렌드 신호강도 × 예상 마진율(%)
+          <br />
+          시장가 = 유사 경쟁상품(제목유사도) 가격의 하위 30분위 (가성비 판매가 가정)
           <br />
           safe_cost = 시장가 × (1 − 수수료 0.108 − 목표순익 0.20) − 물류 3000
           <br />

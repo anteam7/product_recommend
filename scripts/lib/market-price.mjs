@@ -43,6 +43,7 @@ export async function naverShopMedian(kw, { display = 40 } = {}) {
     min: prices[0] ?? null,
     max: prices[prices.length - 1] ?? null,
     samples: items.slice(0, 5),
+    items: items.filter((it) => it.lprice > 0).map((it) => ({ title: it.title, price: it.lprice })), // 상품별 시장가 정합화용 원본
   }
 }
 
@@ -101,7 +102,7 @@ export async function coupangMedianViaCDP(kw, { endpoint = 'http://127.0.0.1:922
     const prices = got.map((g) => g.price).filter((n) => n > 0).sort((a, b) => a - b)
     const lo = Math.floor(prices.length * 0.1), hi = Math.ceil(prices.length * 0.9)
     const trimmed = prices.slice(lo, hi)
-    return { source: 'coupang', median: median(trimmed.length ? trimmed : prices), count: prices.length, samples: got.slice(0, 5) }
+    return { source: 'coupang', median: median(trimmed.length ? trimmed : prices), count: prices.length, samples: got.slice(0, 5), items: got.filter((g) => g.price > 0).map((g) => ({ title: g.title, price: g.price })) }
   } catch {
     return null
   } finally {

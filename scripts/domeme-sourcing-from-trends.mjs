@@ -58,6 +58,25 @@ const norm = (s) => (s || '').toLowerCase().replace(/[^가-힣a-z0-9]+/g, '')
 function bigrams(s) { const t = norm(s); const g = new Set(); for (let i = 0; i < t.length - 1; i++) g.add(t.slice(i, i + 2)); return g }
 function sim(a, b) { const A = bigrams(a), B = bigrams(b); if (!A.size || !B.size) return 0; let c = 0; for (const x of A) if (B.has(x)) c++; return 2 * c / (A.size + B.size) }
 
+// ── 시장가 정합화 ──
+// (1) 키워드 전체가 아니라 '이 도매매 상품과 유사한 경쟁상품'만으로 산정 → 무관 매칭 제거.
+// (2) 중앙값 대신 '하위 30분위'(가성비 판매가) 사용 — 노브랜드 도매상품은 브랜드 프리미엄(중앙~상위)이 아니라
+//     경쟁 분포의 저가대에서 팔리므로. 중앙값은 브랜드가에 끌려 마진을 과대평가함.
+const MKT_SIM = 0.18    // 시장가에 포함할 도매매상품↔경쟁상품 제목 유사도 하한
+const MKT_MIN_N = 3     // 유사 상품 최소 개수(미만이면 키워드 전체로 폴백·신뢰도 낮음 표시)
+const MKT_PCTL = 0.30   // 가성비 판매 가정: 유사 경쟁상품 가격의 하위 30분위
+function estimateMarket(items, title) {
+  if (!items || !items.length) return { price: null, n: 0, anchored: false }
+  const scored = items.map((it) => ({ p: it.price, s: sim(title, it.title || '') })).filter((x) => x.p > 0)
+  let pool = scored.filter((x) => x.s >= MKT_SIM)
+  let anchored = true
+  if (pool.length < MKT_MIN_N) { pool = scored; anchored = false } // 유사 결과 부족 → 키워드 전체로 폴백
+  const prices = pool.map((x) => x.p).sort((a, b) => a - b)
+  const arr = prices.slice(Math.floor(prices.length * 0.05)) // 하위5%(잡화/악세) 제거
+  const idx = Math.min(arr.length - 1, Math.floor(arr.length * MKT_PCTL))
+  return { price: arr[idx] ?? null, n: pool.length, anchored }
+}
+
 // ── 키워드 정규화: 옵션/모델코드/색상변형/마케팅꼬리/노이즈 제거 ──
 // 브랜드·플랫폼·카테고리 일반어(소싱 키워드로 무의미 → 시장가 매칭 오염). 단일 토큰일 때만 차단.
 // 단일 토큰 일반어(브랜드·플랫폼·카테고리)
@@ -194,18 +213,22 @@ async function main() {
     if (!mp || !mp.median) { try { mp = await naverShopMedian(k.keyword); if (mp?.median) naverOk++ } catch (e) { console.log(`  (네이버 시장가 오류 "${k.keyword}": ${e.message})`) } }
     if (!mp || !mp.median) { console.log(`  · "${k.keyword}" 시장가 조회 실패`); continue }
 
-    const sc = Math.round(mp.median * (1 - FEE - MARGIN) - LOGI) // safe cost
     const scored = rel.map((c) => {
-      const estMarginKrw = mp.median - c.price - Math.round(mp.median * FEE) - LOGI
-      const estMarginRate = Math.round((estMarginKrw / mp.median) * 1000) / 10
-      return { ...c, market_source: mp.source, market_price: mp.median, safe_cost: sc, est_margin_krw: estMarginKrw, est_margin_rate: estMarginRate, sourcing_score: Math.round(k.signal * Math.max(0, estMarginRate) * 10) / 10, trend_keyword: k.keyword, trend_signal: k.signal, trend_sources: k.sources }
-    }).filter((c) => c.est_margin_krw > 0).sort((a, b) => b.sourcing_score - a.sourcing_score).slice(0, MAX_PER_KW)
+      // 상품별 시장가: 키워드 전체가 아니라 '이 상품과 유사한 경쟁상품' 가격대(폴백=키워드 중앙값)
+      const mkt = estimateMarket(mp.items, c.title)
+      const price = mkt.price ?? mp.median
+      if (!price) return null
+      const sc = Math.round(price * (1 - FEE - MARGIN) - LOGI)
+      const estMarginKrw = price - c.price - Math.round(price * FEE) - LOGI
+      const estMarginRate = Math.round((estMarginKrw / price) * 1000) / 10
+      return { ...c, market_source: mp.source, market_price: price, market_n: mkt.n, market_anchored: mkt.anchored, safe_cost: sc, est_margin_krw: estMarginKrw, est_margin_rate: estMarginRate, sourcing_score: Math.round(k.signal * Math.max(0, estMarginRate) * 10) / 10, trend_keyword: k.keyword, trend_signal: k.signal, trend_sources: k.sources }
+    }).filter(Boolean).filter((c) => c.est_margin_krw > 0).sort((a, b) => b.sourcing_score - a.sourcing_score).slice(0, MAX_PER_KW)
 
     for (const c of scored) {
       const prev = byProduct.get(c.goods_no)
       if (!prev || c.sourcing_score > prev.sourcing_score) byProduct.set(c.goods_no, c)
     }
-    if (scored.length) console.log(`  ✅ "${k.keyword}" 신호${k.signal} → 시장가(${mp.source}) ${mp.median.toLocaleString()} | 후보 ${scored.length} (top 마진 ${scored[0].est_margin_rate}%)`)
+    if (scored.length) { const t = scored[0]; console.log(`  ✅ "${k.keyword}" 신호${k.signal} → 시장가(${mp.source}) ${t.market_price.toLocaleString()}${t.market_anchored ? `[유사 ${t.market_n}건]` : '~[전체폴백]'} | 후보 ${scored.length} (top 마진 ${t.est_margin_rate}%)`) }
   }
 
   let finals = [...byProduct.values()].sort((a, b) => b.sourcing_score - a.sourcing_score)
