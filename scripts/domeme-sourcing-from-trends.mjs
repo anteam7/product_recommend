@@ -44,11 +44,13 @@ const DRY = flag('dry')
 const USE_COUPANG = !flag('no-coupang')
 const FEE = 0.108, LOGI = 3000
 
-// ── 소스 가중치 (도매매 위탁 소싱 적합도) ──
-// 도매 트렌드·종합쇼핑·알리는 공산품 소싱 친화 / 무신사는 브랜드패션이라 도매매 부적합 → 디프리오 / 뉴스·커뮤는 제외
+// ── 소스 가중치 (수요의 질 기준) ──
+// 네이버 쇼핑/검색/TV는 '소비자 수요'(우리가 파는 쿠팡·네이버 시장의 신호) → 상위.
+// 도매꾹은 '공급측'(다른 셀러가 떼가는 것) 신호라 레드오션 편향 + 매칭은 어차피 도매매검색이 보장 → 낮게.
+// 무신사는 브랜드패션이라 도매매 부적합 → 최하 / 뉴스·커뮤는 제외.
 const SOURCE_WEIGHT = {
-  domeggook_main: 1.6, naver_shopping_hot: 1.3, naver_shopping_insight: 1.2,
-  naver_search_trend: 1.1, aliex_best: 1.0, naver_tvtime: 1.1, musinsa_best: 0.4,
+  naver_shopping_hot: 1.3, naver_shopping_insight: 1.2, naver_search_trend: 1.1,
+  naver_tvtime: 1.1, aliex_best: 1.0, domeggook_main: 0.8, musinsa_best: 0.4,
 }
 
 // ── 유사도 ──
@@ -99,7 +101,9 @@ async function domeSearch(kw, market) {
     items = Array.isArray(items) ? items : [items]
     return items.map((it) => ({
       goods_no: String(it.no), title: it.title, price: parseInt(it.price) || null,
-      moq: parseInt(it.unitQty) || 1, thumb: it.thumb || it.img || null, url: `https://domeggook.com/${it.no}`,
+      moq: parseInt(it.unitQty) || 1, thumb: it.thumb || it.img || null,
+      // API가 마켓별 상세 URL을 줌 — supply 검색이면 도매매(domeme.domeggook.com/s/<no>) 링크.
+      url: it.url ? String(it.url).replace(/^http:\/\//i, 'https://') : `https://domeme.domeggook.com/s/${it.no}`,
     })).filter((x) => x.price && x.title)
   } catch (e) { console.log(`  (도매매 검색 오류 "${kw}": ${e.message})`); return [] }
 }
