@@ -38,6 +38,7 @@ const getArg = (k, d) => { const a = args.find((x) => x.startsWith(`--${k}=`)); 
 const DAYS = parseInt(getArg('days', '7'))
 const LIMIT = parseInt(getArg('limit', '40'))
 const MAX_PER_KW = parseInt(getArg('max-per-kw', '2'))
+const REL_SIM = parseFloat(getArg('rel-sim', '0.3')) // 키워드↔도매매상품 제목 유사도 하한(낮출수록 매칭↑·노이즈↑)
 const MARGIN = parseFloat(getArg('margin', '0.20'))
 const SINGLE_KW = getArg('kw', '')
 const DRY = flag('dry')
@@ -204,7 +205,7 @@ async function main() {
     })
     const rel = sellable
       .map((c) => ({ ...c, s: sim(k.keyword, c.title) }))
-      .filter((c) => norm(c.title).includes(norm(k.keyword)) || c.s >= 0.3)
+      .filter((c) => norm(c.title).includes(norm(k.keyword)) || c.s >= REL_SIM)
       .sort((a, b) => a.price - b.price)
     if (!rel.length) { console.log(`  · "${k.keyword}" 도매매 관련상품 없음(검색 ${supply.length}건)`); continue }
 

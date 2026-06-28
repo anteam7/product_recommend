@@ -117,7 +117,7 @@ async function runSourcingLoop() {
     const envFilePath = new URL('../.env.local', import.meta.url).pathname.replace(/^\/([A-Z]:)/, '$1')
     const { stdout, stderr } = await execFileAsync(
       process.execPath,
-      [`--env-file=${envFilePath}`, scriptPath, '--days=7', '--limit=50', '--max-per-kw=2'],
+      [`--env-file=${envFilePath}`, scriptPath, '--days=14', '--limit=200', '--max-per-kw=5'],
       { timeout: 600_000, maxBuffer: 16 * 1024 * 1024 },
     )
     if (stdout) process.stdout.write(stdout)
