@@ -1,0 +1,141 @@
+/**
+ * 도매매 DB(신규/인기/기획전) → 쿠팡 판매가 비교 → 마진 흑자 상품만 추리기.
+ *
+ *   ① domemedb 페이지 HTML에서 상품번호(domeggookGo(no)) 추출
+ *   ② 번호 → 도매매 API getItemView → 상품명·공급가(위탁)·MOQ·해외여부
+ *      (1개 위탁판매 기준: MOQ≥2·해외출고 제외)
+ *   ③ 쿠팡 검색(세션 재사용) → 같은상품(후기 많은=실제 팔리는) 판매가 + 후기
+ *   ④ 마진 = 쿠팡가 − 공급가 − 수수료 − 물류. 흑자 & 후기충분만 후보.
+ *
+ * 사용:
+ *   node --env-file=.env.local scripts/domemedb-coupang-margin.mjs                 # 신규+인기
+ *   ... --page=new|popular|both --limit=12 --sleep=10000 --min-reviews=10
+ *   ... --no-coupang     # 공급가/상품만(쿠팡 생략)
+ * 쿠팡: launch-chrome-debug.cmd 로 워밍업 크롬(9222) 띄우고 쿠팡 1회 접속 후 실행.
+ */
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
+import path from 'node:path'
+import { openCoupangSession } from './lib/market-price.mjs'
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url))
+const env = Object.fromEntries(
+  readFileSync(path.join(__dirname, '..', '.env.local'), 'utf8').split(/\r?\n/).filter((l) => l && !l.startsWith('#') && l.includes('='))
+    .map((l) => { const i = l.indexOf('='); let v = l.slice(i + 1).trim(); if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) v = v.slice(1, -1); return [l.slice(0, i).trim(), v] }),
+)
+const DKEY = env.DOMEGGOOK_API_KEY
+const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
+
+const args = process.argv.slice(2)
+const flag = (k) => args.includes(`--${k}`)
+const getArg = (k, d) => { const a = args.find((x) => x.startsWith(`--${k}=`)); return a ? a.split('=').slice(1).join('=') : d }
+const PAGE = getArg('page', 'both')
+const LIMIT = parseInt(getArg('limit', '12'))
+const SLEEP_MS = parseInt(getArg('sleep', '9000'))
+const MIN_REVIEWS = parseInt(getArg('min-reviews', '10'))
+const FEE = parseFloat(getArg('fee', '0.108'))
+const LOGI = parseInt(getArg('logi', '3000'))
+const USE_COUPANG = !flag('no-coupang')
+
+const PAGES = { new: 'itemNewDb', popular: 'itemPopular', event: 'itemEvent' }
+const norm = (s) => (s || '').toLowerCase().replace(/[^가-힣a-z0-9]+/g, '')
+function bigrams(s) { const t = norm(s); const g = new Set(); for (let i = 0; i < t.length - 1; i++) g.add(t.slice(i, i + 2)); return g }
+function sim(a, b) { const A = bigrams(a), B = bigrams(b); if (!A.size || !B.size) return 0; let c = 0; for (const x of A) if (B.has(x)) c++; return 2 * c / (A.size + B.size) }
+
+const DBASE = 'https://domemedb.domeggook.com/index/item'
+const extractNos = (html) => [...new Set([...html.matchAll(/domeggookGo\((\d{6,})\)/g)].map((m) => m[1]))]
+const EVENT_EXPAND = !flag('no-expand')      // 기획전 '더보기'(카테고리 키워드별 추가상품) 펼침
+const EVENT_MAX_CATS = parseInt(getArg('event-cats', '20'))
+
+// DB 페이지 → 상품번호. 기획전(event)은 '더보기'(supplyList.php?sw=키워드)까지 펼쳐 추가 수집.
+async function fetchNos(pageKey) {
+  const html = await fetch(`${DBASE}/${PAGES[pageKey]}.php`, { headers: { 'User-Agent': UA } }).then((r) => r.text())
+  let nos = extractNos(html)
+  if (pageKey === 'event' && EVENT_EXPAND) {
+    const kws = [...new Set([...html.matchAll(/supplyList\.php\?[^"'\s]*?sw=([^"'&\s]+)/g)].map((m) => { try { return decodeURIComponent(m[1]) } catch { return m[1] } }))]
+    for (const kw of kws.slice(0, EVENT_MAX_CATS)) {
+      try {
+        const h = await fetch(`${DBASE}/supplyList.php?sf=subject&enc=utf8&fromOversea=0&mode=search&sw=${encodeURIComponent(kw)}`, { headers: { 'User-Agent': UA } }).then((r) => r.text())
+        nos.push(...extractNos(h))
+      } catch { /* skip */ }
+    }
+    nos = [...new Set(nos)]
+    console.log(`   (기획전 더보기 ${Math.min(kws.length, EVENT_MAX_CATS)}개 카테고리 펼침)`)
+  }
+  return nos
+}
+
+// 동시 실행 제한(도매매 API 보호 — 기획전 펼치면 수백개라 일괄 동시호출 위험)
+async function mapLimit(arr, n, fn) {
+  const out = []; let i = 0
+  await Promise.all(Array.from({ length: Math.min(n, arr.length) }, async () => { while (i < arr.length) { const idx = i++; out[idx] = await fn(arr[idx]) } }))
+  return out
+}
+
+// 번호 → 상품 상세(공급가=위탁가)
+async function itemView(no) {
+  try {
+    const d = await fetch(`https://domeggook.com/ssl/api/?ver=4.1&mode=getItemView&aid=${DKEY}&no=${no}&om=json`).then((r) => r.json()).then((j) => j?.domeggook)
+    if (!d) return null
+    return {
+      no, title: d?.basis?.title || '', supply: parseInt(d?.price?.supply) || null,
+      moq: parseInt(d?.qty?.domeMoq) || 1, oversea: String(d?.deli?.fromOversea).toLowerCase() === 'true',
+      image: d?.thumb?.original || d?.thumb?.large || null, url: `https://domeme.domeggook.com/s/${no}`,
+    }
+  } catch { return null }
+}
+
+// 쿠팡 타깃: 같은상품 중 후기 많은 것
+function pickCoupangTarget(items, name) {
+  const cand = (items || []).map((it) => ({ ...it, s: sim(name, it.title || '') })).filter((it) => it.price > 0 && it.s >= 0.3)
+  if (!cand.length) return null
+  cand.sort((a, b) => (b.reviews || 0) - (a.reviews || 0) || b.s - a.s)
+  return cand[0]
+}
+
+async function main() {
+  if (!DKEY) { console.error('DOMEGGOOK_API_KEY 없음'); process.exit(1) }
+  console.log(`=== 도매매 DB → 쿠팡 마진 (수수료 ${FEE * 100}% · 물류 ${LOGI} · 후기≥${MIN_REVIEWS}) ===`)
+  // ① 상품번호 수집
+  const keys = (PAGE === 'both' || PAGE === 'all') ? ['new', 'popular', 'event'] : PAGE.split(',').filter((k) => PAGES[k])
+  const nos = [...new Set((await Promise.all(keys.map(fetchNos))).flat())]
+  console.log(`① ${keys.join('+')} 상품번호 ${nos.length}개`)
+  // ② 상세 + 소싱기준 필터(MOQ 1, 국내)
+  const details = (await mapLimit(nos, 12, itemView)).filter(Boolean)
+  const sellable = details.filter((d) => d.supply > 0 && d.moq <= 1 && !d.oversea)
+  console.log(`② getItemView ${details.length} → 소싱가능(MOQ1·국내) ${sellable.length} (해외/MOQ≥2 ${details.length - sellable.length} 제외)`)
+  if (!USE_COUPANG) { console.log('--no-coupang: 공급가만'); sellable.slice(0, 20).forEach((d) => console.log(`  공급 ${String(d.supply).toLocaleString().padStart(8)} | ${d.title.slice(0, 40)}`)); return }
+
+  // ③ 쿠팡 마진 (세션 재사용 + throttle)
+  const cp = await openCoupangSession()
+  if (!cp) { console.log('⚠ 쿠팡 세션 실패(미가동/차단) — 크롬 9222 띄우고 쿠팡 1회 접속 후 재시도'); return }
+  const rows = []
+  const targets = sellable.slice(0, LIMIT)
+  let blockStreak = 0
+  console.log(`③ 쿠팡 마진 스크린 상위 ${targets.length}개\n`)
+  try {
+    for (let i = 0; i < targets.length; i++) {
+      const d = targets[i]
+      const c = await cp.search(d.title)
+      if (!c) { if (++blockStreak >= 3) { console.log('\n⛔ 쿠팡 연속 미응답 3회 — 중단(잠시 쉬었다 재시도)'); break }; continue }
+      blockStreak = 0
+      const t = pickCoupangTarget(c.items, d.title)
+      if (!t) { console.log(`  · ${d.title.slice(0, 30)} | 쿠팡 같은상품 없음`); }
+      else {
+        const fee = Math.round(t.price * FEE)
+        const net = t.price - d.supply - fee - LOGI
+        const rate = Math.round((net / t.price) * 1000) / 10
+        const weak = (t.reviews || 0) < MIN_REVIEWS
+        const tag = net <= 0 ? '❌' : weak ? '⚠' : '✅'
+        console.log(`  ${tag} ${d.title.slice(0, 26)} | 공급 ${d.supply.toLocaleString()} → 쿠팡 ${t.price.toLocaleString()} − 수수료 ${fee.toLocaleString()} − 물류 ${LOGI} = ${net > 0 ? '+' : ''}${net.toLocaleString()} (${rate}%) | 후기 ${t.reviews ?? '?'}${weak ? ' ⚠후기부족' : ''}`)
+        rows.push({ ...d, coupang: t.price, reviews: t.reviews, net, rate, weak })
+      }
+      if (i < targets.length - 1) { const w = SLEEP_MS + Math.floor(Math.random() * 4000); console.log(`     … ${Math.round(w / 1000)}s 대기`); await new Promise((r) => setTimeout(r, w)) }
+    }
+  } finally { await cp.close() }
+
+  const clean = rows.filter((r) => r.net > 0 && !r.weak)
+  console.log(`\n=== ✅흑자&판매검증 ${clean.length} | ⚠후기부족 ${rows.filter((r) => r.net > 0 && r.weak).length} | ❌적자 ${rows.filter((r) => r.net <= 0).length} ===`)
+  clean.sort((a, b) => b.net - a.net).forEach((r) => console.log(`  +${r.net.toLocaleString()}원(${r.rate}%) | 후기 ${r.reviews} | 공급 ${r.supply.toLocaleString()} → 쿠팡 ${r.coupang.toLocaleString()} | ${r.title.slice(0, 32)} | ${r.url}`))
+}
+main().catch((e) => { console.error('오류:', e instanceof Error ? e.stack : e); process.exit(1) })
