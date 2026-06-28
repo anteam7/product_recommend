@@ -85,18 +85,27 @@ export async function coupangMedianViaCDP(kw, { endpoint = 'http://127.0.0.1:922
     ])
     await page.waitForTimeout(2500)
     if (/Access Denied/i.test(await page.title())) return null
-    // 4) 결과 가격 추출
+    // 4) 결과 가격 추출 (2026 DOM: ProductUnit/data-id 카드, 가격=콤마형 leaf, 정가=line-through 제외)
     const got = await page.evaluate(() => {
       const out = []
-      const units = document.querySelectorAll('li.search-product, [class*="ProductUnit"]')
-      units.forEach((u) => {
-        const pe = u.querySelector('strong.price-value, [class*="price-value"], [class*="priceValue"]')
-        const ne = u.querySelector('div.name, [class*="productName"], [class*="name"]')
-        const n = parseInt((pe?.textContent || '').replace(/[^0-9]/g, ''))
-        if (n > 0) out.push({ price: n, title: (ne?.textContent || '').trim().slice(0, 50) })
+      const seen = new Set()
+      document.querySelectorAll('a[href*="/vp/products/"]').forEach((a) => {
+        const card = a.closest('[data-id], li, [class*="ProductUnit"]') || a
+        let price = null
+        card.querySelectorAll('*').forEach((el) => {
+          if (price != null || el.children.length) return
+          const cls = typeof el.className === 'string' ? el.className : ''
+          if (/line-through/.test(cls)) return // 정가(취소선) 제외 → 판매가만
+          const m = (el.textContent || '').trim().match(/^([0-9]{1,3}(?:,[0-9]{3})+)\s*원?$/)
+          if (m) price = parseInt(m[1].replace(/,/g, ''))
+        })
+        if (!price) return
+        const ne = card.querySelector('[class*="ProductUnit_productName"], [class*="name"], [class*="Name"]')
+        const key = (a.getAttribute('href') || '').match(/products\/(\d+)/)?.[1] || `${price}:${out.length}`
+        if (seen.has(key)) return
+        seen.add(key)
+        out.push({ price, title: (ne?.textContent || '').trim().slice(0, 50) })
       })
-      // 폴백: 컨테이너 못잡으면 가격 노드만
-      if (!out.length) document.querySelectorAll('strong.price-value').forEach((e) => { const n = parseInt((e.textContent || '').replace(/[^0-9]/g, '')); if (n > 0) out.push({ price: n, title: '' }) })
       return out
     })
     const prices = got.map((g) => g.price).filter((n) => n > 0).sort((a, b) => a - b)
