@@ -101,7 +101,10 @@ async function domeSearch(kw, market) {
     items = Array.isArray(items) ? items : [items]
     return items.map((it) => ({
       goods_no: String(it.no), title: it.title, price: parseInt(it.price) || null,
-      moq: parseInt(it.unitQty) || 1, thumb: it.thumb || it.img || null,
+      moq: parseInt(it.unitQty) || 1,                                    // 위탁(supply) 최소구매수량
+      overseas: String(it?.deli?.fromOversea).toLowerCase() === 'true',  // 해외출고 여부(목록에 포함됨)
+      ship_fee: parseInt(it?.deli?.fee) || null,                         // 위탁 배송비(참고)
+      thumb: it.thumb || it.img || null,
       // API가 마켓별 상세 URL을 줌 — supply 검색이면 도매매(domeme.domeggook.com/s/<no>) 링크.
       url: it.url ? String(it.url).replace(/^http:\/\//i, 'https://') : `https://domeme.domeggook.com/s/${it.no}`,
     })).filter((x) => x.price && x.title)
@@ -119,7 +122,7 @@ async function domeView(no) {
       inventory: parseInt(d?.qty?.inventory) || null,
       supply_price: parseInt(d?.price?.supply) || null,
       category: typeof d?.category === 'string' ? d.category : (d?.category?.name || null),
-      overseas: !!d?.deli?.fromOversea,
+      overseas: String(d?.deli?.fromOversea).toLowerCase() === 'true', // 문자열 "true"/"false" — !! 쓰면 "false"도 truthy
     }
   } catch { return null }
 }
@@ -170,14 +173,20 @@ async function main() {
   console.log(`선별 키워드 ${keywords.length}개${useCoupang ? ' · 쿠팡 CDP 사용' : ' · 네이버만'}\n`)
 
   const byProduct = new Map() // goods_no → best candidate
-  let coupangOk = 0, naverOk = 0
+  let coupangOk = 0, naverOk = 0, dropMoq = 0, dropOversea = 0
   for (const k of keywords) {
     const supply = await domeSearch(k.keyword, 'supply')
-    const rel = supply
+    // 위탁 1개 판매 가능(MOQ≤1) + 국내출고(해외 제외)만 — 사장님 소싱 기준
+    const sellable = supply.filter((c) => {
+      if (c.moq >= 2) { dropMoq++; return false }
+      if (c.overseas) { dropOversea++; return false }
+      return true
+    })
+    const rel = sellable
       .map((c) => ({ ...c, s: sim(k.keyword, c.title) }))
       .filter((c) => norm(c.title).includes(norm(k.keyword)) || c.s >= 0.3)
       .sort((a, b) => a.price - b.price)
-    if (!rel.length) { console.log(`  · "${k.keyword}" 도매매 관련상품 없음`); continue }
+    if (!rel.length) { console.log(`  · "${k.keyword}" 도매매 관련상품 없음(검색 ${supply.length}건)`); continue }
 
     // 시장가: 쿠팡(CDP) 우선 → 네이버 폴백
     let mp = null
@@ -201,9 +210,11 @@ async function main() {
 
   let finals = [...byProduct.values()].sort((a, b) => b.sourcing_score - a.sourcing_score)
   console.log(`\n=== 도출 완료: ${finals.length}개 상품 후보 (시장가 출처 쿠팡 ${coupangOk}·네이버 ${naverOk}) ===`)
+  console.log(`   소싱기준 제외(검색결과 기준): MOQ≥2 ${dropMoq}건 · 해외출고 ${dropOversea}건`)
 
   // 상세 보강(이미지/재고) — 상위 후보만
-  for (const c of finals.slice(0, 60)) { const v = await domeView(c.goods_no); if (v) { c.image_url = v.image_url; c.inventory = v.inventory; c.overseas = v.overseas; c.category = v.category; if (v.supply_price) c.supply_price_view = v.supply_price } }
+  // overseas 는 목록 단계에서 이미 확정(필터 통과 = 국내) — 여기서 덮어쓰지 않음
+  for (const c of finals.slice(0, 60)) { const v = await domeView(c.goods_no); if (v) { c.image_url = v.image_url; c.inventory = v.inventory; c.category = v.category; if (v.supply_price) c.supply_price_view = v.supply_price } }
 
   // 리포트
   for (const c of finals.slice(0, 25)) {
