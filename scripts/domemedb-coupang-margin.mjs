@@ -16,6 +16,7 @@
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
+import { createClient } from '@supabase/supabase-js'
 import { openCoupangSession } from './lib/market-price.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -24,6 +25,7 @@ const env = Object.fromEntries(
     .map((l) => { const i = l.indexOf('='); let v = l.slice(i + 1).trim(); if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) v = v.slice(1, -1); return [l.slice(0, i).trim(), v] }),
 )
 const DKEY = env.DOMEGGOOK_API_KEY
+const sb = createClient(env.NEXT_PUBLIC_SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY)
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
 
 const args = process.argv.slice(2)
@@ -36,6 +38,20 @@ const MIN_REVIEWS = parseInt(getArg('min-reviews', '10'))
 const FEE = parseFloat(getArg('fee', '0.108'))
 const LOGI = parseInt(getArg('logi', '3000'))
 const USE_COUPANG = !flag('no-coupang')
+const SAVE = flag('save')                       // 흑자 후보 DB 저장 + run_state 갱신
+const TARGET = parseInt(getArg('target', '0'))  // 흑자 N개 채우면 중단(0=off, LIMIT까지만)
+
+async function setRunState(patch) { try { await sb.from('jimscanner_domemedb_run_state').update({ ...patch, updated_at: new Date().toISOString() }).eq('id', 1) } catch { /* noop */ } }
+async function saveCandidate(c) {
+  try {
+    await sb.from('jimscanner_domemedb_margin_candidates').upsert({
+      supplier: 'domeme', supplier_goods_no: c.no, title: c.title, supply_price: c.supply,
+      coupang_price: c.coupang, reviews: c.reviews ?? null, est_margin_krw: c.net, est_margin_rate: c.rate,
+      page_source: c.source ?? null, moq: c.moq ?? null, detail_url: c.url, image_url: c.image ?? null,
+      last_checked_at: new Date().toISOString(),
+    }, { onConflict: 'supplier,supplier_goods_no' })
+  } catch (e) { console.log('  (저장 오류:', e instanceof Error ? e.message : e, ')') }
+}
 
 const PAGES = { new: 'itemNewDb', popular: 'itemPopular', event: 'itemEvent' }
 const norm = (s) => (s || '').toLowerCase().replace(/[^가-힣a-z0-9]+/g, '')
@@ -95,47 +111,56 @@ function pickCoupangTarget(items, name) {
 
 async function main() {
   if (!DKEY) { console.error('DOMEGGOOK_API_KEY 없음'); process.exit(1) }
-  console.log(`=== 도매매 DB → 쿠팡 마진 (수수료 ${FEE * 100}% · 물류 ${LOGI} · 후기≥${MIN_REVIEWS}) ===`)
-  // ① 상품번호 수집
+  console.log(`=== 도매매 DB → 쿠팡 마진 (수수료 ${FEE * 100}% · 물류 ${LOGI} · 후기≥${MIN_REVIEWS}${TARGET > 0 ? ` · 목표 흑자 ${TARGET}` : ''}) ===`)
+  // ① 상품번호 수집(+ 출처 페이지)
   const keys = (PAGE === 'both' || PAGE === 'all') ? ['new', 'popular', 'event'] : PAGE.split(',').filter((k) => PAGES[k])
-  const nos = [...new Set((await Promise.all(keys.map(fetchNos))).flat())]
+  const sourceMap = new Map()
+  for (const k of keys) { try { for (const no of await fetchNos(k)) if (!sourceMap.has(no)) sourceMap.set(no, k) } catch (e) { console.log(`(${k} 수집 오류: ${e instanceof Error ? e.message : e})`) } }
+  const nos = [...sourceMap.keys()]
   console.log(`① ${keys.join('+')} 상품번호 ${nos.length}개`)
   // ② 상세 + 소싱기준 필터(MOQ 1, 국내)
   const details = (await mapLimit(nos, 12, itemView)).filter(Boolean)
+  details.forEach((d) => { d.source = sourceMap.get(d.no) })
   const sellable = details.filter((d) => d.supply > 0 && d.moq <= 1 && !d.oversea)
   console.log(`② getItemView ${details.length} → 소싱가능(MOQ1·국내) ${sellable.length} (해외/MOQ≥2 ${details.length - sellable.length} 제외)`)
   if (!USE_COUPANG) { console.log('--no-coupang: 공급가만'); sellable.slice(0, 20).forEach((d) => console.log(`  공급 ${String(d.supply).toLocaleString().padStart(8)} | ${d.title.slice(0, 40)}`)); return }
 
-  // ③ 쿠팡 마진 (세션 재사용 + throttle)
+  // ③ 쿠팡 마진 (세션 재사용 + throttle). TARGET 흑자 채우면 중단, 아니면 LIMIT까지.
   const cp = await openCoupangSession()
-  if (!cp) { console.log('⚠ 쿠팡 세션 실패(미가동/차단) — 크롬 9222 띄우고 쿠팡 1회 접속 후 재시도'); return }
+  if (!cp) { console.log('⚠ 쿠팡 세션 실패(미가동/차단) — 크롬 9222 띄우고 쿠팡 1회 접속 후 재시도'); if (SAVE) await setRunState({ status: 'idle', message: '쿠팡 세션 실패(크롬 9222 확인)' }); return }
+  if (SAVE) await setRunState({ status: 'running', found: 0, screened: 0, target: TARGET || LIMIT, started_at: new Date().toISOString(), message: null })
   const rows = []
-  const targets = sellable.slice(0, LIMIT)
-  let blockStreak = 0
-  console.log(`③ 쿠팡 마진 스크린 상위 ${targets.length}개\n`)
+  let blockStreak = 0, screened = 0, found = 0
+  const maxScreen = TARGET > 0 ? sellable.length : Math.min(LIMIT, sellable.length)
+  console.log(`③ 쿠팡 마진 스크린 (대상 ${sellable.length}, ${TARGET > 0 ? `흑자 ${TARGET} 도달시 중단` : `최대 ${maxScreen}`})\n`)
   try {
-    for (let i = 0; i < targets.length; i++) {
-      const d = targets[i]
+    for (let i = 0; i < sellable.length && screened < maxScreen; i++) {
+      if (TARGET > 0 && found >= TARGET) { console.log(`\n🎯 흑자 ${TARGET}개 도달 — 중단`); break }
+      const d = sellable[i]
       const c = await cp.search(d.title)
-      if (!c) { if (++blockStreak >= 3) { console.log('\n⛔ 쿠팡 연속 미응답 3회 — 중단(잠시 쉬었다 재시도)'); break }; continue }
+      screened++
+      if (!c) { if (++blockStreak >= 3) { console.log('\n⛔ 쿠팡 연속 미응답 3회 — 중단'); break }; continue }
       blockStreak = 0
       const t = pickCoupangTarget(c.items, d.title)
-      if (!t) { console.log(`  · ${d.title.slice(0, 30)} | 쿠팡 같은상품 없음`); }
-      else {
+      if (t) {
         const fee = Math.round(t.price * FEE)
         const net = t.price - d.supply - fee - LOGI
         const rate = Math.round((net / t.price) * 1000) / 10
         const weak = (t.reviews || 0) < MIN_REVIEWS
         const tag = net <= 0 ? '❌' : weak ? '⚠' : '✅'
-        console.log(`  ${tag} ${d.title.slice(0, 26)} | 공급 ${d.supply.toLocaleString()} → 쿠팡 ${t.price.toLocaleString()} − 수수료 ${fee.toLocaleString()} − 물류 ${LOGI} = ${net > 0 ? '+' : ''}${net.toLocaleString()} (${rate}%) | 후기 ${t.reviews ?? '?'}${weak ? ' ⚠후기부족' : ''}`)
-        rows.push({ ...d, coupang: t.price, reviews: t.reviews, net, rate, weak })
-      }
-      if (i < targets.length - 1) { const w = SLEEP_MS + Math.floor(Math.random() * 4000); console.log(`     … ${Math.round(w / 1000)}s 대기`); await new Promise((r) => setTimeout(r, w)) }
+        console.log(`  ${tag} ${d.title.slice(0, 26)} | 공급 ${d.supply.toLocaleString()} → 쿠팡 ${t.price.toLocaleString()} = ${net > 0 ? '+' : ''}${net.toLocaleString()} (${rate}%) | 후기 ${t.reviews ?? '?'}${weak ? ' ⚠후기부족' : ''}`)
+        const cand = { ...d, coupang: t.price, reviews: t.reviews, net, rate, weak }
+        rows.push(cand)
+        if (net > 0 && !weak) { found++; if (SAVE) await saveCandidate(cand) }
+      } else console.log(`  · ${d.title.slice(0, 30)} | 쿠팡 같은상품 없음`)
+      if (SAVE) await setRunState({ found, screened })
+      const willContinue = (TARGET > 0 ? found < TARGET : screened < maxScreen) && i < sellable.length - 1
+      if (willContinue) { const w = SLEEP_MS + Math.floor(Math.random() * 4000); console.log(`     … ${Math.round(w / 1000)}s 대기 (흑자 ${found}${TARGET > 0 ? '/' + TARGET : ''} · ${screened} 스크린)`); await new Promise((r) => setTimeout(r, w)) }
     }
-  } finally { await cp.close() }
+  } finally { await cp.close(); if (SAVE) await setRunState({ status: 'idle', found, screened, message: `완료: 흑자 ${found}개 / ${screened} 스크린` }) }
 
   const clean = rows.filter((r) => r.net > 0 && !r.weak)
-  console.log(`\n=== ✅흑자&판매검증 ${clean.length} | ⚠후기부족 ${rows.filter((r) => r.net > 0 && r.weak).length} | ❌적자 ${rows.filter((r) => r.net <= 0).length} ===`)
+  console.log(`\n=== ✅흑자&판매검증 ${clean.length} | ⚠후기부족 ${rows.filter((r) => r.net > 0 && r.weak).length} | ❌적자 ${rows.filter((r) => r.net <= 0).length} | 스크린 ${screened}${SAVE ? ' · DB저장됨' : ''} ===`)
   clean.sort((a, b) => b.net - a.net).forEach((r) => console.log(`  +${r.net.toLocaleString()}원(${r.rate}%) | 후기 ${r.reviews} | 공급 ${r.supply.toLocaleString()} → 쿠팡 ${r.coupang.toLocaleString()} | ${r.title.slice(0, 32)} | ${r.url}`))
 }
 main().catch((e) => { console.error('오류:', e instanceof Error ? e.stack : e); process.exit(1) })

@@ -85,7 +85,13 @@ const NAV_GROUPS: NavGroup[] = [
         href: '/admin/trend-radar/domeme',
         label: '도매매 소싱',
         icon: '🧭',
-        match: (p) => p.startsWith('/admin/trend-radar/domeme'),
+        match: (p) => p === '/admin/trend-radar/domeme' || p.startsWith('/admin/trend-radar/domeme?'),
+      },
+      {
+        href: '/admin/trend-radar/domemedb-picks',
+        label: '💰 도매매 흑자',
+        icon: '💰',
+        match: (p) => p.startsWith('/admin/trend-radar/domemedb-picks'),
       },
       {
         href: '/admin/trend-radar/ggsan',
