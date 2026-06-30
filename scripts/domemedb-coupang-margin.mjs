@@ -52,6 +52,9 @@ async function saveCandidate(c) {
     }, { onConflict: 'supplier,supplier_goods_no' })
   } catch (e) { console.log('  (저장 오류:', e instanceof Error ? e.message : e, ')') }
 }
+// 이미 검사한 상품 기록(재실행 시 건너뛰어 누적 진행)
+async function recordChecked(no, profitable) { try { await sb.from('jimscanner_domemedb_checked').upsert({ supplier_goods_no: no, profitable, checked_at: new Date().toISOString() }, { onConflict: 'supplier_goods_no' }) } catch { /* noop */ } }
+async function loadCheckedSet() { try { const { data } = await sb.from('jimscanner_domemedb_checked').select('supplier_goods_no').limit(5000); return new Set((data || []).map((r) => r.supplier_goods_no)) } catch { return new Set() } }
 
 const PAGES = { new: 'itemNewDb', popular: 'itemPopular', event: 'itemEvent' }
 const norm = (s) => (s || '').toLowerCase().replace(/[^가-힣a-z0-9]+/g, '')
@@ -121,8 +124,9 @@ async function main() {
   // ② 상세 + 소싱기준 필터(MOQ 1, 국내)
   const details = (await mapLimit(nos, 12, itemView)).filter(Boolean)
   details.forEach((d) => { d.source = sourceMap.get(d.no) })
-  const sellable = details.filter((d) => d.supply > 0 && d.moq <= 1 && !d.oversea)
+  let sellable = details.filter((d) => d.supply > 0 && d.moq <= 1 && !d.oversea)
   console.log(`② getItemView ${details.length} → 소싱가능(MOQ1·국내) ${sellable.length} (해외/MOQ≥2 ${details.length - sellable.length} 제외)`)
+  if (SAVE) { const checked = await loadCheckedSet(); const b = sellable.length; sellable = sellable.filter((d) => !checked.has(d.no)); console.log(`   (이미 검사 ${b - sellable.length}개 건너뜀 → 신규 ${sellable.length}개)`) }
   if (!USE_COUPANG) { console.log('--no-coupang: 공급가만'); sellable.slice(0, 20).forEach((d) => console.log(`  공급 ${String(d.supply).toLocaleString().padStart(8)} | ${d.title.slice(0, 40)}`)); return }
 
   // ③ 쿠팡 마진 (세션 재사용 + throttle). TARGET 흑자 채우면 중단, 아니면 LIMIT까지.
@@ -142,6 +146,7 @@ async function main() {
       if (!c) { if (++blockStreak >= 3) { console.log('\n⛔ 쿠팡 연속 미응답 3회 — 중단'); break }; continue }
       blockStreak = 0
       const t = pickCoupangTarget(c.items, d.title)
+      let profitable = false
       if (t) {
         const fee = Math.round(t.price * FEE)
         const net = t.price - d.supply - fee - LOGI
@@ -151,9 +156,9 @@ async function main() {
         console.log(`  ${tag} ${d.title.slice(0, 26)} | 공급 ${d.supply.toLocaleString()} → 쿠팡 ${t.price.toLocaleString()} = ${net > 0 ? '+' : ''}${net.toLocaleString()} (${rate}%) | 후기 ${t.reviews ?? '?'}${weak ? ' ⚠후기부족' : ''}`)
         const cand = { ...d, coupang: t.price, reviews: t.reviews, net, rate, weak }
         rows.push(cand)
-        if (net > 0 && !weak) { found++; if (SAVE) await saveCandidate(cand) }
+        if (net > 0 && !weak) { profitable = true; found++; if (SAVE) await saveCandidate(cand) }
       } else console.log(`  · ${d.title.slice(0, 30)} | 쿠팡 같은상품 없음`)
-      if (SAVE) await setRunState({ found, screened })
+      if (SAVE) { await recordChecked(d.no, profitable); await setRunState({ found, screened }) } // 검사완료 기록(재실행 시 건너뜀)
       const willContinue = (TARGET > 0 ? found < TARGET : screened < maxScreen) && i < sellable.length - 1
       if (willContinue) { const w = SLEEP_MS + Math.floor(Math.random() * 4000); console.log(`     … ${Math.round(w / 1000)}s 대기 (흑자 ${found}${TARGET > 0 ? '/' + TARGET : ''} · ${screened} 스크린)`); await new Promise((r) => setTimeout(r, w)) }
     }

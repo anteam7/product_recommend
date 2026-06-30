@@ -109,21 +109,31 @@ export async function openCoupangSession({ endpoint = 'http://127.0.0.1:9222', t
     if (/Access Denied/i.test(await page.title())) { if (!reused) await page.close().catch(() => {}); await browser.close().catch(() => {}); return null }
   } catch { try { await browser.close() } catch { /* noop */ } return null }
 
+  async function doSearchOnce(kw) {
+    // 헤더 검색란(결과페이지에도 존재)에 키워드만 교체 후 검색 — 새 탭/메인 재진입 없이.
+    const input = page.locator('input#headerSearchKeyword, input[name="q"]').first()
+    await input.waitFor({ state: 'visible', timeout: 8000 })
+    await input.click()
+    await input.fill('') // 기존 키워드 비우기
+    await input.type(kw, { delay: 40 })
+    const btn = page.locator('form#headerSearchForm button[type="submit"], button.search-btn, .search-btn, form button[type="submit"]').first()
+    await Promise.all([
+      page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: timeoutMs }).catch(() => {}),
+      (async () => { if (await btn.count().catch(() => 0)) { await btn.click().catch(() => input.press('Enter')) } else { await input.press('Enter') } })(),
+    ])
+    await page.waitForTimeout(2200)
+  }
   async function search(kw) {
     try {
-      // 헤더 검색란(결과페이지에도 존재)에 키워드만 교체 후 검색 — 새 탭/메인 재진입 없이.
-      const input = page.locator('input#headerSearchKeyword, input[name="q"]').first()
-      await input.waitFor({ state: 'visible', timeout: 8000 })
-      await input.click()
-      await input.fill('') // 기존 키워드 비우기
-      await input.type(kw, { delay: 40 })
-      const btn = page.locator('form#headerSearchForm button[type="submit"], button.search-btn, .search-btn, form button[type="submit"]').first()
-      await Promise.all([
-        page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: timeoutMs }).catch(() => {}),
-        (async () => { if (await btn.count().catch(() => 0)) { await btn.click().catch(() => input.press('Enter')) } else { await input.press('Enter') } })(),
-      ])
-      await page.waitForTimeout(2200)
-      if (/Access Denied/i.test(await page.title())) return null
+      await doSearchOnce(kw)
+      // 재차단(Access Denied) → 메인으로 재워밍업 후 1회 재시도(일시 차단은 이걸로 회복됨)
+      if (/Access Denied/i.test(await page.title())) {
+        await page.goto('https://www.coupang.com/', { waitUntil: 'domcontentloaded', timeout: timeoutMs }).catch(() => {})
+        await page.waitForTimeout(2500)
+        if (/Access Denied/i.test(await page.title())) return null
+        await doSearchOnce(kw)
+        if (/Access Denied/i.test(await page.title())) return null
+      }
       return _coupangResult(await page.evaluate(_extractCoupangPrices))
     } catch { return null }
   }

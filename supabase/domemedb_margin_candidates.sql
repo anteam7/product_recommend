@@ -33,3 +33,10 @@ create table if not exists jimscanner_domemedb_run_state (
   updated_at timestamptz default now()
 );
 insert into jimscanner_domemedb_run_state (id) values (1) on conflict (id) do nothing;
+
+-- 검사 완료 기록(재실행 시 건너뛰어 누적 진행 — 쿠팡 차단으로 끊겨도 다음 런이 이어감)
+create table if not exists jimscanner_domemedb_checked (
+  supplier_goods_no text primary key,
+  profitable boolean,
+  checked_at timestamptz default now()
+);
