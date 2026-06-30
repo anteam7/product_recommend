@@ -10,6 +10,7 @@ type Cand = {
   reviews: number | null
   est_margin_krw: number | null
   est_margin_rate: number | null
+  market_source: string | null
   page_source: string | null
   detail_url: string | null
   image_url: string | null
@@ -78,13 +79,13 @@ export default function DomemedbPicks() {
                   <div className="text-sm font-medium leading-snug" title={c.title ?? ''}>{c.title}</div>
                   <div className="text-xs text-gray-500 mt-0.5">
                     {c.page_source && <span className="mr-2">{SRC[c.page_source] ?? c.page_source}</span>}
-                    후기 {c.reviews?.toLocaleString() ?? '?'}
+                    {c.reviews != null ? `후기 ${c.reviews.toLocaleString()}` : <span className="text-gray-400">시세 {c.market_source === 'naver' ? '네이버' : c.market_source}</span>}
                   </div>
                 </div>
                 <div className="text-right flex-shrink-0 space-y-1">
                   <div className={`inline-block text-xs px-2 py-0.5 rounded ${marginCls(c.est_margin_rate)}`}>마진 {c.est_margin_rate}%</div>
                   <div className="text-base font-bold text-emerald-700">+{c.est_margin_krw?.toLocaleString()}원</div>
-                  <div className="text-[10px] text-gray-500 font-mono">공급 {c.supply_price?.toLocaleString()} → 쿠팡 {c.coupang_price?.toLocaleString()}</div>
+                  <div className="text-[10px] text-gray-500 font-mono">공급 {c.supply_price?.toLocaleString()} → {c.market_source === 'naver' ? '네이버' : '쿠팡'} {c.coupang_price?.toLocaleString()}</div>
                 </div>
               </div>
             </a>

@@ -23,9 +23,10 @@ export async function POST() {
 
   const target = 30
   const instruction = [
-    '도매매 신규·인기·기획전(itemNewDb/itemPopular/itemEvent)에서 쿠팡 판매가 대비 흑자 나는 후보를 추가로 찾아 DB에 채워줘.',
-    `다음을 그대로 실행하면 된다: node --env-file=.env.local scripts/domemedb-coupang-margin.mjs --page=all --target=${target} --save`,
-    '쿠팡 시세는 워밍업 크롬(9222)으로 사람처럼 검색하며 검색 사이 대기가 있어 수~수십 분 걸린다. 끝나면 흑자 몇 개 저장됐는지 한 줄로 보고.',
+    '도매매 신규·인기·기획전(itemNewDb/itemPopular/itemEvent)에서 시장가 대비 흑자 나는 후보를 추가로 찾아 DB에 채워줘.',
+    `다음을 그대로 실행하면 된다: node --env-file=.env.local scripts/domemedb-coupang-margin.mjs --market=naver --page=all --target=${target} --save`,
+    '네이버 쇼핑 시세 기준이라 차단 없이 빠르다(이미 검사한 건 건너뛰고 신규만 누적). 끝나면 흑자 몇 개 저장됐는지 한 줄로 보고.',
+    '쿠팡 시세로 더 정확히 보려면 --market=coupang 으로(워밍업 크롬 9222 필요, 차단 위험).',
   ].join('\n')
 
   const { data, error } = await sb

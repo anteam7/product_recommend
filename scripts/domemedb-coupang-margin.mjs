@@ -40,6 +40,8 @@ const LOGI = parseInt(getArg('logi', '3000'))
 const USE_COUPANG = !flag('no-coupang')
 const SAVE = flag('save')                       // 흑자 후보 DB 저장 + run_state 갱신
 const TARGET = parseInt(getArg('target', '0'))  // 흑자 N개 채우면 중단(0=off, LIMIT까지만)
+const MARKET = getArg('market', 'coupang')      // coupang | naver (쿠팡 차단 시 네이버 시세로 흑자판정)
+const NID = env.NAVER_OPENAPI_CLIENT_ID, NSEC = env.NAVER_OPENAPI_CLIENT_SECRET
 
 async function setRunState(patch) { try { await sb.from('jimscanner_domemedb_run_state').update({ ...patch, updated_at: new Date().toISOString() }).eq('id', 1) } catch { /* noop */ } }
 async function saveCandidate(c) {
@@ -47,6 +49,7 @@ async function saveCandidate(c) {
     await sb.from('jimscanner_domemedb_margin_candidates').upsert({
       supplier: 'domeme', supplier_goods_no: c.no, title: c.title, supply_price: c.supply,
       coupang_price: c.coupang, reviews: c.reviews ?? null, est_margin_krw: c.net, est_margin_rate: c.rate,
+      market_source: c.market_source ?? 'coupang',
       page_source: c.source ?? null, moq: c.moq ?? null, detail_url: c.url, image_url: c.image ?? null,
       last_checked_at: new Date().toISOString(),
     }, { onConflict: 'supplier,supplier_goods_no' })
@@ -55,6 +58,22 @@ async function saveCandidate(c) {
 // 이미 검사한 상품 기록(재실행 시 건너뛰어 누적 진행)
 async function recordChecked(no, profitable) { try { await sb.from('jimscanner_domemedb_checked').upsert({ supplier_goods_no: no, profitable, checked_at: new Date().toISOString() }, { onConflict: 'supplier_goods_no' }) } catch { /* noop */ } }
 async function loadCheckedSet() { try { const { data } = await sb.from('jimscanner_domemedb_checked').select('supplier_goods_no').limit(5000); return new Set((data || []).map((r) => r.supplier_goods_no)) } catch { return new Set() } }
+
+// 네이버 쇼핑 시장가(같은 SKU 중앙값) + 비교상품수 — 쿠팡 없이 흑자 판정(차단 무관·빠름)
+async function naverMarket(title) {
+  try {
+    const r = await fetch(`https://openapi.naver.com/v1/search/shop.json?display=40&sort=asc&query=${encodeURIComponent((title || '').slice(0, 60))}`, { headers: { 'X-Naver-Client-Id': NID, 'X-Naver-Client-Secret': NSEC } })
+    if (r.status !== 200) return null
+    const j = await r.json()
+    const items = (j.items || []).map((it) => ({ price: parseInt(it.lprice) || 0, t: (it.title || '').replace(/<[^>]+>/g, '') })).filter((x) => x.price > 0)
+    const same = items.filter((x) => sim(title, x.t) >= 0.4)
+    if (same.length < 3) return null // 비교가능 상품 부족 = 시장 존재성 약함(판매검증 대체)
+    const prices = same.map((x) => x.price).sort((a, b) => a - b)
+    const arr = prices.slice(Math.floor(prices.length * 0.1), Math.ceil(prices.length * 0.9))
+    const pool = arr.length ? arr : prices
+    return { price: pool[Math.floor(pool.length / 2)], count: same.length }
+  } catch { return null }
+}
 
 const PAGES = { new: 'itemNewDb', popular: 'itemPopular', event: 'itemEvent' }
 const norm = (s) => (s || '').toLowerCase().replace(/[^가-힣a-z0-9]+/g, '')
@@ -129,40 +148,45 @@ async function main() {
   if (SAVE) { const checked = await loadCheckedSet(); const b = sellable.length; sellable = sellable.filter((d) => !checked.has(d.no)); console.log(`   (이미 검사 ${b - sellable.length}개 건너뜀 → 신규 ${sellable.length}개)`) }
   if (!USE_COUPANG) { console.log('--no-coupang: 공급가만'); sellable.slice(0, 20).forEach((d) => console.log(`  공급 ${String(d.supply).toLocaleString().padStart(8)} | ${d.title.slice(0, 40)}`)); return }
 
-  // ③ 쿠팡 마진 (세션 재사용 + throttle). TARGET 흑자 채우면 중단, 아니면 LIMIT까지.
-  const cp = await openCoupangSession()
-  if (!cp) { console.log('⚠ 쿠팡 세션 실패(미가동/차단) — 크롬 9222 띄우고 쿠팡 1회 접속 후 재시도'); if (SAVE) await setRunState({ status: 'idle', message: '쿠팡 세션 실패(크롬 9222 확인)' }); return }
-  if (SAVE) await setRunState({ status: 'running', found: 0, screened: 0, target: TARGET || LIMIT, started_at: new Date().toISOString(), message: null })
+  // ③ 시장가 마진. MARKET=coupang(세션+throttle·후기검증) | naver(API·차단무관·빠름·비교상품수≥3 검증). TARGET 흑자 채우면 중단.
+  const cp = MARKET === 'coupang' ? await openCoupangSession() : null
+  if (MARKET === 'coupang' && !cp) { console.log('⚠ 쿠팡 세션 실패(미가동/차단) — 크롬 9222 확인'); if (SAVE) await setRunState({ status: 'idle', message: '쿠팡 세션 실패(크롬 9222 확인)' }); return }
+  if (MARKET === 'naver' && (!NID || !NSEC)) { console.log('⚠ NAVER_OPENAPI 키 없음'); if (SAVE) await setRunState({ status: 'idle', message: 'NAVER 키 없음' }); return }
+  if (SAVE) await setRunState({ status: 'running', found: 0, screened: 0, target: TARGET || LIMIT, started_at: new Date().toISOString(), message: `시장가:${MARKET}` })
   const rows = []
   let blockStreak = 0, screened = 0, found = 0
   const maxScreen = TARGET > 0 ? sellable.length : Math.min(LIMIT, sellable.length)
-  console.log(`③ 쿠팡 마진 스크린 (대상 ${sellable.length}, ${TARGET > 0 ? `흑자 ${TARGET} 도달시 중단` : `최대 ${maxScreen}`})\n`)
+  console.log(`③ ${MARKET} 시세 마진 (대상 ${sellable.length}, ${TARGET > 0 ? `흑자 ${TARGET} 도달시 중단` : `최대 ${maxScreen}`})\n`)
   try {
     for (let i = 0; i < sellable.length && screened < maxScreen; i++) {
       if (TARGET > 0 && found >= TARGET) { console.log(`\n🎯 흑자 ${TARGET}개 도달 — 중단`); break }
       const d = sellable[i]
-      const c = await cp.search(d.title)
+      let mkt = null, blocked = false
+      if (MARKET === 'naver') { mkt = await naverMarket(d.title) }
+      else { const c = await cp.search(d.title); if (!c) blocked = true; else { const t = pickCoupangTarget(c.items, d.title); if (t) mkt = { price: t.price, reviews: t.reviews } } }
       screened++
-      if (!c) { if (++blockStreak >= 3) { console.log('\n⛔ 쿠팡 연속 미응답 3회 — 중단'); break }; continue }
+      if (blocked) { if (++blockStreak >= 3) { console.log('\n⛔ 쿠팡 연속 미응답 3회 — 중단'); break }; continue }
       blockStreak = 0
-      const t = pickCoupangTarget(c.items, d.title)
       let profitable = false
-      if (t) {
-        const fee = Math.round(t.price * FEE)
-        const net = t.price - d.supply - fee - LOGI
-        const rate = Math.round((net / t.price) * 1000) / 10
-        const weak = (t.reviews || 0) < MIN_REVIEWS
+      if (mkt && mkt.price > 0) {
+        const fee = Math.round(mkt.price * FEE)
+        const net = mkt.price - d.supply - fee - LOGI
+        const rate = Math.round((net / mkt.price) * 1000) / 10
+        const weak = MARKET === 'coupang' ? (mkt.reviews || 0) < MIN_REVIEWS : false
         const tag = net <= 0 ? '❌' : weak ? '⚠' : '✅'
-        console.log(`  ${tag} ${d.title.slice(0, 26)} | 공급 ${d.supply.toLocaleString()} → 쿠팡 ${t.price.toLocaleString()} = ${net > 0 ? '+' : ''}${net.toLocaleString()} (${rate}%) | 후기 ${t.reviews ?? '?'}${weak ? ' ⚠후기부족' : ''}`)
-        const cand = { ...d, coupang: t.price, reviews: t.reviews, net, rate, weak }
+        console.log(`  ${tag} ${d.title.slice(0, 26)} | 공급 ${d.supply.toLocaleString()} → ${MARKET} ${mkt.price.toLocaleString()} = ${net > 0 ? '+' : ''}${net.toLocaleString()} (${rate}%)${MARKET === 'coupang' ? ` | 후기 ${mkt.reviews ?? '?'}` : ''}${weak ? ' ⚠후기부족' : ''}`)
+        const cand = { ...d, coupang: mkt.price, reviews: mkt.reviews ?? null, net, rate, weak, market_source: MARKET }
         rows.push(cand)
         if (net > 0 && !weak) { profitable = true; found++; if (SAVE) await saveCandidate(cand) }
-      } else console.log(`  · ${d.title.slice(0, 30)} | 쿠팡 같은상품 없음`)
+      } else console.log(`  · ${d.title.slice(0, 30)} | ${MARKET} 비교상품 없음`)
       if (SAVE) { await recordChecked(d.no, profitable); await setRunState({ found, screened }) } // 검사완료 기록(재실행 시 건너뜀)
       const willContinue = (TARGET > 0 ? found < TARGET : screened < maxScreen) && i < sellable.length - 1
-      if (willContinue) { const w = SLEEP_MS + Math.floor(Math.random() * 4000); console.log(`     … ${Math.round(w / 1000)}s 대기 (흑자 ${found}${TARGET > 0 ? '/' + TARGET : ''} · ${screened} 스크린)`); await new Promise((r) => setTimeout(r, w)) }
+      if (willContinue) {
+        if (MARKET === 'coupang') { const w = SLEEP_MS + Math.floor(Math.random() * 4000); console.log(`     … ${Math.round(w / 1000)}s 대기 (흑자 ${found}${TARGET > 0 ? '/' + TARGET : ''} · ${screened})`); await new Promise((r) => setTimeout(r, w)) }
+        else { await new Promise((r) => setTimeout(r, 200)) }
+      }
     }
-  } finally { await cp.close(); if (SAVE) await setRunState({ status: 'idle', found, screened, message: `완료: 흑자 ${found}개 / ${screened} 스크린` }) }
+  } finally { if (cp) await cp.close(); if (SAVE) await setRunState({ status: 'idle', found, screened, message: `완료(${MARKET}): 흑자 ${found}개 / ${screened} 스크린` }) }
 
   const clean = rows.filter((r) => r.net > 0 && !r.weak)
   console.log(`\n=== ✅흑자&판매검증 ${clean.length} | ⚠후기부족 ${rows.filter((r) => r.net > 0 && r.weak).length} | ❌적자 ${rows.filter((r) => r.net <= 0).length} | 스크린 ${screened}${SAVE ? ' · DB저장됨' : ''} ===`)

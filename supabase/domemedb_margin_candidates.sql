@@ -7,8 +7,9 @@ create table if not exists jimscanner_domemedb_margin_candidates (
   supply_price int,                 -- 도매매 위탁 공급가
   coupang_price int,                -- 쿠팡 동일상품 판매가
   reviews int,                      -- 쿠팡 후기수(판매검증)
-  est_margin_krw int,               -- 순이익(쿠팡−공급−수수료−물류)
+  est_margin_krw int,               -- 순이익(시장가−공급−수수료−물류)
   est_margin_rate numeric,          -- 순마진율(%)
+  market_source text default 'coupang', -- 시장가 출처: coupang|naver
   page_source text,                 -- new|popular|event
   moq int,
   detail_url text,
