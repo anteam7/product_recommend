@@ -11,6 +11,14 @@
 |---|---|---|---|
 | `Naver-Orders-Sync` | `scripts/local-cron-naver-orders-sync.mjs` | 매시간 07분 | 주문 수집 → `jimscanner_naver_orders` upsert |
 
+### 주문 ↔ 매입 관리 메뉴 (`/admin/naver-orders`, 2026-07-03)
+쿠팡 `/admin/coupang-orders` 미러. 흐름: 주문 자동수집 → 매입상태 **발주완료** 선택 시 **네이버 발주확인 자동 호출**(`POST /v1/pay-order/seller/product-orders/confirm`) → 💳 결제진행(order-server가 쿠팡/네이버 id 자동판별, 유픽·ggsan 주문서 자동작성) → 매입처 주문번호·송장 기록(내부).
+- 발주확인 전 건은 네이버 상태 칸에 **⚠ 발주확인 필요** 배지 (PAYED + placeOrderStatus≠OK)
+- **Vercel IP 함정**: 프로덕션 어드민의 발주확인은 Vercel IP라 GW.IP_NOT_ALLOWED → 브라우저가 로컬 order-server `POST /naver-confirm?id=`(집 PC = 허용 IP)로 자동 폴백. 이 PC에서 어드민을 열어야 발주확인 가능
+- 실수익 = 결제금액 − 매입원가 − **실수수료**(commission_amount) − 부가세(÷11)
+- 네이버 **발송처리 API는 미연동** — 송장은 내부 기록만, 발송처리는 스마트스토어센터에서 (후속 예정)
+- API 라우트: `/api/admin/naver-orders/update` (매입 필드 수정 + ORDERED 전환 시 발주확인 best-effort)
+
 ### 주문 동기화 특이사항
 - **엔드포인트**: `GET /v1/pay-order/seller/product-orders?from=...&to=...`
 - **날짜 포맷**: UTC ISO 8601 (`new Date().toISOString()`) — KST/+09:00 포맷은 400 오류
@@ -18,6 +26,16 @@
 - **백필**: `node --env-file=.env.local scripts/local-cron-naver-orders-sync.mjs --backfill` (31일 × 24h 창)
 - **API 권한**: "주문 판매자" 그룹 (pay-order/seller/* 경로) — seller-channel-orders 경로는 다른 권한 그룹이라 404
 - **Rate limit**: 429 발생 시 창 간 600ms sleep (백필), 일반 300ms
+- **응답 구조 (중첩!)**: `contents[]` = `{ productOrderId, content: { order, productOrder, delivery? } }` — 플랫 필드 아님.
+  주문자/결제일은 `content.order`, 상품명/상태/금액/배송지는 `content.productOrder`(주소 상세는 `detailedAddress`), 송장은 `content.delivery`.
+  `channel_product_no`=`productOrder.productId`, `origin_product_no`=`productOrder.originalProductId`(리스팅 테이블 매칭 키).
+  수수료 = paymentCommission+saleCommission+channelCommission+knowledgeShoppingSellingInterlockCommission (정산예정액 = 결제액 − 이 합)
+
+### 트러블슈팅: `GW.IP_NOT_ALLOWED` (토큰 발급 403)
+- **증상**: sync_runs가 매시간 `error`(수집 0건, ~300ms 즉시 실패), `error_message`에 `네이버 토큰 실패 HTTP 403 ... GW.IP_NOT_ALLOWED`
+- **원인**: 공인 IP 변경 → 커머스API센터 애플리케이션의 허용 IP 목록에서 벗어남 (쿠팡 Wing IP 접근제어와 동일 패턴)
+- **조치**: 현재 공인 IP 확인(`curl https://api.ipify.org`) → [커머스API센터](https://apicenter.commerce.naver.com) > 애플리케이션 관리 > 해당 앱 수정 > 서비스 서버 IP에 추가/교체
+- **이력**: 2026-07-02 03시 이후 IP 변경으로 43회 연속 실패 → 2026-07-03 발견, error_message 기록 로직 추가
 
 ---
 
@@ -141,7 +159,7 @@ node --env-file=.env.local scripts/naver-price-compete.mjs [--limit=N]
 | 테이블 | 역할 | 주요 키 |
 |---|---|---|
 | `jimscanner_naver_listings` | 상품 목록 캐시 | `origin_product_no` |
-| `jimscanner_naver_orders` | 주문 | `product_order_id` (upsert key) |
+| `jimscanner_naver_orders` | 주문 + 매입 추적(purchase_*, supplier_order_no, place_order_status — supabase/naver_orders_purchase.sql) | `product_order_id` (upsert key) |
 | `jimscanner_naver_orders_sync_runs` | 주문 동기화 실행 로그 | - |
 
 ---
@@ -161,3 +179,6 @@ node --env-file=.env.local scripts/naver-price-compete.mjs [--limit=N]
 | 2026-06-14 | 전시카테고리 보완 | 6개 카테고리 | 수동(파트너센터) | 건강즙49/눈뇌11/관절13/유산균9/오메가7/미네랄21 |
 | 2026-06-14 | 태그 재보강 | 352건 | naver-update-tags.mjs --live | 전체 재실행, 업데이트 352/스킵 0/실패 0 |
 | 2026-06-14 | 브랜드명 오류 수정 | 2건 | node 인라인 | 만사형통(송침유 → 만사형통 (13569375264, 13569375257) |
+| 2026-07-03 | 주문 sync IP차단 복구 + 매핑 수정 | - | local-cron-naver-orders-sync.mjs | 7/2~ GW.IP_NOT_ALLOWED 43회 실패→IP 재등록, 중첩 응답구조 매핑 수정, error_message 기록 추가, 첫 실주문 수집 확인 |
+| 2026-07-03 | 주문↔매입 관리 메뉴 신설 | - | /admin/naver-orders | 쿠팡 미러: 발주확인 자동호출·결제진행(id 자동판별)·매입원가/실수익·송장 내부기록, DDL naver_orders_purchase.sql |
+| 2026-07-03 | 쿠팡 판매실적 상품 노출 전환 | 9건 | _naver-expose-suspended.mjs | naver-register-coupang-sold.mjs로 SUSPENSION 등록된 9건 → 전시 ON 전환(GET→PUT), 전건 전시=ON·판매=SALE 검증, DB status_type=SALE 동기화 |

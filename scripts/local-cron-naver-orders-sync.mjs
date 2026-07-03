@@ -31,9 +31,14 @@ const env = Object.fromEntries(
       return [l.slice(0, i).trim(), v]
     }),
 )
+if (!env.NEXT_PUBLIC_SUPABASE_URL || !env.SUPABASE_SERVICE_ROLE_KEY) {
+  console.error('.env.local에 NEXT_PUBLIC_SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY 필요')
+  process.exit(1)
+}
 const sb = createClient(env.NEXT_PUBLIC_SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY)
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 const BACKFILL = process.argv.includes('--backfill')
+let lastError = null
 
 // 한 시간 창 주문 수집 (최대 24h)
 async function fetchWindow(fromDate, toDate) {
@@ -52,7 +57,8 @@ async function fetchWindow(fromDate, toDate) {
       throw new Error(`API 인증 오류 ${r.status}: ${JSON.stringify(r.body).slice(0, 100)}`)
     }
     if (r.status !== 200) {
-      console.error(`  HTTP ${r.status}: ${JSON.stringify(r.body).slice(0, 100)}`)
+      lastError = `HTTP ${r.status}: ${JSON.stringify(r.body).slice(0, 200)}`
+      console.error(`  ${lastError}`)
       break
     }
 
@@ -67,28 +73,36 @@ async function fetchWindow(fromDate, toDate) {
 }
 
 // Supabase upsert
+// 응답 구조: contents[] = { productOrderId, content: { order, productOrder, delivery? } } (중첩)
 async function upsertOrder(o) {
-  const addr = o.shippingAddress
+  const po   = o.content?.productOrder ?? {}
+  const od   = o.content?.order ?? {}
+  const dv   = o.content?.delivery ?? {}
+  const addr = po.shippingAddress
+  // 수수료 = 결제수수료 + 채널/매출연동 수수료 합 (expectedSettlementAmount = 결제액 - 이 합)
+  const commissions = [po.paymentCommission, po.saleCommission, po.channelCommission, po.knowledgeShoppingSellingInterlockCommission]
+    .filter((v) => typeof v === 'number')
   const row = {
-    product_order_id:     String(o.productOrderId ?? o.productOrderNo ?? ''),
-    order_id:             String(o.orderId ?? o.orderNo ?? ''),
-    channel_product_no:   o.channelProductNo ? String(o.channelProductNo) : null,
-    origin_product_no:    o.originProductNo ? Number(o.originProductNo) : null,
-    product_name:         o.productName ?? '',
-    option_name:          o.optionName ?? null,
-    quantity:             o.quantity ?? 1,
-    total_payment_amount: o.totalPaymentAmount ?? null,
-    commission_amount:    o.commissionAmount ?? null,
-    product_order_status: o.productOrderStatus ?? '',
-    payment_date:         o.paymentDate ?? null,
-    order_date:           o.orderDate ?? o.paymentDate ?? new Date().toISOString(),
+    product_order_id:     String(o.productOrderId ?? po.productOrderId ?? ''),
+    order_id:             String(od.orderId ?? o.orderId ?? ''),
+    channel_product_no:   po.productId ? String(po.productId) : null,
+    origin_product_no:    po.originalProductId ? Number(po.originalProductId) : null,
+    product_name:         po.productName ?? '',
+    option_name:          po.productOption ?? null,
+    quantity:             po.quantity ?? 1,
+    total_payment_amount: po.totalPaymentAmount ?? null,
+    commission_amount:    commissions.length ? commissions.reduce((a, b) => a + b, 0) : null,
+    product_order_status: po.productOrderStatus ?? '',
+    place_order_status:   po.placeOrderStatus ?? null,
+    payment_date:         od.paymentDate ?? null,
+    order_date:           od.orderDate ?? od.paymentDate ?? new Date().toISOString(),
     receiver_name:        addr?.name ?? null,
     receiver_phone:       addr?.tel1 ?? null,
-    receiver_address:     addr ? [addr.baseAddress, addr.detailAddress].filter(Boolean).join(' ') : null,
-    delivery_company:     o.deliveryCompany ?? null,
-    tracking_number:      o.trackingNumber ?? null,
-    shipped_at:           o.shippedAt ?? null,
-    delivered_at:         o.deliveredAt ?? null,
+    receiver_address:     addr ? [addr.baseAddress, addr.detailedAddress].filter(Boolean).join(' ') : null,
+    delivery_company:     dv.deliveryCompany ?? null,
+    tracking_number:      dv.trackingNumber ?? null,
+    shipped_at:           dv.sendDate ?? null,
+    delivered_at:         dv.deliveredDate ?? null,
     raw_payload:          o,
     last_synced_at:       new Date().toISOString(),
     updated_at:           new Date().toISOString(),
@@ -145,6 +159,7 @@ for (const [wFrom, wTo] of windows) {
     if (windows.length > 1) await sleep(BACKFILL ? 600 : 200)
   } catch (e) {
     console.error('창 오류:', e.message)
+    lastError = e.message
     errors++
   }
 }
@@ -166,5 +181,6 @@ if (runId) {
     upserted_count: totalUpserted,
     error_count: errors,
     duration_ms: duration,
+    error_message: lastError ? lastError.slice(0, 500) : null,
   }).eq('id', runId)
 }

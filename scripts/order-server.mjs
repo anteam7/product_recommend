@@ -13,6 +13,7 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
 import { createClient } from '@supabase/supabase-js'
+import { naverApi } from './lib/naver-api.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const env = Object.fromEntries(
@@ -28,11 +29,12 @@ const esc = (s) => String(s ?? '').replace(/[<>&"]/g, (c) => ({ '<': '&lt;', '>'
 const SUPPORTED_SOURCES = { ggsan: '건강산', upickb2b: '유픽B2B' }
 
 // 주문 → 매입처(source) + goods_no + 수령인 해석
+// id 자동 판별: 쿠팡 order_id 우선 → 없으면 네이버 product_order_id (체계가 달라 충돌 없음)
 async function resolveOrder(orderId) {
   const { data: o } = await sb.from('jimscanner_coupang_orders')
     .select('order_id, seller_product_id, product_name, option_name, shipping_count, raw_payload, purchase_status')
     .eq('order_id', orderId).single()
-  if (!o) return { error: `주문 #${orderId} 을(를) 찾을 수 없습니다` }
+  if (!o) return resolveNaverOrder(orderId)
   const { data: L } = await sb.from('jimscanner_coupang_listings').select('source, source_goods_no, source_detail_url').eq('seller_product_id', o.seller_product_id).limit(1)
   const src = L?.[0]?.source || 'ggsan' // 구버전 listing은 source 미기록 → ggsan 간주
   if (!SUPPORTED_SOURCES[src]) return { error: `자동주문 미지원 매입처(${src}) — 해당 매입처에서 직접 주문하세요`, order: o }
@@ -42,6 +44,24 @@ async function resolveOrder(orderId) {
   const recipient = { name: rc.name || '', zip: rc.postCode || '', addr1: rc.addr1 || '', addr2: rc.addr2 || '', phone: rc.safeNumber || rc.receiverNumber || '' }
   if (!recipient.name || !recipient.addr1) return { error: '수령인 주소 정보가 부족합니다(raw_payload.receiver)', order: o }
   return { order: o, source: src, sourceLabel: SUPPORTED_SOURCES[src], goodsNo, detailUrl: L?.[0]?.source_detail_url || null, recipient }
+}
+
+// 네이버 주문(product_order_id) 해석 — raw_payload 는 { content: { order, productOrder } } 중첩 구조
+async function resolveNaverOrder(orderId) {
+  const { data: n } = await sb.from('jimscanner_naver_orders')
+    .select('product_order_id, origin_product_no, product_name, option_name, quantity, raw_payload, purchase_status')
+    .eq('product_order_id', String(orderId)).single()
+  if (!n) return { error: `주문 #${orderId} 을(를) 찾을 수 없습니다 (쿠팡·네이버 모두 없음)` }
+  const order = { product_name: n.product_name, option_name: n.option_name, shipping_count: n.quantity ?? 1 }
+  const { data: L } = await sb.from('jimscanner_naver_listings').select('source, source_goods_no').eq('origin_product_no', n.origin_product_no).limit(1)
+  const src = L?.[0]?.source
+  if (!SUPPORTED_SOURCES[src]) return { error: `자동주문 미지원 매입처(${src || '미연결'}) — 해당 매입처에서 직접 주문하세요`, order }
+  const goodsNo = L?.[0]?.source_goods_no
+  if (!goodsNo) return { error: '매입처 미연결 — 이 주문 상품의 listing에 source_goods_no가 없습니다', order }
+  const sa = n.raw_payload?.content?.productOrder?.shippingAddress || {}
+  const recipient = { name: sa.name || '', zip: sa.zipCode || '', addr1: sa.baseAddress || '', addr2: sa.detailedAddress || '', phone: sa.tel1 || '' }
+  if (!recipient.name || !recipient.addr1) return { error: '수령인 주소 정보가 부족합니다(raw_payload.content.productOrder.shippingAddress)', order }
+  return { order, source: src, sourceLabel: SUPPORTED_SOURCES[src], goodsNo, detailUrl: null, recipient }
 }
 
 // 세금계산서 발행용 사업자 정보 (결제진행 자동주문 시 주문서에 입력). 더모어커머스.
@@ -181,6 +201,39 @@ http.createServer(async (req, res) => {
       const cors = { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Methods': 'GET, OPTIONS', 'Access-Control-Allow-Private-Network': 'true' }
       if (req.method === 'OPTIONS') { res.writeHead(204, cors); res.end(); return }
       res.writeHead(200, { 'Content-Type': 'text/plain', ...cors }); res.end('ok'); return
+    }
+    // 네이버 발주확인 — Vercel 어드민의 confirm이 IP 허용목록(GW.IP_NOT_ALLOWED)으로 실패할 때
+    // 브라우저가 이 로컬 헬퍼(집 PC = 허용 IP)로 폴백 호출한다. CORS는 어드민 origin만 허용.
+    if (u.pathname === '/naver-confirm') {
+      const origin = req.headers.origin || ''
+      const allowed = ['https://product-recommend-nine.vercel.app', 'http://localhost:3001', 'http://localhost:3000'].includes(origin)
+      const cors = {
+        'Access-Control-Allow-Origin': allowed ? origin : 'null',
+        'Access-Control-Allow-Methods': 'POST, OPTIONS',
+        'Access-Control-Allow-Headers': 'Content-Type',
+        'Access-Control-Allow-Private-Network': 'true',
+        'Content-Type': 'application/json; charset=utf-8',
+      }
+      if (req.method === 'OPTIONS') { res.writeHead(204, cors); res.end(); return }
+      if (!allowed || req.method !== 'POST') { res.writeHead(403, cors); res.end(JSON.stringify({ ok: false, detail: '허용되지 않은 origin/method' })); return }
+      const id = String(u.searchParams.get('id') || '').trim()
+      if (!/^\d{10,20}$/.test(id)) { res.writeHead(400, cors); res.end(JSON.stringify({ ok: false, detail: 'id 형식 오류' })); return }
+      // DB에 존재하는 우리 주문인지 확인(임의 id 발주확인 방지)
+      const { data: ord } = await sb.from('jimscanner_naver_orders').select('id, product_order_id, place_order_status').eq('product_order_id', id).single()
+      if (!ord) { res.writeHead(404, cors); res.end(JSON.stringify({ ok: false, detail: '주문 없음' })); return }
+      if (ord.place_order_status === 'OK') { res.writeHead(200, cors); res.end(JSON.stringify({ ok: true, detail: '이미 발주확인됨' })); return }
+      const r = await naverApi('POST', '/v1/pay-order/seller/product-orders/confirm', { productOrderIds: [id] })
+      const success = r.body?.data?.successProductOrderIds?.map(String)?.includes(id) ?? false
+      const fail = r.body?.data?.failProductOrderInfos?.find((f) => String(f.productOrderId) === id)
+      const alreadyDone = /이미.{0,10}(발주|확인)|ALREADY/i.test(fail?.message ?? '')
+      if (r.status === 200 && (success || alreadyDone)) {
+        await sb.from('jimscanner_naver_orders').update({ place_order_status: 'OK', updated_at: new Date().toISOString() }).eq('id', ord.id)
+        res.writeHead(200, cors); res.end(JSON.stringify({ ok: true, detail: alreadyDone ? '이미 발주확인됨' : 'OK' }))
+      } else {
+        res.writeHead(502, cors)
+        res.end(JSON.stringify({ ok: false, detail: `HTTP ${r.status} ${fail?.code ?? ''} ${fail?.message ?? JSON.stringify(r.body).slice(0, 150)}` }))
+      }
+      return
     }
     if (u.pathname === '/order') {
       const r = await resolveOrder(u.searchParams.get('id'))

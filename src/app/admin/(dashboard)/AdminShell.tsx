@@ -150,6 +150,18 @@ const NAV_GROUPS: NavGroup[] = [
     ],
   },
   {
+    id: 'naver',
+    label: '네이버 스마트스토어',
+    items: [
+      {
+        href: '/admin/naver-orders',
+        label: '주문 ↔ 매입',
+        icon: '🟢',
+        match: (p) => p.startsWith('/admin/naver-orders'),
+      },
+    ],
+  },
+  {
     id: 'meta',
     label: '메타',
     items: [
