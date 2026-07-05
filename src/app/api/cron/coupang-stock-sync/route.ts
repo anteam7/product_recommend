@@ -101,16 +101,55 @@ async function checkStock(goodsNo: string): Promise<'in_stock' | 'sold_out' | 'u
   return 'unknown'
 }
 
-// ─── 쿠팡 vendor-item 판매 중지/재개 ───
-async function stopCoupangSale(sellerProductId: number) {
-  // 상품 단위 판매 중지: PUT /seller-products/{sellerProductId}/sales/stop
-  const path = `/v2/providers/seller_api/apis/api/v1/marketplace/seller-products/${sellerProductId}/sales/stop`
-  return await coupangApi('PUT', path)
+// ─── 쿠팡 판매 중지/재개 (vendor-item 레벨만 유효 — seller-products/{id}/sales/stop 은 404 미존재 엔드포인트) ───
+async function setVendorSale(sellerProductId: number, action: 'stop' | 'resume') {
+  const d = (await coupangApi('GET', `/v2/providers/seller_api/apis/api/v1/marketplace/seller-products/${sellerProductId}`)).body?.data
+  const items = ((d?.items ?? []) as Array<{ vendorItemId?: number }>).filter((it) => it.vendorItemId)
+  if (!items.length) return { status: 500 }
+  let ok = true
+  for (const it of items) {
+    const r = await coupangApi('PUT', `/v2/providers/seller_api/apis/api/v1/marketplace/vendor-items/${it.vendorItemId}/sales/${action}`)
+    if (r.status !== 200) ok = false
+    await new Promise((s) => setTimeout(s, 150))
+  }
+  return { status: ok ? 200 : 500 }
 }
+async function stopCoupangSale(sellerProductId: number) { return await setVendorSale(sellerProductId, 'stop') }
+async function resumeCoupangSale(sellerProductId: number) { return await setVendorSale(sellerProductId, 'resume') }
 
-async function resumeCoupangSale(sellerProductId: number) {
-  const path = `/v2/providers/seller_api/apis/api/v1/marketplace/seller-products/${sellerProductId}/sales/resume`
-  return await coupangApi('PUT', path)
+// ─── upickb2b 재고 (Cafe24 카테고리 리스트 품절 신호; upickb2b-collect.mjs 패턴) ───
+// checkStock 은 ggsan 전용이라 source='upickb2b' 리스팅은 추적 못 했음. 유픽 상세는 품절 마커가 템플릿에 상존 → 카테고리 리스트 ico_product_soldout 로 판정.
+const UP_BASE = process.env.UPICKB2B_BASE_URL || 'https://upickb2b.com'
+const upCookies = new Map<string, string>()
+function upSetCookies(h: string | null) { if (!h) return; for (const part of h.split(/,(?=[^;]+=)/)) { const kv = part.split(';')[0]; const eq = kv.indexOf('='); if (eq < 0) continue; upCookies.set(kv.slice(0, eq).trim(), kv.slice(eq + 1).trim()) } }
+const upCookieHeader = () => [...upCookies.entries()].map(([k, v]) => `${k}=${v}`).join('; ')
+async function upFetch(url: string, init: RequestInit = {}) { const res = await fetch(url, { redirect: 'manual', ...init, headers: { 'User-Agent': UA, 'Accept-Language': 'ko-KR,ko;q=0.9', Cookie: upCookieHeader(), ...(init.headers || {}) } }); upSetCookies(res.headers.get('set-cookie')); return res }
+async function upickLogin() {
+  const user = process.env.UPICKB2B_USER!, pass = process.env.UPICKB2B_PASS!
+  await upFetch(`${UP_BASE}/member/login.html`)
+  await upFetch(`${UP_BASE}/exec/front/Member/login/`, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded', Referer: `${UP_BASE}/member/login.html` }, body: new URLSearchParams({ member_id: user, member_passwd: pass, returnUrl: '/' }).toString() })
+  if (!upCookies.has('ECSESSID')) throw new Error('upickb2b login failed')
+}
+async function upickBuildStockMap(cates: string[]): Promise<Map<string, 'in_stock' | 'sold_out'>> {
+  const map = new Map<string, 'in_stock' | 'sold_out'>()
+  for (const cate of cates) {
+    const seen = new Set<string>()
+    for (let page = 1; page <= 30; page++) {
+      const r = await upFetch(`${UP_BASE}/category/x/${cate}/?page=${page}`)
+      if (!r.ok) break
+      let html = await r.text()
+      const cut = html.search(/class="[^"]*ec-base-paginate/); if (cut > 0) html = html.slice(0, cut)
+      let fresh = 0
+      for (const b of html.matchAll(/id=["']anchorBoxId_(\d+)["']([\s\S]*?)(?=id=["']anchorBoxId_|$)/g)) {
+        if (seen.has(b[1])) continue
+        seen.add(b[1]); fresh++
+        map.set(b[1], /ico_product_soldout|alt=["']품절["']/i.test(b[2]) ? 'sold_out' : 'in_stock')
+      }
+      if (!fresh) break
+      await new Promise((s) => setTimeout(s, 250))
+    }
+  }
+  return map
 }
 
 // ─── 메인 핸들러 ───
@@ -184,11 +223,12 @@ export async function GET(req: NextRequest) {
     // 활성 등록 상품 — 재고 추적 대상 (APPROVED, SELLING)
     const { data: listings } = await sb
       .from('jimscanner_coupang_listings')
-      .select('id, seller_product_id, source_goods_no, stock_status, auto_paused')
+      .select('id, seller_product_id, source, source_goods_no, stock_status, auto_paused')
       .in('status', ['APPROVED', 'SELLING'])
     const rows = (listings ?? []) as unknown as Array<{
       id: string
       seller_product_id: number | null
+      source: string
       source_goods_no: string
       stock_status: string | null
       auto_paused: boolean | null
@@ -206,10 +246,26 @@ export async function GET(req: NextRequest) {
 
     await ggsanLogin()
 
+    // upick 재고맵: source='upickb2b' 리스팅이 있을 때만 카테고리 품절 스캔(로그인 실패/미설정 시 유픽 skip)
+    let upickStock = new Map<string, 'in_stock' | 'sold_out'>()
+    const upickRows = rows.filter((r) => r.source === 'upickb2b' && r.source_goods_no)
+    if (upickRows.length && process.env.UPICKB2B_USER) {
+      try {
+        const upNos = [...new Set(upickRows.map((r) => String(r.source_goods_no)))]
+        const { data: catRows } = await sb.from('jimscanner_upickb2b_products').select('cate_no').in('product_no', upNos)
+        const cates = [...new Set(((catRows ?? []) as Array<{ cate_no: string | null }>).map((r) => String(r.cate_no)).filter(Boolean))]
+        await upickLogin()
+        upickStock = await upickBuildStockMap(cates.length ? cates : ['24', '25', '92'])
+      } catch (e) { console.log(`upick 스캔 실패(유픽 추적 skip): ${e instanceof Error ? e.message : e}`) }
+    }
+
     for (const row of rows) {
       total++
       try {
-        const status = await checkStock(row.source_goods_no)
+        // ggsan 은 goods_view 라이브 조회, upickb2b 는 재고맵 룩업(미발견 unknown=조치 안 함)
+        const status: 'in_stock' | 'sold_out' | 'unknown' = row.source === 'upickb2b'
+          ? (upickStock.get(String(row.source_goods_no)) ?? 'unknown')
+          : await checkStock(row.source_goods_no)
         const wasPaused = !!row.auto_paused
 
         const updates: Record<string, unknown> = {
