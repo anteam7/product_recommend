@@ -36,7 +36,8 @@ interface OrderRow {
   purchase_total_cost: number | null
   supplier_order_no: string | null
   raw_payload?: { content?: { productOrder?: { shippingAddress?: { zipCode?: string } } } } | null
-  // 조인: 매입처 바로가기 (listings.source: upickb2b | ggsan | manual)
+  // 매입처 바로가기 — 주문별 오버라이드 컬럼(supplier_source/supplier_goods_no, 둘 다 있을 때만) 우선,
+  // 없으면 listings 조인 (listings.source: upickb2b | ggsan | manual)
   supplier_source?: string | null
   supplier_goods_no?: string | null
   supplier_url?: string | null
@@ -93,8 +94,9 @@ function periodCutoff(days: number): string | null {
 
 function supplierUrl(source: string | null, goodsNo: string | null): string | null {
   if (!source || !goodsNo) return null
-  if (source === 'ggsan') return `https://www.ggsan.com/goods/goods_view.php?goodsNo=${goodsNo}`
-  if (source === 'upickb2b') return `https://upickb2b.com/product/x/${goodsNo}/category/1/display/1/`
+  const g = encodeURIComponent(goodsNo)
+  if (source === 'ggsan') return `https://www.ggsan.com/goods/goods_view.php?goodsNo=${g}`
+  if (source === 'upickb2b') return `https://upickb2b.com/product/x/${g}/category/1/display/1/`
   return null
 }
 
@@ -127,23 +129,27 @@ async function fetchData(opts: {
   const { data, count } = await query
   const rows = (data ?? []) as unknown as OrderRow[]
 
-  // 매입처 바로가기: listings에서 source / source_goods_no 조인 (origin_product_no 매칭)
+  // 매입처 바로가기: 주문별 오버라이드(supplier_* 둘 다 존재) 우선, 없으면 listings 조인 (origin_product_no 매칭)
   const opnos = [...new Set(rows.map((r) => r.origin_product_no).filter(Boolean))] as number[]
+  const lmap = new Map<number, { source: string | null; source_goods_no: string | null }>()
   if (opnos.length > 0) {
-    const { data: listings } = await sb
+    const { data: listings, error: lerr } = await sb
       .from('jimscanner_naver_listings')
       .select('origin_product_no, source, source_goods_no')
       .in('origin_product_no', opnos)
-    const lmap = new Map<number, { source: string | null; source_goods_no: string | null }>(
-      ((listings ?? []) as unknown as Array<{ origin_product_no: number; source: string | null; source_goods_no: string | null }>)
-        .map((l) => [l.origin_product_no, l]),
-    )
-    for (const r of rows) {
+    if (lerr) console.error('[naver-orders] listings 조인 실패 — 매입처 바로가기 생략:', lerr.message)
+    for (const l of (listings ?? []) as unknown as Array<{ origin_product_no: number; source: string | null; source_goods_no: string | null }>) {
+      lmap.set(l.origin_product_no, l)
+    }
+  }
+  for (const r of rows) {
+    // null·빈 문자열 = 오버라이드 없음 → listings 폴백 (둘 다 채워진 경우에만 주문별 값 사용)
+    if (!r.supplier_source || !r.supplier_goods_no) {
       const l = r.origin_product_no ? lmap.get(r.origin_product_no) : undefined
       r.supplier_source = l?.source ?? null
       r.supplier_goods_no = l?.source_goods_no ?? null
-      r.supplier_url = supplierUrl(l?.source ?? null, l?.source_goods_no ?? null)
     }
+    r.supplier_url = supplierUrl(r.supplier_source ?? null, r.supplier_goods_no ?? null)
   }
   // 우편번호: raw_payload 중첩 구조에서 가공 (결제진행/표시용)
   for (const r of rows) {

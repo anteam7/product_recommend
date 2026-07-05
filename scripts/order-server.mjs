@@ -49,14 +49,21 @@ async function resolveOrder(orderId) {
 // 네이버 주문(product_order_id) 해석 — raw_payload 는 { content: { order, productOrder } } 중첩 구조
 async function resolveNaverOrder(orderId) {
   const { data: n } = await sb.from('jimscanner_naver_orders')
-    .select('product_order_id, origin_product_no, product_name, option_name, quantity, raw_payload, purchase_status')
+    .select('product_order_id, origin_product_no, product_name, option_name, quantity, raw_payload, purchase_status, supplier_source, supplier_goods_no')
     .eq('product_order_id', String(orderId)).single()
   if (!n) return { error: `주문 #${orderId} 을(를) 찾을 수 없습니다 (쿠팡·네이버 모두 없음)` }
   const order = { product_name: n.product_name, option_name: n.option_name, shipping_count: n.quantity ?? 1 }
-  const { data: L } = await sb.from('jimscanner_naver_listings').select('source, source_goods_no').eq('origin_product_no', n.origin_product_no).limit(1)
-  const src = L?.[0]?.source
+  // 주문별 매입처 오버라이드(둘 다 존재 시) 우선 — "이 주문에 한해서" 매입처 변경 지원. 없으면 listing 매칭 폴백
+  let src = null, goodsNo = null
+  if (n.supplier_source && n.supplier_goods_no) {
+    src = n.supplier_source
+    goodsNo = n.supplier_goods_no
+  } else {
+    const { data: L } = await sb.from('jimscanner_naver_listings').select('source, source_goods_no').eq('origin_product_no', n.origin_product_no).limit(1)
+    src = L?.[0]?.source
+    goodsNo = L?.[0]?.source_goods_no
+  }
   if (!SUPPORTED_SOURCES[src]) return { error: `자동주문 미지원 매입처(${src || '미연결'}) — 해당 매입처에서 직접 주문하세요`, order }
-  const goodsNo = L?.[0]?.source_goods_no
   if (!goodsNo) return { error: '매입처 미연결 — 이 주문 상품의 listing에 source_goods_no가 없습니다', order }
   const sa = n.raw_payload?.content?.productOrder?.shippingAddress || {}
   const recipient = { name: sa.name || '', zip: sa.zipCode || '', addr1: sa.baseAddress || '', addr2: sa.detailedAddress || '', phone: sa.tel1 || '' }
