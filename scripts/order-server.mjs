@@ -172,8 +172,12 @@ async function runFlowGgsan(goodsNo, qty, recipient, full = null) {
   // 무통장입금이라 [결제하기] = 주문 생성(입금대기)일 뿐 출금 없음. 입금은 사장님이 직접.
   await op.evaluate(() => { const c = document.querySelector('#termAgree_orderCheck'); if (c && !c.checked) c.click() })
   const total = await op.evaluate(() => {
+    // 1순위: godomall 내부 정산가 hidden(가장 견고) — 프로브로 확인(settlePrice=상품+배송)
+    const hid = document.querySelector('input[name=settlePrice]')
+    if (hid && /^\d+$/.test(hid.value) && +hid.value > 0) return +hid.value
+    // 2순위: 본문 표기 — ggsan은 "최종 결제 금액 17,000원" 형식
     const text = document.body.innerText
-    for (const re of [/총\s*결제\s*금액[^0-9]{0,30}([\d,]{4,})\s*원/, /결제\s*예정\s*금액[^0-9]{0,30}([\d,]{4,})\s*원/, /총\s*주문\s*금액[^0-9]{0,30}([\d,]{4,})\s*원/]) {
+    for (const re of [/최종\s*결제\s*금액[^0-9]{0,40}([\d,]{4,})\s*원/, /총\s*결제\s*금액[^0-9]{0,40}([\d,]{4,})\s*원/, /합\s*계[^0-9]{0,40}([\d,]{4,})\s*원/]) {
       const m = re.exec(text)
       if (m) return parseInt(m[1].replace(/,/g, ''))
     }
