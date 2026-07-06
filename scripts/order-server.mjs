@@ -114,6 +114,8 @@ function guardFail(kind, total, maxPay) {
 // Playwright: ggsan 주문서 자동 작성 → 결제 직전 정지 (브라우저 열어둠) / full 지정 시 무통장 결제 완주
 async function runFlowGgsan(goodsNo, qty, recipient, full = null) {
   const { ctx, page } = await openBrowser()
+  if (full) full.ctxRef = ctx   // 원격 잡이 완료 후 브라우저를 닫을 수 있게
+
   // 1) 로그인
   await page.goto(`${BASE}/member/login.php`, { waitUntil: 'domcontentloaded', timeout: 30000 })
   await page.fill('input[name=loginId]', env.GGSAN_USER)
@@ -201,6 +203,8 @@ const UPICK_BASE = env.UPICKB2B_BASE_URL || 'https://upickb2b.com'
 async function runFlowUpick(goodsNo, qty, recipient, detailUrl, full = null) {
   // "동일상품이 장바구니에 N개 있습니다. 함께 구매하시겠습니까?" → 취소(현재 선택 수량만) — 수락하면 잔여 장바구니가 합산됨
   const { ctx, page } = await openBrowser((d) => (/함께 구매/.test(d.message()) ? d.dismiss() : d.accept()))
+  if (full) full.ctxRef = ctx   // 원격 잡이 완료 후 브라우저를 닫을 수 있게
+
   // 1) 로그인 (Cafe24: member_id / member_passwd)
   await page.goto(`${UPICK_BASE}/member/login.html`, { waitUntil: 'domcontentloaded', timeout: 30000 })
   await page.fill('input[name=member_id]', env.UPICKB2B_USER)
@@ -294,6 +298,66 @@ async function runFlowUpick(goodsNo, qty, recipient, detailUrl, full = null) {
   return { ok: true, done: true, orderNo, total, msg: `무통장 주문 완료 — 주문번호 ${orderNo ?? '(파싱 실패, 창에서 확인)'} · 총액 ${total.toLocaleString()}원 · 입금대기` }
 }
 
+// ── 결제진행 실행(공용) — /run 핸들러와 원격 큐 폴러가 같이 쓴다 ──
+// fullMode=true: 무통장 완주 + 입금대기·주문번호·매입가 DB 기록. false: 직전 정지.
+async function execPurchase(orderKey, fullMode) {
+  const r = await resolveOrder(orderKey)
+  if (r.error) return { ok: false, msg: r.error }
+  let full = null
+  if (fullMode) {
+    // 금액 가드 상한 — 고객결제액·예상공급가 중 큰 쪽 기준(둘 다 없으면 완주 거부)
+    const cands = []
+    if (r.paidAmount > 0) cands.push(r.paidAmount * 1.25 + 3000)
+    if (r.domeCost > 0) cands.push(r.domeCost * 1.35 + 8000)
+    const maxPay = cands.length ? Math.min(Math.max(...cands), 1000000) : null
+    if (!maxPay) return { ok: false, msg: '금액 가드 기준 없음(고객 결제액·공급가 미상) — 완주 불가. 직전 정지 모드로 진행 후 직접 결제하세요' }
+    full = { maxPay }
+  }
+  const out = r.source === 'upickb2b'
+    ? await runFlowUpick(r.goodsNo, r.order.shipping_count, r.recipient, r.detailUrl, full)
+    : await runFlowGgsan(r.goodsNo, r.order.shipping_count, r.recipient, full)
+  out.sourceLabel = r.sourceLabel
+  out.ctxRef = full?.ctxRef ?? null   // 원격 잡이 완료 후 브라우저를 닫을 수 있게 노출
+  // 완주 성공 → 주문상태=입금대기 + 매입처 주문번호·매입가 자동 기록
+  if (out.ok && out.done) {
+    const now = new Date().toISOString()
+    const upd = { purchase_status: 'AWAITING_DEPOSIT', purchase_ordered_at: now, updated_at: now }
+    if (out.total > 0) upd.purchase_total_cost = out.total
+    if (r.kind === 'naver') {
+      if (out.orderNo) upd.supplier_order_no = out.orderNo
+      const { error } = await sb.from('jimscanner_naver_orders').update(upd).eq('product_order_id', r.dbKey)
+      if (error) out.msg += ` (⚠ DB 기록 실패: ${error.message} — 관리자에서 수동 입력)`
+    } else {
+      if (out.orderNo) upd.ggsan_order_no = out.orderNo
+      const { error } = await sb.from('jimscanner_coupang_orders').update(upd).eq('order_id', r.dbKey)
+      if (error) out.msg += ` (⚠ DB 기록 실패: ${error.message} — 관리자에서 수동 입력)`
+    }
+  }
+  return out
+}
+
+// ── 원격 결제진행 큐 폴러 — Vercel 어드민(모바일 등)에서 등록한 잡을 이 PC가 집어 실행 ──
+// 직렬 처리(jobBusy). 서버가 죽어 running에 고착된 잡은 새 잡으로 다시 등록하면 됨.
+let jobBusy = false
+setInterval(async () => {
+  if (jobBusy) return
+  jobBusy = true
+  try {
+    const { data: jobs } = await sb.from('jimscanner_purchase_jobs').select('id, order_key, mode').eq('status', 'queued').order('id', { ascending: true }).limit(1)
+    const job = jobs?.[0]
+    if (!job) return
+    await sb.from('jimscanner_purchase_jobs').update({ status: 'running', started_at: new Date().toISOString() }).eq('id', job.id)
+    console.log(`[job ${job.id}] 원격 결제진행 시작 — 주문 ${job.order_key} (${job.mode})`)
+    const out = await execPurchase(job.order_key, job.mode !== 'stage')
+    // 완주 성공한 원격 잡은 브라우저를 닫는다(무인 PC 창 누적 방지). 실패/정지는 열어둬 귀가 후 확인.
+    if (out.ok && out.done && out.ctxRef) { try { await out.ctxRef.browser()?.close() } catch { /* noop */ } }
+    await sb.from('jimscanner_purchase_jobs').update({
+      status: out.ok ? 'done' : 'error', result_msg: out.msg, order_no: out.orderNo ?? null, finished_at: new Date().toISOString(),
+    }).eq('id', job.id)
+    console.log(`[job ${job.id}] ${out.ok ? '완료' : '실패'}: ${out.msg}`)
+  } catch (e) { console.error('[job-poller]', e instanceof Error ? e.message : e) } finally { jobBusy = false }
+}, 4000)
+
 const htmlPage = (res, body) => { res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }); res.end(`<!doctype html><html lang=ko><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><body style="font-family:system-ui,sans-serif;max-width:620px;margin:48px auto;padding:0 18px;line-height:1.6;color:#111">${body}</body></html>`) }
 
 http.createServer(async (req, res) => {
@@ -356,41 +420,12 @@ http.createServer(async (req, res) => {
       return
     }
     if (u.pathname === '/run') {
-      const r = await resolveOrder(u.searchParams.get('id'))
-      if (r.error) { htmlPage(res, `<h2>⚠ ${esc(r.error)}</h2>`); return }
-      // 완주 모드: 금액 가드 상한 산출 — 고객결제액·예상공급가 중 큰 쪽 기준(둘 다 없으면 완주 거부)
-      let full = null
-      if (u.searchParams.get('mode') === 'full') {
-        const cands = []
-        if (r.paidAmount > 0) cands.push(r.paidAmount * 1.25 + 3000)
-        if (r.domeCost > 0) cands.push(r.domeCost * 1.35 + 8000)
-        const maxPay = cands.length ? Math.min(Math.max(...cands), 1000000) : null
-        if (!maxPay) { htmlPage(res, `<h2>⚠ 금액 가드 기준 없음</h2><p>고객 결제액·공급가 정보가 없어 완주할 수 없습니다. <a href="/run?id=${esc(u.searchParams.get('id'))}">결제 직전까지만</a> 진행 후 직접 결제하세요.</p>`); return }
-        full = { maxPay }
-      }
-      const out = r.source === 'upickb2b'
-        ? await runFlowUpick(r.goodsNo, r.order.shipping_count, r.recipient, r.detailUrl, full)
-        : await runFlowGgsan(r.goodsNo, r.order.shipping_count, r.recipient, full)
-      // 완주 성공 → 주문상태=입금대기 + 매입처 주문번호·매입가 자동 기록
-      if (out.ok && out.done) {
-        const now = new Date().toISOString()
-        const upd = { purchase_status: 'AWAITING_DEPOSIT', purchase_ordered_at: now, updated_at: now }
-        if (out.total > 0) upd.purchase_total_cost = out.total
-        if (r.kind === 'naver') {
-          if (out.orderNo) upd.supplier_order_no = out.orderNo
-          const { error } = await sb.from('jimscanner_naver_orders').update(upd).eq('product_order_id', r.dbKey)
-          if (error) out.msg += ` (⚠ DB 기록 실패: ${error.message} — 관리자에서 수동 입력)`
-        } else {
-          if (out.orderNo) upd.ggsan_order_no = out.orderNo
-          const { error } = await sb.from('jimscanner_coupang_orders').update(upd).eq('order_id', r.dbKey)
-          if (error) out.msg += ` (⚠ DB 기록 실패: ${error.message} — 관리자에서 수동 입력)`
-        }
-      }
+      const out = await execPurchase(u.searchParams.get('id'), u.searchParams.get('mode') === 'full')
       htmlPage(res, out.ok
         ? (out.done
           ? `<h2>✓ ${esc(out.msg)}</h2><p style="background:#fef3c7;color:#92400e;padding:10px 12px;border-radius:8px">💰 관리자 주문상태가 <b>입금대기</b>로 기록됐습니다. <b>${esc(GGSAN_DEPOSIT.bankKeyword)} 계좌로 이체</b>한 뒤 관리자에서 <b>[입금완료]</b>를 눌러주세요.</p>`
-          : `<h2>✓ ${esc(out.msg)}</h2><p>열린 ${esc(r.sourceLabel)} 창으로 가서 결제를 마치세요. 이 탭은 닫으셔도 됩니다.</p>`)
-        : `<h2>✗ ${esc(out.msg)}</h2><p>다시 시도하거나 ${esc(r.sourceLabel)}에서 직접 주문하세요.</p>`)
+          : `<h2>✓ ${esc(out.msg)}</h2><p>열린 ${esc(out.sourceLabel ?? '매입처')} 창으로 가서 결제를 마치세요. 이 탭은 닫으셔도 됩니다.</p>`)
+        : `<h2>✗ ${esc(out.msg)}</h2><p>다시 시도하거나 매입처에서 직접 주문하세요.</p>`)
       return
     }
     htmlPage(res, `<h2>주문 자동화 헬퍼 가동 중</h2><p>관리자 페이지의 <b>결제진행</b> 버튼으로 호출됩니다. (포트 ${PORT})</p>`)
