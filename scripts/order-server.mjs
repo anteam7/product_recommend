@@ -248,6 +248,13 @@ async function runFlowUpick(goodsNo, qty, recipient, detailUrl, full = null) {
     set('#tax_request_zipcode', biz.zip); set('#tax_request_address1', biz.addr1); set('#tax_request_address2', biz.addr2)
     set('#tax_request_name', biz.ceo)
   }, BIZ_INFO)
+  // 주문자 휴대전화 → 업무 연락처로 교체 (.env.local ORDER_CONTACT_PHONE, 2026-07-06 사용자 지정)
+  if (env.ORDER_CONTACT_PHONE) {
+    await op.evaluate((ph) => {
+      const el = document.querySelector('#ophone1_, input[name=ophone1_], input[name=ophone1]')
+      if (el) { el.removeAttribute('readonly'); el.value = ph; el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })) }
+    }, env.ORDER_CONTACT_PHONE.replace(/^(\d{3})(\d{3,4})(\d{4})$/, '$1-$2-$3'))
+  }
   await op.bringToFront().catch(() => {})
   if (!full) return { ok: true, msg: '주문서 작성 완료 — 열린 U-PICK 창에서 금액·배송지·결제수단 확인 후 [결제하기]를 직접 누르세요' }
 
