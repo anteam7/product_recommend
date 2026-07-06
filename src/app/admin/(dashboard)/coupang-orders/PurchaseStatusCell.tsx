@@ -3,9 +3,10 @@
 import { useState } from 'react'
 import { useRouter } from 'next/navigation'
 
-// 드롭십(ggsan 직배송) 흐름: 미발주 → 발주완료 → 매입처발송 → 발송완료(쿠팡 등록) → 취소
+// 드롭십(ggsan 직배송) 흐름: 미발주 → 입금대기(결제완주·무통장) → 발주완료(입금완료) → 매입처발송 → 발송완료(쿠팡 등록) → 취소
 const STATUS_OPTIONS = [
   { v: 'PENDING', label: '미발주' },
+  { v: 'AWAITING_DEPOSIT', label: '💰 입금대기' },
   { v: 'ORDERED', label: '발주완료' },
   { v: 'SHIPPED', label: '매입처발송' },
   { v: 'RECEIVED', label: '발송완료' },
@@ -14,6 +15,7 @@ const STATUS_OPTIONS = [
 
 const STATUS_CLS: Record<string, string> = {
   PENDING: 'bg-rose-100 text-rose-700',
+  AWAITING_DEPOSIT: 'bg-orange-100 text-orange-700',
   ORDERED: 'bg-amber-100 text-amber-700',
   SHIPPED: 'bg-sky-100 text-sky-700',
   RECEIVED: 'bg-emerald-100 text-emerald-700',
@@ -40,8 +42,8 @@ export function PurchaseStatusCell({ id, status, orderedAt, ggsanOrderNo }: Prop
   const [noErr, setNoErr] = useState<string | null>(null)
   const [noOk, setNoOk] = useState(false)
 
-  // ggsan 주문번호 입력란은 발주완료/매입처발송 단계에서만 노출(추적 린치핀)
-  const showOrderNo = status === 'ORDERED' || status === 'SHIPPED'
+  // ggsan 주문번호 입력란은 입금대기/발주완료/매입처발송 단계에서 노출(추적 린치핀 — 결제완주 시 자동 기록됨)
+  const showOrderNo = status === 'AWAITING_DEPOSIT' || status === 'ORDERED' || status === 'SHIPPED'
 
   async function change(next: string) {
     setSaving(true); setErr(null)
@@ -88,6 +90,17 @@ export function PurchaseStatusCell({ id, status, orderedAt, ggsanOrderNo }: Prop
           <option key={o.v} value={o.v}>{o.label}</option>
         ))}
       </select>
+      {status === 'AWAITING_DEPOSIT' && (
+        <button
+          type="button"
+          disabled={saving}
+          onClick={() => change('ORDERED')}
+          className="px-2 py-0.5 rounded bg-emerald-600 text-white text-[11px] font-semibold hover:bg-emerald-700 disabled:opacity-60"
+          title="매입처 계좌로 이체를 마쳤으면 눌러주세요 — 발주완료로 전환됩니다"
+        >
+          ✓ 입금완료
+        </button>
+      )}
       {orderedAt && <div className="text-[10px] text-gray-400">{fmtDate(orderedAt)}</div>}
       {err && <span className="text-[10px] text-rose-600">{err}</span>}
 

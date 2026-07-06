@@ -32,10 +32,10 @@ const SUPPORTED_SOURCES = { ggsan: '건강산', upickb2b: '유픽B2B' }
 // id 자동 판별: 쿠팡 order_id 우선 → 없으면 네이버 product_order_id (체계가 달라 충돌 없음)
 async function resolveOrder(orderId) {
   const { data: o } = await sb.from('jimscanner_coupang_orders')
-    .select('order_id, seller_product_id, product_name, option_name, shipping_count, raw_payload, purchase_status')
+    .select('order_id, seller_product_id, product_name, option_name, shipping_count, raw_payload, purchase_status, paid_amount, order_price')
     .eq('order_id', orderId).single()
   if (!o) return resolveNaverOrder(orderId)
-  const { data: L } = await sb.from('jimscanner_coupang_listings').select('source, source_goods_no, source_detail_url').eq('seller_product_id', o.seller_product_id).limit(1)
+  const { data: L } = await sb.from('jimscanner_coupang_listings').select('source, source_goods_no, source_detail_url, dome_price_krw').eq('seller_product_id', o.seller_product_id).limit(1)
   const src = L?.[0]?.source || 'ggsan' // 구버전 listing은 source 미기록 → ggsan 간주
   if (!SUPPORTED_SOURCES[src]) return { error: `자동주문 미지원 매입처(${src}) — 해당 매입처에서 직접 주문하세요`, order: o }
   const goodsNo = L?.[0]?.source_goods_no
@@ -43,13 +43,19 @@ async function resolveOrder(orderId) {
   const rc = o.raw_payload?.receiver || {}
   const recipient = { name: rc.name || '', zip: rc.postCode || '', addr1: rc.addr1 || '', addr2: rc.addr2 || '', phone: rc.safeNumber || rc.receiverNumber || '' }
   if (!recipient.name || !recipient.addr1) return { error: '수령인 주소 정보가 부족합니다(raw_payload.receiver)', order: o }
-  return { order: o, source: src, sourceLabel: SUPPORTED_SOURCES[src], goodsNo, detailUrl: L?.[0]?.source_detail_url || null, recipient }
+  const qty = o.shipping_count || 1
+  return {
+    order: o, source: src, sourceLabel: SUPPORTED_SOURCES[src], goodsNo, detailUrl: L?.[0]?.source_detail_url || null, recipient,
+    kind: 'coupang', dbKey: o.order_id,
+    paidAmount: o.paid_amount ?? o.order_price ?? null,                       // 고객 결제액(금액 가드 기준)
+    domeCost: L?.[0]?.dome_price_krw ? L[0].dome_price_krw * qty : null,      // 예상 공급가 합
+  }
 }
 
 // 네이버 주문(product_order_id) 해석 — raw_payload 는 { content: { order, productOrder } } 중첩 구조
 async function resolveNaverOrder(orderId) {
   const { data: n } = await sb.from('jimscanner_naver_orders')
-    .select('product_order_id, origin_product_no, product_name, option_name, quantity, raw_payload, purchase_status, supplier_source, supplier_goods_no')
+    .select('product_order_id, origin_product_no, product_name, option_name, quantity, raw_payload, purchase_status, supplier_source, supplier_goods_no, total_payment_amount')
     .eq('product_order_id', String(orderId)).single()
   if (!n) return { error: `주문 #${orderId} 을(를) 찾을 수 없습니다 (쿠팡·네이버 모두 없음)` }
   const order = { product_name: n.product_name, option_name: n.option_name, shipping_count: n.quantity ?? 1 }
@@ -68,7 +74,11 @@ async function resolveNaverOrder(orderId) {
   const sa = n.raw_payload?.content?.productOrder?.shippingAddress || {}
   const recipient = { name: sa.name || '', zip: sa.zipCode || '', addr1: sa.baseAddress || '', addr2: sa.detailedAddress || '', phone: sa.tel1 || '' }
   if (!recipient.name || !recipient.addr1) return { error: '수령인 주소 정보가 부족합니다(raw_payload.content.productOrder.shippingAddress)', order }
-  return { order, source: src, sourceLabel: SUPPORTED_SOURCES[src], goodsNo, detailUrl: null, recipient }
+  return {
+    order, source: src, sourceLabel: SUPPORTED_SOURCES[src], goodsNo, detailUrl: null, recipient,
+    kind: 'naver', dbKey: n.product_order_id,
+    paidAmount: n.total_payment_amount ?? null, domeCost: null,
+  }
 }
 
 // 세금계산서 발행용 사업자 정보 (결제진행 자동주문 시 주문서에 입력). 더모어커머스.
@@ -94,8 +104,15 @@ async function openBrowser(onDialog) {
   return { ctx, page }
 }
 
-// Playwright: ggsan 주문서 자동 작성 → 결제 직전 정지 (브라우저 열어둠)
-async function runFlowGgsan(goodsNo, qty, recipient) {
+// 완주 모드 공통: 총액 파싱 실패/금액 가드 초과 시 중단(브라우저 열어둠 = 기존 정지 동작으로 폴백)
+function guardFail(kind, total, maxPay) {
+  if (total == null) return `총 결제금액 파싱 실패 — 완주 중단. 열린 ${kind} 창에서 금액 확인 후 직접 결제하세요`
+  if (total > maxPay) return `금액 가드 발동: 주문서 총액 ${total.toLocaleString()}원 > 허용 상한 ${Math.round(maxPay).toLocaleString()}원 — 완주 중단(장바구니 합산/수량 이상 여부를 열린 창에서 확인)`
+  return null
+}
+
+// Playwright: ggsan 주문서 자동 작성 → 결제 직전 정지 (브라우저 열어둠) / full 지정 시 무통장 결제 완주
+async function runFlowGgsan(goodsNo, qty, recipient, full = null) {
   const { ctx, page } = await openBrowser()
   // 1) 로그인
   await page.goto(`${BASE}/member/login.php`, { waitUntil: 'domcontentloaded', timeout: 30000 })
@@ -144,14 +161,44 @@ async function runFlowGgsan(goodsNo, qty, recipient) {
     }
   }, { rcp: recipient, biz: BIZ_INFO, dep: GGSAN_DEPOSIT })
   await op.bringToFront().catch(() => {})
-  // 브라우저는 닫지 않는다 — 사장님이 금액 확인 후 결제하기
-  return { ok: true, msg: '주문서 작성 완료 — 열린 ggsan 창에서 금액·배송지 확인 후 [결제하기]를 직접 누르세요' }
+  if (!full) {
+    // 브라우저는 닫지 않는다 — 사장님이 금액 확인 후 결제하기
+    return { ok: true, msg: '주문서 작성 완료 — 열린 ggsan 창에서 금액·배송지 확인 후 [결제하기]를 직접 누르세요' }
+  }
+
+  // ── 완주(무통장): 동의 체크 → 금액 가드 → 결제하기 → 완료페이지 주문번호 파싱 ──
+  // 무통장입금이라 [결제하기] = 주문 생성(입금대기)일 뿐 출금 없음. 입금은 사장님이 직접.
+  await op.evaluate(() => { const c = document.querySelector('#termAgree_orderCheck'); if (c && !c.checked) c.click() })
+  const total = await op.evaluate(() => {
+    const text = document.body.innerText
+    for (const re of [/총\s*결제\s*금액[^0-9]{0,30}([\d,]{4,})\s*원/, /결제\s*예정\s*금액[^0-9]{0,30}([\d,]{4,})\s*원/, /총\s*주문\s*금액[^0-9]{0,30}([\d,]{4,})\s*원/]) {
+      const m = re.exec(text)
+      if (m) return parseInt(m[1].replace(/,/g, ''))
+    }
+    return null
+  }).catch(() => null)
+  const g = guardFail('ggsan', total, full.maxPay)
+  if (g) return { ok: false, msg: g }
+  // 결제수단이 무통장(gb)으로 선택돼 있을 때만 클릭 (카드/PG 자동결제 금지)
+  const isCash = await op.evaluate(() => document.querySelector('input[name=settleKind][value="gb"]')?.checked === true)
+  if (!isCash) return { ok: false, msg: '결제수단이 무통장입금이 아님 — 완주 중단(열린 창에서 직접 진행)' }
+  await op.evaluate(() => { const b = document.querySelector('button.btn_order_buy'); if (b) { b.scrollIntoView({ block: 'center' }); b.click() } })
+  const done = await op.waitForURL(/order_end|orderEnd/i, { timeout: 45000 }).then(() => true).catch(() => false)
+  await op.waitForTimeout(1500)
+  const orderNo = await op.evaluate(() => {
+    const q = new URL(location.href).searchParams.get('orderNo') || new URL(location.href).searchParams.get('ordNo')
+    if (q) return q
+    const m = /주문\s*번호[^\d]{0,12}(\d{8,20})/.exec(document.body.innerText)
+    return m ? m[1] : null
+  }).catch(() => null)
+  if (!done && !orderNo) return { ok: false, msg: '결제하기 이후 완료 페이지 확인 실패 — 열린 ggsan 창에서 주문 상태를 직접 확인하세요' }
+  return { ok: true, done: true, orderNo, total, msg: `무통장 주문 완료 — 주문번호 ${orderNo ?? '(파싱 실패, 창에서 확인)'} · 총액 ${total.toLocaleString()}원 · 입금대기` }
 }
 
 // Playwright: upickb2b(Cafe24) 주문서 자동 작성 → 결제 직전 정지 (브라우저 열어둠)
 // 필드 구조는 scripts/_upick-order-probe.mjs 정찰 결과 기준 (Cafe24 표준 orderform)
 const UPICK_BASE = env.UPICKB2B_BASE_URL || 'https://upickb2b.com'
-async function runFlowUpick(goodsNo, qty, recipient, detailUrl) {
+async function runFlowUpick(goodsNo, qty, recipient, detailUrl, full = null) {
   // "동일상품이 장바구니에 N개 있습니다. 함께 구매하시겠습니까?" → 취소(현재 선택 수량만) — 수락하면 잔여 장바구니가 합산됨
   const { ctx, page } = await openBrowser((d) => (/함께 구매/.test(d.message()) ? d.dismiss() : d.accept()))
   // 1) 로그인 (Cafe24: member_id / member_passwd)
@@ -194,7 +241,57 @@ async function runFlowUpick(goodsNo, qty, recipient, detailUrl) {
     set('#tax_request_name', biz.ceo)
   }, BIZ_INFO)
   await op.bringToFront().catch(() => {})
-  return { ok: true, msg: '주문서 작성 완료 — 열린 U-PICK 창에서 금액·배송지·결제수단 확인 후 [결제하기]를 직접 누르세요' }
+  if (!full) return { ok: true, msg: '주문서 작성 완료 — 열린 U-PICK 창에서 금액·배송지·결제수단 확인 후 [결제하기]를 직접 누르세요' }
+
+  // ── 완주(무통장): 무통장 확인 → 국민은행 + 입금자명 → 약관 전체동의 → 금액 가드 → 결제하기(2단) → 주문번호 파싱 ──
+  const isCash = await op.evaluate(() => {
+    const cash = document.querySelector('input[name=addr_paymethod][value=cash]')
+    if (cash && !cash.checked) { cash.checked = true; cash.click(); cash.dispatchEvent(new Event('change', { bubbles: true })) }
+    return cash ? cash.checked : false
+  })
+  if (!isCash) return { ok: false, msg: '무통장입금 결제수단을 찾지 못함 — 완주 중단(열린 창에서 직접 진행)' }
+  await op.waitForTimeout(600)
+  await op.evaluate((dep) => {
+    // 입금은행(국민은행) + 입금자명
+    const sel = document.querySelector('select#bankaccount')
+    if (sel) { const o = [...sel.options].find((x) => x.value && x.text.includes(dep.bankKeyword)); if (o) { sel.value = o.value; sel.dispatchEvent(new Event('change', { bubbles: true })) } }
+    const pn = document.querySelector('#pname, input[name=pname]')
+    if (pn) { pn.value = dep.depositorName; pn.dispatchEvent(new Event('input', { bubbles: true })); pn.dispatchEvent(new Event('change', { bubbles: true })) }
+    // 약관 전체동의
+    const all = document.querySelector('#allAgree')
+    if (all && !all.checked) all.click()
+  }, GGSAN_DEPOSIT)
+  await op.waitForTimeout(600)
+  // 전체동의가 못 채운 [필수] 잔여 개별 체크
+  await op.evaluate(() => {
+    for (const c of document.querySelectorAll('input[type=checkbox]')) {
+      const lab = (document.querySelector(`label[for="${c.id}"]`)?.innerText || c.parentElement?.innerText || '')
+      if (/\[필수\]/.test(lab) && !c.checked) c.click()
+    }
+  })
+  const total = await op.evaluate(() => {
+    const b = document.querySelector('#btn_payment')
+    const m = /([\d,]{3,})\s*원/.exec(b?.innerText || '')
+    if (m) return parseInt(m[1].replace(/,/g, ''))
+    const m2 = /총\s*결제\s*금액[^0-9]{0,30}([\d,]{3,})\s*원/.exec(document.body.innerText)
+    return m2 ? parseInt(m2[1].replace(/,/g, '')) : null
+  }).catch(() => null)
+  const g = guardFail('U-PICK', total, full.maxPay)
+  if (g) return { ok: false, msg: g }
+  await op.evaluate(() => document.querySelector('#btn_payment')?.click())
+  await op.waitForTimeout(1800)
+  // Cafe24 확인 레이어(같은 금액의 결제하기 버튼)가 뜨면 한 번 더
+  await op.evaluate(() => { const b = document.querySelector('#ec-shop_btn_layer_payment'); if (b && b.offsetParent !== null) b.click() }).catch(() => {})
+  const done = await op.waitForURL(/order_result/i, { timeout: 45000 }).then(() => true).catch(() => false)
+  await op.waitForTimeout(1500)
+  const orderNo = await op.evaluate(() => {
+    const q = new URL(location.href).searchParams.get('order_id')
+    if (q) return q
+    const m = /주문\s*번호[^\d]{0,12}(\d{8}-\d{6,9})/.exec(document.body.innerText)
+    return m ? m[1] : null
+  }).catch(() => null)
+  if (!done && !orderNo) return { ok: false, msg: '결제하기 이후 완료 페이지 확인 실패 — 열린 U-PICK 창에서 주문 상태를 직접 확인하세요' }
+  return { ok: true, done: true, orderNo, total, msg: `무통장 주문 완료 — 주문번호 ${orderNo ?? '(파싱 실패, 창에서 확인)'} · 총액 ${total.toLocaleString()}원 · 입금대기` }
 }
 
 const htmlPage = (res, body) => { res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }); res.end(`<!doctype html><html lang=ko><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><body style="font-family:system-ui,sans-serif;max-width:620px;margin:48px auto;padding:0 18px;line-height:1.6;color:#111">${body}</body></html>`) }
@@ -252,18 +349,47 @@ http.createServer(async (req, res) => {
         <tr><td style="padding:6px 8px;color:#666">매입처</td><td style="padding:6px 8px">${esc(r.sourceLabel)} #${esc(r.goodsNo)}</td></tr>
         <tr><td style="padding:6px 8px;color:#666">수령인</td><td style="padding:6px 8px"><b>${esc(r.recipient.name)}</b> · ${esc(r.recipient.zip)}<br>${esc(r.recipient.addr1)} ${esc(r.recipient.addr2)}<br>${esc(r.recipient.phone)}</td></tr>
         </tbody></table>
-        <p style="background:#fef3c7;color:#92400e;padding:10px 12px;border-radius:8px">⚠ <b>결제 직전까지만</b> 자동 작성합니다. 열리는 ${esc(r.sourceLabel)} 창에서 <b>금액·배송지를 확인한 뒤 직접 [결제하기]</b>를 누르세요.</p>
-        <p><a href="/run?id=${esc(u.searchParams.get('id'))}" style="display:inline-block;background:#2563eb;color:#fff;padding:12px 24px;border-radius:8px;text-decoration:none;font-weight:600">결제진행 시작 → (${esc(r.sourceLabel)} 창 열림, ~1분)</a></p>`)
+        <p style="background:#fef3c7;color:#92400e;padding:10px 12px;border-radius:8px">⚠ 두 방식 모두 <b>출금은 없습니다</b>(무통장입금). <b>완주</b>는 동의·결제하기까지 자동 진행해 주문을 생성하고 주문상태를 <b>💰입금대기</b>로 기록합니다 — 입금(이체)은 직접 하신 뒤 관리자에서 [입금완료]로 바꾸세요.</p>
+        <p style="display:flex;gap:10px;flex-wrap:wrap">
+        <a href="/run?id=${esc(u.searchParams.get('id'))}&mode=full" style="display:inline-block;background:#059669;color:#fff;padding:12px 24px;border-radius:8px;text-decoration:none;font-weight:600">💳 결제 완주 (무통장 주문완료 + 입금대기 기록)</a>
+        <a href="/run?id=${esc(u.searchParams.get('id'))}" style="display:inline-block;background:#2563eb;color:#fff;padding:12px 24px;border-radius:8px;text-decoration:none;font-weight:600">결제 직전까지만 (직접 결제)</a></p>`)
       return
     }
     if (u.pathname === '/run') {
       const r = await resolveOrder(u.searchParams.get('id'))
       if (r.error) { htmlPage(res, `<h2>⚠ ${esc(r.error)}</h2>`); return }
+      // 완주 모드: 금액 가드 상한 산출 — 고객결제액·예상공급가 중 큰 쪽 기준(둘 다 없으면 완주 거부)
+      let full = null
+      if (u.searchParams.get('mode') === 'full') {
+        const cands = []
+        if (r.paidAmount > 0) cands.push(r.paidAmount * 1.25 + 3000)
+        if (r.domeCost > 0) cands.push(r.domeCost * 1.35 + 8000)
+        const maxPay = cands.length ? Math.min(Math.max(...cands), 1000000) : null
+        if (!maxPay) { htmlPage(res, `<h2>⚠ 금액 가드 기준 없음</h2><p>고객 결제액·공급가 정보가 없어 완주할 수 없습니다. <a href="/run?id=${esc(u.searchParams.get('id'))}">결제 직전까지만</a> 진행 후 직접 결제하세요.</p>`); return }
+        full = { maxPay }
+      }
       const out = r.source === 'upickb2b'
-        ? await runFlowUpick(r.goodsNo, r.order.shipping_count, r.recipient, r.detailUrl)
-        : await runFlowGgsan(r.goodsNo, r.order.shipping_count, r.recipient)
+        ? await runFlowUpick(r.goodsNo, r.order.shipping_count, r.recipient, r.detailUrl, full)
+        : await runFlowGgsan(r.goodsNo, r.order.shipping_count, r.recipient, full)
+      // 완주 성공 → 주문상태=입금대기 + 매입처 주문번호·매입가 자동 기록
+      if (out.ok && out.done) {
+        const now = new Date().toISOString()
+        const upd = { purchase_status: 'AWAITING_DEPOSIT', purchase_ordered_at: now, updated_at: now }
+        if (out.total > 0) upd.purchase_total_cost = out.total
+        if (r.kind === 'naver') {
+          if (out.orderNo) upd.supplier_order_no = out.orderNo
+          const { error } = await sb.from('jimscanner_naver_orders').update(upd).eq('product_order_id', r.dbKey)
+          if (error) out.msg += ` (⚠ DB 기록 실패: ${error.message} — 관리자에서 수동 입력)`
+        } else {
+          if (out.orderNo) upd.ggsan_order_no = out.orderNo
+          const { error } = await sb.from('jimscanner_coupang_orders').update(upd).eq('order_id', r.dbKey)
+          if (error) out.msg += ` (⚠ DB 기록 실패: ${error.message} — 관리자에서 수동 입력)`
+        }
+      }
       htmlPage(res, out.ok
-        ? `<h2>✓ ${esc(out.msg)}</h2><p>열린 ${esc(r.sourceLabel)} 창으로 가서 결제를 마치세요. 이 탭은 닫으셔도 됩니다.</p>`
+        ? (out.done
+          ? `<h2>✓ ${esc(out.msg)}</h2><p style="background:#fef3c7;color:#92400e;padding:10px 12px;border-radius:8px">💰 관리자 주문상태가 <b>입금대기</b>로 기록됐습니다. <b>${esc(GGSAN_DEPOSIT.bankKeyword)} 계좌로 이체</b>한 뒤 관리자에서 <b>[입금완료]</b>를 눌러주세요.</p>`
+          : `<h2>✓ ${esc(out.msg)}</h2><p>열린 ${esc(r.sourceLabel)} 창으로 가서 결제를 마치세요. 이 탭은 닫으셔도 됩니다.</p>`)
         : `<h2>✗ ${esc(out.msg)}</h2><p>다시 시도하거나 ${esc(r.sourceLabel)}에서 직접 주문하세요.</p>`)
       return
     }

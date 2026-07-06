@@ -11,7 +11,7 @@ export const dynamic = 'force-dynamic'
 // 쿠팡 update 라우트 미러 — 발주완료(ORDERED) 전환 시 네이버 발주확인(confirm) 자동 호출.
 // 쿠팡의 acknowledgement(결제완료→상품준비중)와 같은 위치의 best-effort 처리다.
 
-const PURCHASE_STATUSES = ['PENDING', 'ORDERED', 'SHIPPED', 'RECEIVED', 'CANCELLED'] as const
+const PURCHASE_STATUSES = ['PENDING', 'AWAITING_DEPOSIT', 'ORDERED', 'SHIPPED', 'RECEIVED', 'CANCELLED'] as const
 type PurchaseStatus = (typeof PURCHASE_STATUSES)[number]
 
 async function requireAdmin() {
@@ -98,6 +98,8 @@ export async function POST(request: NextRequest) {
     const ps = body.purchase_status as PurchaseStatus
     if (!PURCHASE_STATUSES.includes(ps)) return NextResponse.json({ error: '잘못된 발주 상태' }, { status: 400 })
     update.purchase_status = ps
+    // AWAITING_DEPOSIT(입금대기) = 매입처 주문은 생성됨(무통장) → 발주 시각 스탬프
+    if (ps === 'AWAITING_DEPOSIT' && !order.purchase_ordered_at) update.purchase_ordered_at = now
     if (ps === 'ORDERED' && !order.purchase_ordered_at) update.purchase_ordered_at = now
     if (ps === 'SHIPPED' && !order.purchase_ordered_at) update.purchase_ordered_at = now
     if (ps === 'RECEIVED') {

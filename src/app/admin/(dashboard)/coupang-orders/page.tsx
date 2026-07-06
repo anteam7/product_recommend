@@ -8,7 +8,7 @@ import PurchaseButton from './PurchaseButton'
 
 export const dynamic = 'force-dynamic'
 
-type PurchaseStatus = 'PENDING' | 'ORDERED' | 'SHIPPED' | 'RECEIVED' | 'CANCELLED'
+type PurchaseStatus = 'PENDING' | 'AWAITING_DEPOSIT' | 'ORDERED' | 'SHIPPED' | 'RECEIVED' | 'CANCELLED'
 type ShippingStatus =
   | 'ACCEPT'
   | 'INSTRUCT'
@@ -68,9 +68,10 @@ interface OrderRow {
   receiver_address_full?: string | null
 }
 
-// 드롭십(ggsan 직배송): 미발주 → 발주완료 → 매입처발송 → 발송완료(쿠팡 등록) → 취소 ("입고" 단계 없음)
+// 드롭십(ggsan 직배송): 미발주 → 입금대기(결제완주·무통장) → 발주완료(입금완료) → 매입처발송 → 발송완료(쿠팡 등록) → 취소 ("입고" 단계 없음)
 const PURCHASE_STATUS_LABELS: Record<PurchaseStatus, { label: string; cls: string }> = {
   PENDING: { label: '미발주', cls: 'bg-rose-100 text-rose-700' },
+  AWAITING_DEPOSIT: { label: '💰 입금대기', cls: 'bg-orange-100 text-orange-700' },
   ORDERED: { label: '발주완료', cls: 'bg-amber-100 text-amber-700' },
   SHIPPED: { label: '매입처발송', cls: 'bg-sky-100 text-sky-700' },
   RECEIVED: { label: '발송완료', cls: 'bg-emerald-100 text-emerald-700' },
@@ -494,7 +495,7 @@ export default async function CoupangOrdersPage({
         ℹ️ 흐름: 쿠팡 주문 자동 수집(매시간) → 🛒 건강산 매입 → 발주완료 후 <strong>ggsan 주문번호 입력</strong>(매입 상태 칸) → 매시간 ggsan 추적 크론이 <strong>송장 발급을 감지하면 &lsquo;매입처발송&rsquo;으로 전이</strong>합니다.
         <br />※ 송장은 <strong>쿠팡에 자동 등록</strong>됩니다 — 반자동 모드에서는 &lsquo;매입처 추적&rsquo; 칸의 <strong>[확인·등록]</strong> 버튼을 눌러 등록(쿠팡 등록 성공 시 &lsquo;발송완료&rsquo;). 자동 모드에서는 크론이 바로 등록합니다.
         <br />※ <strong>⚠ 확인 필요</strong> 배너/표시(미결제·매칭실패·등록실패·반품·택배사 미매핑)는 사람 확인이 필요한 돈·배송 직결 건입니다.
-        <br />※ <strong>💳 결제진행</strong>(미발주·건강산/유픽B2B 매입 건): 클릭 시 매입처 주문서를 자동 작성하고 <strong>결제 직전에 멈춥니다</strong>(실결제는 직접). 로컬 헬퍼(127.0.0.1:39201)가 꺼져 있으면 <code>jimorder://</code> 프로토콜로 자동 기동 — 이 PC에서만 작동.
+        <br />※ <strong>💳 결제진행</strong>(미발주·건강산/유픽B2B 매입 건): 매입처 주문서 자동 작성 후 <strong>완주(무통장 주문완료 → 💰입금대기 자동 기록 + 주문번호 수집)</strong> 또는 <strong>직전 정지(직접 결제)</strong> 선택. 완주 후 계좌 이체를 마치면 <strong>[✓ 입금완료]</strong>로 바꿔주세요. 로컬 헬퍼(127.0.0.1:39201)가 꺼져 있으면 <code>jimorder://</code> 프로토콜로 자동 기동 — 이 PC에서만 작동.
       </div>
     </div>
   )

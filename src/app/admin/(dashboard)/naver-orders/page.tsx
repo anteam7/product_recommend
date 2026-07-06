@@ -7,7 +7,7 @@ import PurchaseButton from './PurchaseButton'
 
 export const dynamic = 'force-dynamic'
 
-type PurchaseStatus = 'PENDING' | 'ORDERED' | 'SHIPPED' | 'RECEIVED' | 'CANCELLED'
+type PurchaseStatus = 'PENDING' | 'AWAITING_DEPOSIT' | 'ORDERED' | 'SHIPPED' | 'RECEIVED' | 'CANCELLED'
 
 interface OrderRow {
   id: string
@@ -44,9 +44,10 @@ interface OrderRow {
   receiver_zip_code?: string | null
 }
 
-// 드롭십 매입 흐름(쿠팡과 동일): 미발주 → 발주완료 → 매입처발송 → 발송완료 → 취소
+// 드롭십 매입 흐름(쿠팡과 동일): 미발주 → 입금대기(결제완주·무통장) → 발주완료(입금완료) → 매입처발송 → 발송완료 → 취소
 const PURCHASE_STATUS_LABELS: Record<PurchaseStatus, { label: string; cls: string }> = {
   PENDING: { label: '미발주', cls: 'bg-rose-100 text-rose-700' },
+  AWAITING_DEPOSIT: { label: '💰 입금대기', cls: 'bg-orange-100 text-orange-700' },
   ORDERED: { label: '발주완료', cls: 'bg-amber-100 text-amber-700' },
   SHIPPED: { label: '매입처발송', cls: 'bg-sky-100 text-sky-700' },
   RECEIVED: { label: '발송완료', cls: 'bg-emerald-100 text-emerald-700' },
@@ -470,7 +471,7 @@ export default async function NaverOrdersPage({
       <div className="text-xs text-gray-400 border-t pt-3 leading-relaxed">
         ℹ️ 흐름: 네이버 주문 자동 수집(매시간 07분) → 매입 상태를 <strong>발주완료</strong>로 바꾸면 <strong>네이버 발주확인이 자동 호출</strong>됩니다 (⚠ 발주확인 필요 표시가 ✓로 바뀜) → 🛒 매입처 발주 → 송장 입력(내부 기록).
         <br />※ 송장의 <strong>네이버 발송처리는 아직 수동</strong>입니다 — 스마트스토어센터에서 발송처리하세요 (API 연동은 후속 예정).
-        <br />※ <strong>💳 결제진행</strong>(미발주·매입처 연결 건): 클릭 시 매입처 주문서를 자동 작성하고 <strong>결제 직전에 멈춥니다</strong>(실결제는 직접). 로컬 헬퍼(127.0.0.1:39201)가 꺼져 있으면 <code>jimorder://</code> 프로토콜로 자동 기동 — 이 PC에서만 작동.
+        <br />※ <strong>💳 결제진행</strong>(미발주·매입처 연결 건): 매입처 주문서 자동 작성 후 <strong>완주(무통장 주문완료 → 💰입금대기 자동 기록 + 주문번호 수집)</strong> 또는 <strong>직전 정지(직접 결제)</strong> 선택. 완주 후 계좌 이체를 마치면 <strong>[✓ 입금완료]</strong>로 바꿔주세요. 로컬 헬퍼(127.0.0.1:39201)가 꺼져 있으면 <code>jimorder://</code> 프로토콜로 자동 기동 — 이 PC에서만 작동.
         <br />※ 실수익 = 결제금액 − 매입원가 − <strong>네이버 실수수료</strong>(주문 API 값) − 부가세(결제금액÷11). 쿠팡(요율 추정)과 달리 수수료 실값을 씁니다.
       </div>
     </div>

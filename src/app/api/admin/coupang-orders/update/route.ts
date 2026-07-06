@@ -35,7 +35,7 @@ async function coupangAcknowledge(vendorId: string, shipmentBoxId: number): Prom
   return { ok: res.status === 200 || alreadyDone, status: res.status, detail: text.slice(0, 200) }
 }
 
-const PURCHASE_STATUSES = ['PENDING', 'ORDERED', 'SHIPPED', 'RECEIVED', 'CANCELLED'] as const
+const PURCHASE_STATUSES = ['PENDING', 'AWAITING_DEPOSIT', 'ORDERED', 'SHIPPED', 'RECEIVED', 'CANCELLED'] as const
 type PurchaseStatus = (typeof PURCHASE_STATUSES)[number]
 
 async function requireAdmin() {
@@ -96,6 +96,8 @@ export async function POST(request: NextRequest) {
     if (!PURCHASE_STATUSES.includes(ps)) return NextResponse.json({ error: '잘못된 발주 상태' }, { status: 400 })
     update.purchase_status = ps
     // 상태 전이 시각 자동 스탬프 (이미 찍힌 건 유지)
+    // AWAITING_DEPOSIT(입금대기) = 매입처 주문은 생성됨(무통장) → 발주 시각 스탬프
+    if (ps === 'AWAITING_DEPOSIT' && !order.purchase_ordered_at) update.purchase_ordered_at = now
     if (ps === 'ORDERED' && !order.purchase_ordered_at) update.purchase_ordered_at = now
     // SHIPPED(매입처발송): 발주 시각이 비었으면 채움. 송장/쿠팡등록은 ggsan cron / register-invoice 소관.
     if (ps === 'SHIPPED' && !order.purchase_ordered_at) update.purchase_ordered_at = now
