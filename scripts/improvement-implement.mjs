@@ -15,7 +15,7 @@
  *   node --env-file=.env.local scripts/improvement-implement.mjs
  *
  * 환경변수:
- *   IMPLEMENT_MODEL    (기본: CLI 기본값 = Opus 4.7 1M)
+ *   IMPLEMENT_MODEL    (기본: 전역 ~/.claude/settings.json 모델. .cmd 래퍼가 opus 로 지정)
  *   IMPLEMENT_TIMEOUT  (기본: 720000ms = 12분 — Task Scheduler 15분 보다 짧게)
  */
 

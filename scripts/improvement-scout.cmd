@@ -8,6 +8,9 @@ chcp 65001 > nul
 REM Task Scheduler PATH is minimal -- prepend npm global bin so claude.cmd resolves.
 set "PATH=%USERPROFILE%\AppData\Roaming\npm;%PATH%"
 
+REM Force opus for scheduled runs (global settings.json default is fable).
+if not defined SCOUT_MODEL set "SCOUT_MODEL=opus"
+
 cd /d "C:\Web\jimscanner-personal"
 
 set "LOG_DIR=logs"

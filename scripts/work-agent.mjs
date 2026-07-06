@@ -24,6 +24,8 @@ const env = Object.fromEntries(
 const sb = createClient(env.NEXT_PUBLIC_SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY)
 const POLL_MS = Number(env.WORK_AGENT_POLL_MS || 5000)
 const TURN_TIMEOUT_MS = Number(env.WORK_AGENT_TIMEOUT_MS || 30 * 60 * 1000) // 한 턴 최대 30분
+// 전역 ~/.claude/settings.json 의 model(fable) 대신 opus 고정. .env.local 로 override 가능.
+const CLI_MODEL = env.WORK_AGENT_MODEL || 'opus'
 
 // 자율 + 위험·결정만 에스컬레이션. claude --append-system-prompt 로 매 호출에 적용.
 const RULES = [
@@ -61,7 +63,7 @@ function runClaude(prompt, resumeSession, onProgress) {
     const childEnv = { ...process.env }
     delete childEnv.ANTHROPIC_API_KEY; delete childEnv.ANTHROPIC_AUTH_TOKEN; delete childEnv.ANTHROPIC_BASE_URL
     // RULES는 stdin 프롬프트에 포함(멀티라인 인자를 win32 shell에 넘기면 깨짐). args는 단순 플래그만.
-    const args = ['-p', '--output-format', 'stream-json', '--verbose', '--permission-mode', 'bypassPermissions']
+    const args = ['-p', '--output-format', 'stream-json', '--verbose', '--permission-mode', 'bypassPermissions', '--model', CLI_MODEL]
     if (resumeSession) args.unshift('--resume', resumeSession)
     const child = spawn('claude', args, { cwd: REPO, env: childEnv, shell: process.platform === 'win32' })
     let sessionId = resumeSession || null, finalText = '', lastText = '', stderr = ''

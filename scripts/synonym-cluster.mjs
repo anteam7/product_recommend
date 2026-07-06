@@ -149,13 +149,16 @@ function group1stPass(signals) {
   return clusters
 }
 
+// 전역 ~/.claude/settings.json 의 model(fable) 대신 크론은 opus 로 고정. env 로 override 가능.
+const CLI_MODEL = process.env.SYNONYM_MODEL || 'opus'
+
 function callClaudeCli(prompt) {
   const childEnv = { ...process.env }
   delete childEnv.ANTHROPIC_API_KEY
   delete childEnv.ANTHROPIC_AUTH_TOKEN
   delete childEnv.ANTHROPIC_BASE_URL
   return new Promise((resolve, reject) => {
-    const child = spawn('claude', ['-p', '--output-format', 'json'], {
+    const child = spawn('claude', ['-p', '--output-format', 'json', '--model', CLI_MODEL], {
       stdio: ['pipe', 'pipe', 'pipe'],
       shell: process.platform === 'win32',
       env: childEnv,

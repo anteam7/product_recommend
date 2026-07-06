@@ -29,6 +29,8 @@ const sb = createClient(SUPABASE_URL, SUPABASE_KEY, {
 })
 
 const MODEL = 'claude-code-cli'
+// 전역 ~/.claude/settings.json 의 model(fable) 대신 크론은 opus 로 고정. env 로 override 가능.
+const CLI_MODEL = process.env.CLASSIFY_MODEL || 'opus'
 const BATCH_SIZE = 20
 const MAX_REQ_PER_RUN = 60
 const PRODUCT_FETCH_LIMIT = MAX_REQ_PER_RUN * BATCH_SIZE
@@ -118,7 +120,7 @@ function callClaudeCli(prompt) {
   delete childEnv.ANTHROPIC_BASE_URL
 
   return new Promise((resolve, reject) => {
-    const child = spawn('claude', ['-p', '--output-format', 'json'], {
+    const child = spawn('claude', ['-p', '--output-format', 'json', '--model', CLI_MODEL], {
       stdio: ['pipe', 'pipe', 'pipe'],
       shell: process.platform === 'win32',
       env: childEnv,
