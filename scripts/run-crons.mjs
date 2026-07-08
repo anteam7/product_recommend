@@ -162,4 +162,23 @@ try {
   console.error('[sourcing-loop] 예상치 못한 오류:', e instanceof Error ? e.message : String(e))
 }
 
+// 비셀러 품절 갱신 (일 1회 — 목록스캔+미노출 상세확인, beseller-stock-refresh.mjs)
+console.log(`[${new Date().toISOString()}] 비셀러 품절 갱신 시작...`)
+try {
+  const { execFile } = await import('node:child_process')
+  const { promisify } = await import('node:util')
+  const execFileAsync = promisify(execFile)
+  const scriptPath = new URL('./beseller-stock-refresh.mjs', import.meta.url).pathname.replace(/^\/([A-Z]:)/, '$1')
+  const envFilePath = new URL('../.env.local', import.meta.url).pathname.replace(/^\/([A-Z]:)/, '$1')
+  const { stdout, stderr } = await execFileAsync(
+    process.execPath,
+    [`--env-file=${envFilePath}`, scriptPath],
+    { timeout: 900_000, maxBuffer: 16 * 1024 * 1024 },
+  )
+  if (stdout) process.stdout.write(stdout)
+  if (stderr) process.stderr.write(stderr)
+} catch (e) {
+  console.error('[beseller-refresh] 실행 실패:', e instanceof Error ? e.message : String(e))
+}
+
 process.exit(failCount > 0 ? 1 : 0)

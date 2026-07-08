@@ -100,6 +100,12 @@ const NAV_GROUPS: NavGroup[] = [
         match: (p) => p.startsWith('/admin/trend-radar/ggsan'),
       },
       {
+        href: '/admin/trend-radar/beseller',
+        label: '비셀러 카탈로그',
+        icon: '🧺',
+        match: (p) => p.startsWith('/admin/trend-radar/beseller'),
+      },
+      {
         href: '/admin/trend-radar/tv-ggsan-match',
         label: 'TV ↔ ggsan 매칭',
         icon: '📺',
