@@ -58,12 +58,41 @@ type SortKey = (typeof SORT_OPTIONS)[number]['v']
 
 const PAGE_SIZE = 60
 
-async function fetchData(opts: { cat: string; status: string; q: string; sort: SortKey; page: number }) {
+interface Compare {
+  group_key: string
+  our_supply: number | null
+  market_low: number | null
+  market_mall: string | null
+  market_count: number | null
+  margin_at_low: number | null
+  margin_rate: number | null
+  grade: string | null
+  low_confidence: boolean | null
+}
+const GRADE_META: Record<string, { icon: string; label: string; cls: string }> = {
+  strong: { icon: '🏆', label: '강력', cls: 'bg-emerald-200 text-emerald-900' },
+  ok: { icon: '✅', label: '경쟁', cls: 'bg-green-100 text-green-700' },
+  weak: { icon: '🟡', label: '약함', cls: 'bg-amber-100 text-amber-700' },
+}
+
+// 경쟁력 필터: 해당 등급 group_key 집합을 먼저 구해 products 를 in() 필터
+async function competitiveKeys(sb: any, mode: string): Promise<string[]> {
+  const grades = mode === 'strong' ? ['strong'] : ['strong', 'ok']
+  const { data } = await sb.from('jimscanner_beseller_price_compare').select('group_key').in('grade', grades)
+  return ((data ?? []) as Array<{ group_key: string }>).map((r) => r.group_key)
+}
+
+async function fetchData(opts: { cat: string; status: string; q: string; sort: SortKey; page: number; compete: string }) {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const sb = createAdminClient() as any
   let query = sb.from('jimscanner_beseller_products').select('*', { count: 'exact' })
   if (opts.cat) query = query.eq('cate_mcode', opts.cat)
   if (opts.status) query = query.eq('status', opts.status)
+  if (opts.compete) {
+    const keys = await competitiveKeys(sb, opts.compete)
+    if (keys.length === 0) return { rows: [], total: 0, cmp: new Map<string, Compare>() }
+    query = query.in('group_key', keys)
+  }
   if (opts.q) {
     const safe = opts.q.replace(/[,()]/g, ' ').trim() // PostgREST or() 필터 문법 보호
     if (safe) query = query.or(`title.ilike.%${safe}%,group_key.ilike.%${safe}%,supplier_nick.ilike.%${safe}%`)
@@ -77,7 +106,15 @@ async function fetchData(opts: { cat: string; status: string; q: string; sort: S
   }
   const offset = (opts.page - 1) * PAGE_SIZE
   const { data, count } = await query.range(offset, offset + PAGE_SIZE - 1)
-  return { rows: (data ?? []) as Row[], total: count ?? 0 }
+  const rows = (data ?? []) as Row[]
+  // 이 페이지 group_key 들의 경쟁력 정보 조인
+  const gks = [...new Set(rows.map((r) => r.group_key).filter(Boolean))] as string[]
+  const cmp = new Map<string, Compare>()
+  if (gks.length) {
+    const { data: cd } = await sb.from('jimscanner_beseller_price_compare').select('*').in('group_key', gks)
+    for (const c of (cd ?? []) as Compare[]) cmp.set(c.group_key, c)
+  }
+  return { rows, total: count ?? 0, cmp }
 }
 
 async function fetchMeta() {
@@ -99,7 +136,17 @@ async function fetchMeta() {
     if (r.cate_mcode) byCat.set(r.cate_mcode, (byCat.get(r.cate_mcode) ?? 0) + 1)
     if (r.group_key) groups.add(r.group_key)
   }
-  return { total: rows.length, byStatus, byCat, groupCount: groups.size }
+  // 경쟁력 등급 집계 (Supabase 1,000행 캡 → 페이징)
+  const byGrade = new Map<string, number>()
+  let comparedTotal = 0
+  for (let off = 0; off < 50000; off += 1000) {
+    const { data: chunk } = await sb.from('jimscanner_beseller_price_compare').select('grade').range(off, off + 999)
+    const cc = (chunk ?? []) as Array<{ grade: string | null }>
+    for (const c of cc) if (c.grade) byGrade.set(c.grade, (byGrade.get(c.grade) ?? 0) + 1)
+    comparedTotal += cc.length
+    if (cc.length < 1000) break
+  }
+  return { total: rows.length, byStatus, byCat, groupCount: groups.size, byGrade, comparedTotal }
 }
 
 function buildHref(current: Record<string, string>, override: Record<string, string | null>) {
@@ -117,18 +164,20 @@ const fmt = (n: number | null) => (n == null ? '—' : n.toLocaleString())
 export default async function BesellerPage({
   searchParams,
 }: {
-  searchParams: Promise<{ cat?: string; status?: string; q?: string; sort?: string; page?: string }>
+  searchParams: Promise<{ cat?: string; status?: string; q?: string; sort?: string; page?: string; compete?: string }>
 }) {
   const sp = await searchParams
   const cat = CATEGORIES.some((c) => c.code === sp.cat) ? (sp.cat as string) : ''
   const status = ['active', 'soldout', 'gone'].includes(sp.status ?? '') ? (sp.status as string) : ''
+  const compete = ['win', 'strong'].includes(sp.compete ?? '') ? (sp.compete as string) : ''
   const q = sp.q ?? ''
   const sort = (SORT_OPTIONS.some((s) => s.v === sp.sort) ? sp.sort : 'group') as SortKey
   const page = Math.max(1, parseInt(sp.page ?? '1', 10) || 1)
-  const current: Record<string, string> = { cat, status, q, sort, page: String(page) }
+  const current: Record<string, string> = { cat, status, compete, q, sort, page: String(page) }
 
-  const [{ rows, total }, meta] = await Promise.all([fetchData({ cat, status, q, sort, page }), fetchMeta()])
+  const [{ rows, total, cmp }, meta] = await Promise.all([fetchData({ cat, status, q, sort, page, compete }), fetchMeta()])
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE))
+  const winCount = (meta.byGrade.get('strong') ?? 0) + (meta.byGrade.get('ok') ?? 0)
 
   return (
     <div className="space-y-5 p-6">
@@ -141,10 +190,26 @@ export default async function BesellerPage({
             {meta.byStatus.get('soldout') ?? 0} · 내려감 {meta.byStatus.get('gone') ?? 0}
           </p>
           <p className="text-[11px] text-gray-400 mt-0.5">
-            수집: <code>beseller-collect.mjs</code> · 품절갱신: <code>beseller-stock-refresh.mjs</code> (일일 크론)
+            수집: <code>beseller-collect.mjs</code> · 품절갱신: <code>beseller-stock-refresh.mjs</code> · 네이버 가격비교: <code>beseller-naver-compete.mjs</code>
           </p>
         </div>
       </header>
+
+      {/* 네이버 경쟁력 요약 + 필터 (그룹 최저옵션 vs 네이버 최저 경쟁가대) */}
+      <div className="rounded border border-emerald-200 bg-emerald-50/40 p-3 flex items-center gap-3 flex-wrap">
+        <span className="text-sm font-semibold text-emerald-800">🛒 네이버 경쟁력</span>
+        <span className="text-xs text-gray-500">비교완료 {meta.comparedTotal.toLocaleString()}그룹 중</span>
+        <div className="flex gap-1">
+          <Link href={buildHref(current, { compete: null, page: null })} className={`text-xs px-2.5 py-1 rounded ${compete === '' ? 'bg-white border border-emerald-300 font-semibold' : 'text-gray-500 hover:bg-white/60'}`}>전체</Link>
+          <Link href={buildHref(current, { compete: 'win', page: null })} className={`text-xs px-2.5 py-1 rounded ${compete === 'win' ? 'bg-emerald-600 text-white font-semibold' : 'bg-white text-emerald-700 border border-emerald-300 hover:bg-emerald-100'}`}>
+            🏆✅ 경쟁력 있음 <b>{winCount}</b>
+          </Link>
+          <Link href={buildHref(current, { compete: 'strong', page: null })} className={`text-xs px-2.5 py-1 rounded ${compete === 'strong' ? 'bg-emerald-700 text-white font-semibold' : 'bg-white text-emerald-800 border border-emerald-300 hover:bg-emerald-100'}`}>
+            🏆 강력만 <b>{meta.byGrade.get('strong') ?? 0}</b>
+          </Link>
+        </div>
+        <span className="text-[11px] text-gray-400 ml-auto">🟡약함 {meta.byGrade.get('weak') ?? 0} · 마진 = 네이버 경쟁가대(하위20%)×0.94 − 공급가</span>
+      </div>
 
       {/* 카테고리 필터 */}
       <nav className="flex flex-wrap gap-1 border-b border-gray-200">
@@ -221,6 +286,17 @@ export default async function BesellerPage({
                             📦 {r.group_key} <span className="text-violet-400">변형 {groupSize}{groupSize >= 3 ? '+' : ''}종</span>
                           </div>
                         )}
+                        {(groupStart || sort !== 'group') && (() => {
+                          const c = r.group_key ? cmp.get(r.group_key) : undefined
+                          const gm = c ? GRADE_META[c.grade ?? ''] : undefined
+                          if (!c || !gm) return null
+                          return (
+                            <div className="mb-0.5 flex items-center gap-1 flex-wrap">
+                              <span className={`text-[10px] px-1.5 py-0.5 rounded font-semibold ${gm.cls}`}>{gm.icon} {gm.label}{c.margin_rate != null ? ' ' + Math.round(c.margin_rate * 100) + '%' : ''}</span>
+                              <span className="text-[10px] text-gray-500">네이버 {fmt(c.market_low)} vs 공급 {fmt(c.our_supply)} · 표본 {c.market_count ?? 0}{c.low_confidence ? ' ~저신뢰' : ''}</span>
+                            </div>
+                          )
+                        })()}
                         <a href={r.detail_url ?? '#'} target="_blank" rel="noreferrer noopener" className="font-medium text-gray-900 hover:text-blue-700 leading-snug block">
                           {r.title}
                           {r.variant_label && <span className="ml-1 text-[11px] px-1 py-0.5 rounded bg-violet-50 text-violet-700 font-semibold">{r.variant_label}</span>}
