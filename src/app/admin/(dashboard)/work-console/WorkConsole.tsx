@@ -37,13 +37,24 @@ export default function WorkConsole() {
   const [text, setText] = useState('')
   const [reply, setReply] = useState('')
   const [busy, setBusy] = useState(false)
+  const [atBottom, setAtBottom] = useState(true) // 스레드가 맨 아래에 붙어있는지 (버튼 노출용)
   const threadRef = useRef<HTMLDivElement>(null)
+  const stickRef = useRef(true) // 사용자가 맨 아래에 있으면 true → 폴링 갱신 시 자동으로 따라 내려감
+  const detailSigRef = useRef('') // 내용이 실제로 바뀔 때만 setDetail (불필요한 리렌더/깜빡임 방지)
 
   const loadList = useCallback(async () => {
     try { const r = await fetch('/api/admin/work-instructions', { cache: 'no-store' }); const j = await r.json(); if (Array.isArray(j.items)) setItems(j.items) } catch { /* noop */ }
   }, [])
   const loadDetail = useCallback(async (id: string) => {
-    try { const r = await fetch(`/api/admin/work-instructions/${id}`, { cache: 'no-store' }); const j = await r.json(); if (j.instruction) setDetail({ instruction: j.instruction, events: j.events ?? [] }) } catch { /* noop */ }
+    try {
+      const r = await fetch(`/api/admin/work-instructions/${id}`, { cache: 'no-store' }); const j = await r.json()
+      if (!j.instruction) return
+      const events: Evt[] = j.events ?? []
+      const sig = `${j.instruction.status}|${j.instruction.result ?? ''}|${j.instruction.error ?? ''}|${events.length}|${events.at(-1)?.id ?? ''}|${events.at(-1)?.content?.length ?? 0}`
+      if (sig === detailSigRef.current) return // 변화 없음 → 그대로 두어 스크롤 위치 보존
+      detailSigRef.current = sig
+      setDetail({ instruction: j.instruction, events })
+    } catch { /* noop */ }
   }, [])
 
   useEffect(() => { loadList() }, [loadList])
@@ -52,7 +63,29 @@ export default function WorkConsole() {
     return () => clearInterval(t)
   }, [sel, loadList, loadDetail])
   useEffect(() => { if (sel) loadDetail(sel) }, [sel, loadDetail])
-  useEffect(() => { if (threadRef.current) threadRef.current.scrollTop = threadRef.current.scrollHeight }, [detail])
+  // 다른 작업을 열면 스크롤을 맨 아래로 초기화하고 시그니처 리셋
+  useEffect(() => { stickRef.current = true; setAtBottom(true); detailSigRef.current = '' }, [sel])
+  // 사용자가 이미 맨 아래에 있을 때만 새 내용을 따라 내려감 (읽는 중이면 위치 보존)
+  useEffect(() => {
+    const el = threadRef.current
+    if (el && stickRef.current) el.scrollTop = el.scrollHeight
+  }, [detail])
+
+  // 스레드 스크롤 감지 → 맨 아래 근처면 stick 유지, 위로 올리면 자동 스크롤 중단
+  const onThreadScroll = useCallback(() => {
+    const el = threadRef.current
+    if (!el) return
+    const near = el.scrollHeight - el.scrollTop - el.clientHeight < 48
+    stickRef.current = near
+    setAtBottom((prev) => (prev === near ? prev : near))
+  }, [])
+  const scrollToBottom = useCallback(() => {
+    const el = threadRef.current
+    if (!el) return
+    el.scrollTop = el.scrollHeight
+    stickRef.current = true
+    setAtBottom(true)
+  }, [])
 
   async function submit() {
     const instruction = text.trim(); if (!instruction || busy) return
@@ -88,9 +121,16 @@ export default function WorkConsole() {
           </div>
           <Badge s={ins.status} />
         </div>
-        <div ref={threadRef} className="space-y-2 max-h-[55vh] overflow-y-auto rounded border border-gray-100 bg-gray-50 p-3">
-          {detail.events.map((e) => <EventBubble key={e.id} e={e} />)}
-          {detail.events.length === 0 && <div className="text-xs text-gray-400 text-center py-6">아직 진행 내역이 없습니다…</div>}
+        <div className="relative">
+          <div ref={threadRef} onScroll={onThreadScroll} className="space-y-2 max-h-[55vh] overflow-y-auto rounded border border-gray-100 bg-gray-50 p-3">
+            {detail.events.map((e) => <EventBubble key={e.id} e={e} />)}
+            {detail.events.length === 0 && <div className="text-xs text-gray-400 text-center py-6">아직 진행 내역이 없습니다…</div>}
+          </div>
+          {!atBottom && (
+            <button onClick={scrollToBottom} className="absolute bottom-3 left-1/2 -translate-x-1/2 bg-blue-600 text-white text-xs font-medium px-3 py-1.5 rounded-full shadow-lg hover:bg-blue-700">
+              ↓ 최신 내용으로
+            </button>
+          )}
         </div>
         {ins.status === 'escalated' && (
           <div className="rounded border border-amber-300 bg-amber-50 p-3 space-y-2">
