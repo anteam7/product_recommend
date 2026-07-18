@@ -51,17 +51,12 @@ export async function insertMarketRaw(
 }
 
 /**
- * 만료된 raw 행 정리. 별도 cron 으로 호출하거나 각 수집 cron 끝에 호출.
+ * 만료 정리(cleanupExpiredRaw)는 2026-07-18 운영 결정으로 폐기됐다.
+ * DB 의 expires_at 컬럼과 idx_market_raw_expires 인덱스는 남아 있지만 어떤 코드도
+ * 참조하지 않는 흔적이다 — 행은 무기한 보관이 의도된 동작이므로 정리 로직을
+ * "복원"하지 말 것. (원본 Vercel 시절부터 호출처가 없었고, 지금 켜면 30일 이전
+ * 행 = 어드민 시장시그널 화면 데이터의 대부분이 삭제된다.)
  */
-export async function cleanupExpiredRaw(): Promise<number> {
-  const admin = createAdminClient()
-  const { error, count } = await admin
-    .from('jimscanner_market_raw')
-    .delete({ count: 'exact' })
-    .lt('expires_at', new Date().toISOString())
-  if (error) throw new Error(`cleanupExpiredRaw: ${error.message}`)
-  return count ?? 0
-}
 
 /**
  * 모든 cron 라우트가 사용하는 인증 헬퍼.
