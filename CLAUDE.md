@@ -13,6 +13,7 @@
 | 날짜 | 변경 내용 | 대상 | 사유 |
 |------|----------|------|------|
 | 2026-06-13 | 초기 구성 | 전체 | Loop Engineering 적용 + 유픽→네이버 파이프라인 신규 구축 |
+| 2026-07-22 | 쿠팡 소싱 스카우트 구축 | extension/, /api/ext/scout, scripts/scout-agent·analyze.mjs | 크롬 확장(손)↔로컬 Claude 두뇌로 수요 발굴 — docs/scout-protocol.md |
 
 ---
 

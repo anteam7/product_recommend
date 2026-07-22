@@ -1,0 +1,48 @@
+{
+  "version": "2026-07-22.1",
+  "comment": "쿠팡 DOM 셀렉터 외부화. 옵션 페이지에서 JSON 붙여넣기로 무배포 패치 가능(chrome.storage 오버라이드 > 이 파일). serp/search 는 scripts/lib/market-price.mjs 검증값, detail/review 는 다중 폴백 후보(SELECTOR_MISS 보고로 보정).",
+  "search": {
+    "input": "input#headerSearchKeyword, input[name=\"q\"]",
+    "submit": "form#headerSearchForm button[type=\"submit\"], button.search-btn, .search-btn, form button[type=\"submit\"]"
+  },
+  "serp": {
+    "cardAnchor": "a[href*=\"/vp/products/\"]",
+    "cardContainer": "[data-id], li, [class*=\"ProductUnit\"]",
+    "name": "[class*=\"ProductUnit_productName\"], [class*=\"name\"], [class*=\"Name\"]",
+    "rating": "[class*=\"ProductRating\"]",
+    "priceLineThrough": "line-through",
+    "image": "img",
+    "badgeImgs": "img[alt*=\"로켓\"], img[alt*=\"로켓배송\"], img[alt*=\"판매자로켓\"], img[alt*=\"로켓프레시\"], img[alt*=\"로켓직구\"]",
+    "pagination": "[class*=\"Pagination\"] a, .search-pagination a, a[class*=\"page\"]",
+    "paginationNext": "[class*=\"Pagination\"] a[title*=\"다음\"], a.btn-next, [class*=\"Pagination\"] a:last-child"
+  },
+  "detail": {
+    "name": "h1, [class*=\"prod-buy-header__title\"], [class*=\"productTitle\"], [class*=\"title\"]",
+    "price": "[class*=\"total-price\"] strong, [class*=\"prod-sale-price\"] strong, [class*=\"final-price\"], [class*=\"price\"] strong",
+    "originalPrice": "[class*=\"origin-price\"], [class*=\"original-price\"], del",
+    "optionList": "[class*=\"prod-option\"] li, [class*=\"Option\"] li, select[class*=\"option\"] option",
+    "breadcrumb": "ul.breadcrumb a, [class*=\"breadcrumb\"] a, nav a[href*=\"/np/categories/\"]",
+    "infoTable": "[class*=\"prod-delivery-return-policies\"] table, [class*=\"product-item\"] table, .prod-description table, table[class*=\"info\"]",
+    "infoRows": "tr",
+    "sellerName": "[class*=\"prod-sale-vendor\"] a, [class*=\"seller\"] a, a[href*=\"/vm/\"]",
+    "mainImages": "[class*=\"prod-image\"] img, [class*=\"ProductImage\"] img",
+    "detailImages": "#productDetail img, [class*=\"product-detail\"] img, [class*=\"detail-content\"] img, .vendor-item img",
+    "deliveryInfo": "[class*=\"prod-shipping\"], [class*=\"delivery\"], [class*=\"shipping-fee\"]",
+    "reviewCount": "[class*=\"count\"][class*=\"review\"], #prod-review-nav-link span, a[href*=\"review\"] span",
+    "qnaSection": "#prod-inquiry, [class*=\"inquiry\"], [class*=\"qna\"]"
+  },
+  "review": {
+    "section": "#sdpReview, [class*=\"sdp-review\"], [class*=\"Review\"]",
+    "tabLink": "#prod-review-nav-link, a[href*=\"#sdpReview\"], [class*=\"review\"] a",
+    "item": "article[class*=\"review-article\"], [class*=\"sdp-review__article__list\"] article, [class*=\"js_reviewArticleReviewList\"], article",
+    "date": "[class*=\"review-article__info__product-info__reg-date\"], [class*=\"reg-date\"], [class*=\"date\"]",
+    "rating": "[class*=\"star-orange\"], [class*=\"review-article__info__star\"], [data-rating]",
+    "content": "[class*=\"review-article__content\"], [class*=\"review-content\"], p",
+    "images": "[class*=\"review-article__attachment\"] img, [class*=\"attachment\"] img",
+    "option": "[class*=\"review-article__info__product-info__name\"], [class*=\"item-name\"]",
+    "helpful": "[class*=\"helpful\"] [class*=\"count\"], [class*=\"review-article__helpful\"]",
+    "sortRecent": "[class*=\"sort\"] button, [class*=\"review\"] [data-sort]",
+    "pagination": "[class*=\"js_reviewArticlePagingContainer\"] button, [class*=\"review\"] [class*=\"paging\"] button",
+    "paginationNext": "[class*=\"js_reviewArticlePageNextBtn\"], [class*=\"paging\"] [class*=\"next\"]"
+  }
+}

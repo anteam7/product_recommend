@@ -1,0 +1,23 @@
+{
+  "manifest_version": 3,
+  "name": "쿠팡 소싱 스카우트",
+  "version": "0.1.0",
+  "description": "쿠팡 수집 '손' — 로컬 Claude 두뇌(scout-agent)와 Supabase 릴레이로 연동. 채팅으로 지시.",
+  "permissions": ["storage", "alarms", "tabs", "scripting", "sidePanel"],
+  "host_permissions": [
+    "https://*.coupang.com/*",
+    "https://product-recommend-nine.vercel.app/*",
+    "http://localhost:3001/*"
+  ],
+  "background": { "service_worker": "background.js", "type": "module" },
+  "side_panel": { "default_path": "sidepanel/panel.html" },
+  "action": { "default_title": "쿠팡 소싱 스카우트 (채팅 열기)" },
+  "options_page": "options.html",
+  "content_scripts": [
+    {
+      "matches": ["https://*.coupang.com/*"],
+      "js": ["content/humanize.js", "content/collector.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}

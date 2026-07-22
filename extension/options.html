@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <title>스카우트 설정</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 560px; margin: 40px auto; padding: 0 16px; color: #111; line-height: 1.6; }
+    h2 { margin-bottom: 4px; }
+    .hint { color: #888; font-size: 12px; margin-bottom: 18px; }
+    label { display: block; font-weight: 600; margin: 14px 0 4px; font-size: 13px; }
+    input, textarea { width: 100%; box-sizing: border-box; padding: 8px; border: 1px solid #ddd; border-radius: 8px; font: inherit; }
+    textarea { font-family: ui-monospace, monospace; font-size: 12px; }
+    button { margin-top: 16px; border: none; background: #2563eb; color: #fff; border-radius: 8px; padding: 10px 20px; font-weight: 600; cursor: pointer; }
+    button.secondary { background: #6b7280; margin-left: 8px; }
+    #status { margin-top: 12px; font-size: 13px; }
+    #status.ok { color: #059669; } #status.err { color: #dc2626; }
+  </style>
+</head>
+<body>
+  <h2>🔎 쿠팡 소싱 스카우트 설정</h2>
+  <p class="hint">로컬 PC의 두뇌(scout-agent)와 Supabase 릴레이로 연결됩니다. 토큰은 이 브라우저에만 저장됩니다(chrome.storage.local).</p>
+
+  <label for="apiBase">API 주소</label>
+  <input id="apiBase" placeholder="https://product-recommend-nine.vercel.app" />
+
+  <label for="token">SCOUT_EXT_TOKEN</label>
+  <input id="token" type="password" placeholder="scout_..." />
+
+  <label for="selectorsOverride">셀렉터 오버라이드 (선택 — selectors.json 전체 JSON 붙여넣기, 비우면 번들 사용)</label>
+  <textarea id="selectorsOverride" rows="6" placeholder='{"version":"...", "serp": {...}}'></textarea>
+
+  <button id="save">저장</button>
+  <button id="test" class="secondary">연결 테스트</button>
+  <div id="status"></div>
+  <script type="module" src="options.js"></script>
+</body>
+</html>

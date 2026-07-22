@@ -12,6 +12,8 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // 크롬 확장(순수 JS, Next 빌드 무관) — docs/scout-protocol.md
+    "extension/**",
   ]),
 ]);
 

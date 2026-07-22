@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>쿠팡 소싱 스카우트</title>
+  <link rel="stylesheet" href="panel.css" />
+</head>
+<body>
+  <header>
+    <div class="title">🔎 소싱 스카우트</div>
+    <div class="conn" id="conn">연결 확인중…</div>
+    <div class="jobbar" id="jobbar" hidden>
+      <span id="jobtext"></span>
+      <button id="btnPause" title="일시정지">⏸</button>
+      <button id="btnResume" title="재개" hidden>▶</button>
+      <button id="btnStop" title="중지">⏹</button>
+    </div>
+  </header>
+  <main id="thread"></main>
+  <button id="toBottom" hidden>↓ 최신 내용으로</button>
+  <footer>
+    <textarea id="input" rows="2" placeholder='예: "캠핑 의자 5페이지 수집해줘" — Enter 전송 / Shift+Enter 줄바꿈'></textarea>
+    <button id="send">전송</button>
+    <div class="foot-links"><a href="#" id="newSession">새 대화</a><a href="#" id="openOptions">설정</a></div>
+  </footer>
+  <script type="module" src="panel.js"></script>
+</body>
+</html>
