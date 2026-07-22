@@ -1,5 +1,5 @@
 {
-  "version": "2026-07-22.1",
+  "version": "2026-07-23.1",
   "comment": "쿠팡 DOM 셀렉터 외부화. 옵션 페이지에서 JSON 붙여넣기로 무배포 패치 가능(chrome.storage 오버라이드 > 이 파일). serp/search 는 scripts/lib/market-price.mjs 검증값, detail/review 는 다중 폴백 후보(SELECTOR_MISS 보고로 보정).",
   "search": {
     "input": "input#headerSearchKeyword, input[name=\"q\"]",
@@ -14,7 +14,8 @@
     "image": "img",
     "badgeImgs": "img[alt*=\"로켓\"], img[alt*=\"로켓배송\"], img[alt*=\"판매자로켓\"], img[alt*=\"로켓프레시\"], img[alt*=\"로켓직구\"]",
     "pagination": "[class*=\"Pagination\"] a, .search-pagination a, a[class*=\"page\"]",
-    "paginationNext": "[class*=\"Pagination\"] a[title*=\"다음\"], a.btn-next, [class*=\"Pagination\"] a:last-child"
+    "paginationNext": "[class*=\"Pagination\"] a[title*=\"다음\"], a.btn-next, [class*=\"Pagination\"] a:last-child",
+    "relatedKeywords": ".srp-related-keywords a"
   },
   "detail": {
     "name": "h1, [class*=\"prod-buy-header__title\"], [class*=\"productTitle\"], [class*=\"title\"]",

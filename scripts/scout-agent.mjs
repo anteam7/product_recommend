@@ -27,7 +27,7 @@ const env = Object.fromEntries(
 const sb = createClient(env.NEXT_PUBLIC_SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY)
 const POLL_MS = Number(env.SCOUT_AGENT_POLL_MS || 5000)
 const TURN_TIMEOUT_MS = Number(env.SCOUT_AGENT_TIMEOUT_MS || 15 * 60 * 1000)
-const CLI_MODEL = env.SCOUT_AGENT_MODEL || 'opus'
+const CLI_MODEL = /^[\w.-]+$/.test(env.SCOUT_AGENT_MODEL || '') ? env.SCOUT_AGENT_MODEL : 'opus' // shell:true 인자 가드
 const DATA_DIR = path.join(REPO, 'data', 'scout')
 
 const VALID_TYPES = new Set(['ping', 'navigate', 'tab', 'search', 'category', 'filter', 'scroll', 'click', 'input',
@@ -57,6 +57,7 @@ const RULES = `당신은 "쿠팡 소싱 스카우트"의 두뇌다. 사용자가
 
 [규칙]
 - collect_* 는 고수준 명령: 페이지네이션·지연·재시도·차단복구는 확장이 자율 수행한다. 페이지 단위로 쪼개 지시하지 마라.
+- **2026 쿠팡 검색결과는 페이지네이션 없는 단일 뷰(~85건)일 수 있다**: collect_list 결과 summary에 single_view=true와 relatedKeywords[]가 오면, 표본이 더 필요할 때 그 연관 키워드들로 추가 collect_list를 지시해 합산하라(같은 상품은 product_id로 자연 병합). 사용자에게도 "이 키워드는 단일 뷰라 N건이 전부"임을 알려라.
 - 확장은 사람처럼 행동한다(페이지 간 8~12초). 수집은 시간이 걸린다 — 명령을 내릴 때 예상 소요를 사용자에게 알려라.
 - 수집 완료 보고를 받으면 핵심(건수·가격대·리뷰 분포·주목 상품)을 요약해 사용자에게 알려라. 데이터 파일 경로도 알려라.
 - 분석: Bash 로 \`node scripts/scout-analyze.mjs --command <명령id>\` 또는 \`--session <세션id>\` 를 직접 실행해 리포트를 만들고 상위 후보를 보고하라. 원본은 Supabase jimscanner_scout_products / jimscanner_scout_reviews.
@@ -171,15 +172,16 @@ async function saveFiles(cmd) {
 async function describeFinished(cmd) {
   let desc = `[명령 결과] id=${cmd.id} type=${cmd.command_type} status=${cmd.status}`
   if (cmd.error) desc += `\n오류: ${cmd.error}`
-  if (cmd.result_summary) desc += `\n요약: ${JSON.stringify(cmd.result_summary).slice(0, 500)}`
+  if (cmd.result_summary) desc += `\n요약: ${JSON.stringify(cmd.result_summary).slice(0, 800)}`
   let files = null
   if (cmd.status === 'done') {
     try { files = await saveFiles(cmd) } catch (e) { desc += `\n(파일 저장 실패: ${String(e.message).slice(0, 200)})` }
     if (files) desc += `\n저장: ${files.dir} (${files.saved.join(', ')})`
     if (cmd.command_type === 'collect_list') {
-      const { data: top } = await sb.from('jimscanner_scout_products')
+      const { data: top, error: tErr } = await sb.from('jimscanner_scout_products')
         .select('product_id, name, price, review_count, rating, delivery_badge, url')
         .eq('command_id', cmd.id).order('review_count', { ascending: false, nullsFirst: false }).limit(5)
+      if (tErr) desc += `\n(상위 상품 조회 실패: ${tErr.message.slice(0, 120)})`
       if (top?.length) desc += `\n리뷰수 상위 5:\n${top.map((t) => `- ${t.name?.slice(0, 40)} | ${t.price?.toLocaleString()}원 | 리뷰 ${t.review_count ?? '-'} | ${t.delivery_badge} | ${t.url}`).join('\n')}`
     }
   }
@@ -206,9 +208,10 @@ async function runTurn(session, userMsgs, finishedCmds) {
   }
   let { body, commands, parseError } = parseCommands(res.finalText)
   if (parseError) {
-    // 형식 오류 → 1회 재요청
+    // 형식 오류 → 1회 재요청, 그래도 실패하면 사용자에게 통보(명령 조용한 소실 방지)
     const retry = await runClaude(`명령 json 블록 형식 오류(${parseError}). {"commands":[{"type":"...","payload":{...}}]} 형식의 json 코드블록으로 다시 출력하라.`, res.sessionId, null)
     if (retry.finalText) { res = retry; ({ body, commands, parseError } = parseCommands(retry.finalText)) }
+    if (parseError) await postMsg(sid, 'system', 'status', `⚠ 두뇌 명령 형식 오류로 이번 지시가 실행되지 않았습니다(${parseError}) — 다시 말해주세요`)
   }
   if (body) await postMsg(sid, 'brain', 'chat', body)
   if (commands.length) {

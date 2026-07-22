@@ -312,6 +312,7 @@ async function collectList(cmd) {
   }
 
   let blockStreak = 0
+  let lastPageInfo = null
   const seen = new Set(state.seenIds || [])
   for (let page = state.page + 1; page <= maxPages; page++) {
     await checkControl(cmd.id, state)
@@ -326,7 +327,8 @@ async function collectList(cmd) {
       page--; continue // 같은 페이지 재시도
     }
     blockStreak = 0
-    const items = (r.items || [])
+    lastPageInfo = r?.page || null
+    const items = (r?.items || [])
       .filter((it) => !seen.has(it.product_id) && passFilter(it, p.applyFilter))
       .map((it) => ({ ...it, keyword: keyword || p.categoryUrl || null, page_no: page }))
     items.forEach((it) => seen.add(it.product_id))
@@ -336,7 +338,7 @@ async function collectList(cmd) {
     await enqueueProgress({ commandId: cmd.id, phase: 'paging', page, totalPages: maxPages, items: state.items, pct: Math.round((page / maxPages) * 100), note: `${page}/${maxPages} 페이지 · 누적 ${state.items}건` })
     if (state.items >= maxItems) break
     if (page >= maxPages) break
-    if ((r.page?.maxKnownPage ?? page) <= page) break // 마지막 페이지
+    if ((r?.page?.maxKnownPage ?? page) <= page) break // 마지막 페이지
     await sleep(PAGE_JITTER())
     await checkControl(cmd.id, state)
     const nx = await contentCall(tab.id, { op: 'click_next' })
@@ -344,7 +346,15 @@ async function collectList(cmd) {
     await waitComplete(tab.id); await sleep(SETTLE())
   }
   await st.set({ checkpoint: null })
-  return sendResult({ commandId: cmd.id, ok: true, chunk: { seq: 9999, final: true }, data: { kind: 'products', items: [] }, summary: { pages: state.page, items: state.items, keyword } })
+  // 2026 단일 뷰 SERP(페이지네이션 없음): 연관 키워드를 동봉해 두뇌가 추가 표본 수집을 판단하게 한다
+  const singleView = lastPageInfo && !lastPageInfo.paginationFound && maxPages > 1
+  return sendResult({
+    commandId: cmd.id, ok: true, chunk: { seq: 9999, final: true }, data: { kind: 'products', items: [] },
+    summary: {
+      pages: state.page, items: state.items, keyword,
+      ...(singleView ? { single_view: true, note: 'SERP에 페이지네이션 없음(2026 단일 뷰) — maxPages 미적용', relatedKeywords: lastPageInfo.relatedKeywords ?? [] } : {}),
+    },
+  })
 }
 
 /** 상세/이미지 수집 — productUrls 순회, 건 단위 청크+체크포인트 */

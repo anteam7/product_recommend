@@ -67,13 +67,16 @@
     return out
   }
 
-  /** SERP 페이지 정보 — 현재 페이지·다음 존재 여부 */
+  /** SERP 페이지 정보 — 현재 페이지·다음 존재 여부 + 연관 검색어
+   *  2026 개편 SERP 는 페이지네이션 없는 단일 뷰(~85건)일 수 있음 — 그 경우 연관 키워드가 추가 표본 경로 */
   function pageInfo(S) {
     const cur = parseInt(new URLSearchParams(location.search).get('page') || '1')
     const links = [...document.querySelectorAll(S.serp.pagination)]
     const nums = links.map((a) => parseInt(txt(a))).filter((n) => Number.isFinite(n))
     const totalText = txt(document.querySelector('[class*="search-result"] strong, [class*="TotalCount"]'))
-    return { currentPage: cur, maxKnownPage: nums.length ? Math.max(...nums) : cur, totalText: totalText || null, blocked: isBlocked() }
+    const related = [...document.querySelectorAll(S.serp.relatedKeywords || '.srp-related-keywords a')]
+      .map((a) => txt(a)).filter(Boolean).slice(0, 12)
+    return { currentPage: cur, maxKnownPage: nums.length ? Math.max(...nums) : cur, paginationFound: nums.length > 0, relatedKeywords: related, totalText: totalText || null, blocked: isBlocked() }
   }
 
   async function clickNextPage(S) {
