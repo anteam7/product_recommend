@@ -41,6 +41,7 @@ $('toBottom').addEventListener('click', () => { stick = true; thread.scrollTop =
 async function refreshJobbar() {
   let s
   try { s = await chrome.runtime.sendMessage({ ns: 'scout-ui', op: 'status' }) } catch { return }
+  showUpdateBanner(s?.updateAvailable)
   const bar = $('jobbar')
   if (!s || (!s.jobActive && !s.checkpoint && !s.queued)) { bar.hidden = true; return }
   bar.hidden = false
@@ -55,11 +56,22 @@ $('btnPause').addEventListener('click', async () => { await chrome.runtime.sendM
 $('btnResume').addEventListener('click', async () => { await chrome.runtime.sendMessage({ ns: 'scout-ui', op: 'control', action: 'resume' }); sysNote('▶ 재개 요청'); refreshJobbar() })
 $('btnStop').addEventListener('click', async () => { if (confirm('진행 중 작업을 중지할까요? (체크포인트 폐기)')) { await chrome.runtime.sendMessage({ ns: 'scout-ui', op: 'control', action: 'stop' }); sysNote('⏹ 중지 요청'); refreshJobbar() } })
 
+// ── 확장 업데이트 알림 배너 ──
+function showUpdateBanner(u) {
+  if (!u?.latestVersion) { $('updateBanner').hidden = true; return }
+  $('updateBanner').hidden = false
+  $('updateText').textContent = `⚠ 새 버전 v${u.latestVersion} 있음 (현재 v${u.current ?? '?'}). 원격 PC라면 extension 폴더를 다시 복사한 뒤 새로고침하세요.`
+}
+$('btnReload').addEventListener('click', () => {
+  if (confirm('확장을 새로고침합니다.\n사이드패널이 닫히면 아이콘을 눌러 다시 열어주세요.')) chrome.runtime.reload()
+})
+
 // SW 진행 이벤트 실시간 반영
 chrome.runtime.onMessage.addListener((msg) => {
   if (msg?.ns !== 'scout-ui-ev') return
   if (msg.type === 'progress' && msg.ev?.note) sysNote(`⚙ ${msg.ev.note}`)
   if (msg.type === 'poll_error') $('conn').textContent = `연결 오류: ${msg.message}`, $('conn').className = 'conn err'
+  if (msg.type === 'update') showUpdateBanner({ latestVersion: msg.latestVersion, current: msg.current })
   refreshJobbar()
 })
 

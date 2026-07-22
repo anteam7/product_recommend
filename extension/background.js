@@ -69,6 +69,15 @@ async function doPoll(force = false) {
   } catch (e) { notifyPanel({ type: 'poll_error', message: String(e?.message || e) }); return }
   await st.set({ pendingAcks: [], pendingProgress: [] })
 
+  // 서버가 더 최신 확장 버전을 알고 있으면(코드 변경 후) 사이드패널에 새로고침 알림
+  if (res.update?.latestVersion) {
+    const cur = chrome.runtime.getManifest().version
+    await st.set({ updateAvailable: { latestVersion: res.update.latestVersion, current: cur } })
+    notifyPanel({ type: 'update', latestVersion: res.update.latestVersion, current: cur })
+  } else {
+    await st.set({ updateAvailable: null })
+  }
+
   for (const c of res.control ?? []) await handleControl(c)
   if (res.commands?.length) {
     const { commandQueue = [] } = await st.get('commandQueue')
@@ -456,8 +465,8 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       return { ok: true }
     }
     if (msg.op === 'status') {
-      const { checkpoint, commandQueue = [], jobControl } = await st.get(['checkpoint', 'commandQueue', 'jobControl'])
-      return { jobActive, jobControl: jobControl ?? null, checkpoint: checkpoint ? { commandId: checkpoint.cmd?.id, type: checkpoint.cmd?.command_type, ...summaryOf(checkpoint.state) } : null, queued: commandQueue.length }
+      const { checkpoint, commandQueue = [], jobControl, updateAvailable } = await st.get(['checkpoint', 'commandQueue', 'jobControl', 'updateAvailable'])
+      return { jobActive, jobControl: jobControl ?? null, checkpoint: checkpoint ? { commandId: checkpoint.cmd?.id, type: checkpoint.cmd?.command_type, ...summaryOf(checkpoint.state) } : null, queued: commandQueue.length, updateAvailable: updateAvailable ?? null }
     }
     return { error: 'unknown' }
   })().then(sendResponse)

@@ -2,6 +2,11 @@
 html, body { height: 100%; }
 body { display: flex; flex-direction: column; font-family: system-ui, -apple-system, sans-serif; font-size: 13px; color: #111; background: #fafafa; }
 
+.update-banner { display: flex; align-items: center; gap: 8px; padding: 8px 12px; background: #fef3c7; border-bottom: 1px solid #fde68a; color: #92400e; font-size: 12px; }
+.update-banner span { flex: 1; }
+.update-banner button { border: none; background: #d97706; color: #fff; border-radius: 6px; padding: 4px 10px; font-size: 12px; font-weight: 600; cursor: pointer; white-space: nowrap; }
+.update-banner button:hover { background: #b45309; }
+
 header { padding: 10px 12px 8px; border-bottom: 1px solid #e5e5e5; background: #fff; }
 header .title { font-weight: 700; font-size: 14px; }
 header .conn { font-size: 11px; color: #888; margin-top: 2px; }

@@ -95,6 +95,13 @@ phase: `navigating|searching|paging|parsing|uploading|throttled|blocked_retry|pa
 - Access Denied → 메인 재워밍업 후 재시도, 연속 3회 → 자동 일시정지(BLOCKED, paused) + 채팅 알림.
 - 사용자 실브라우저 프로필에서 실행되므로 CDP 헤드리스보다 차단에 유리.
 
+## 확장 업데이트 알림 (새로고침 유도)
+확장은 unpacked(개발자 모드)라 코드를 바꿔도 각 브라우저에서 수동 새로고침해야 반영된다. 이를 사용자가 놓치지 않도록:
+- **버전 동기화 규칙**: `extension/` 안의 **어떤 파일이든 바뀌면** `extension/manifest.json`의 `version`과 `src/app/api/ext/scout/poll/route.ts`의 `LATEST_EXT_VERSION`을 **같은 값으로 함께 올린다**(같은 커밋).
+- 확장은 poll 때 자신의 manifest 버전을 보낸다 → 서버가 `LATEST_EXT_VERSION`과 비교해 낡았으면 응답에 `update`를 실어 보냄 → 사이드패널 상단에 **노란 배너 + [지금 새로고침]** 버튼.
+- 버튼은 `chrome.runtime.reload()`로 확장을 스스로 재시작해 디스크의 새 파일을 로드한다(집 PC는 폴더가 그대로라 즉시 반영. **원격 PC는 extension 폴더를 다시 복사한 뒤** 눌러야 새 코드가 로드됨).
+- 셀렉터만 급히 고칠 때는 버전 안 올리고 옵션 페이지 storage 오버라이드로 무배포 패치(새로고침 불필요).
+
 ## 셀렉터 운용
 `extension/selectors.json`(버전 필드) — serp/search 는 검증값, detail/review 는 다중 폴백 후보.
 DOM 변경 시: 확장 재배포 없이 옵션 페이지에 수정 JSON 붙여넣기(chrome.storage 오버라이드 > 번들).

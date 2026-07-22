@@ -12,6 +12,19 @@ const CONTROL_TYPES = ['job_pause', 'job_resume', 'job_stop', 'get_state']
 const isUuid = (v: unknown): v is string =>
   typeof v === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(v)
 
+// extension/manifest.json 의 version 과 동기화 — extension/ 아무 파일이나 바뀌면 둘 다 올린다.
+// 배포된 서버가 아는 "최신 버전"과 확장이 보고한 버전을 비교해, 낡았으면 사이드패널에 새로고침 알림.
+const LATEST_EXT_VERSION = '0.1.2'
+function isOlder(reported: string, latest: string): boolean {
+  const a = reported.split('.').map((n) => parseInt(n, 10) || 0)
+  const b = latest.split('.').map((n) => parseInt(n, 10) || 0)
+  for (let i = 0; i < Math.max(a.length, b.length); i++) {
+    if ((a[i] || 0) < (b[i] || 0)) return true
+    if ((a[i] || 0) > (b[i] || 0)) return false
+  }
+  return false
+}
+
 /**
  * 확장 단일 왕복 폴링 — ack(실행 시작 확인)·progress(진행 이벤트) 반영 후 대기 명령 배달.
  * body: { extVersion?, selectorsVersion?, ack?: string[], progress?: [{commandId, phase, ...}] }
@@ -67,9 +80,12 @@ export async function POST(req: NextRequest) {
     if (error) return NextResponse.json({ error: `claim: ${error.message}` }, { status: 500 })
     claimed = data ?? []
   }
+  const extVersion = typeof body?.extVersion === 'string' ? body.extVersion : null
+  const update = extVersion && isOlder(extVersion, LATEST_EXT_VERSION) ? { latestVersion: LATEST_EXT_VERSION } : null
   return NextResponse.json({
     commands: claimed.filter((c) => !CONTROL_TYPES.includes(c.command_type)),
     control: claimed.filter((c) => CONTROL_TYPES.includes(c.command_type)),
     serverTime: now,
+    ...(update ? { update } : {}),
   })
 }

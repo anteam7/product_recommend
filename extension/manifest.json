@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "쿠팡 소싱 스카우트",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "쿠팡 수집 '손' — 로컬 Claude 두뇌(scout-agent)와 Supabase 릴레이로 연동. 채팅으로 지시.",
   "permissions": ["storage", "alarms", "tabs", "scripting", "sidePanel"],
   "host_permissions": [
