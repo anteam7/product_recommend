@@ -14,7 +14,7 @@ const isUuid = (v: unknown): v is string =>
 
 // extension/manifest.json 의 version 과 동기화 — extension/ 아무 파일이나 바뀌면 둘 다 올린다.
 // 배포된 서버가 아는 "최신 버전"과 확장이 보고한 버전을 비교해, 낡았으면 사이드패널에 새로고침 알림.
-const LATEST_EXT_VERSION = '0.1.3'
+const LATEST_EXT_VERSION = '0.1.4'
 function isOlder(reported: string, latest: string): boolean {
   const a = reported.split('.').map((n) => parseInt(n, 10) || 0)
   const b = latest.split('.').map((n) => parseInt(n, 10) || 0)

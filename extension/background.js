@@ -18,7 +18,7 @@ const COLLECT_TYPES = ['collect_list', 'collect_detail', 'collect_reviews', 'ext
 const PACE = {
   keywordCooldownMs: () => jitter(40000, 35000),   // 수집 명령(키워드) 사이 40~75초
   detailCooldownMs: () => jitter(11000, 9000),     // 상세 페이지 사이 11~20초
-  blockBackoffMin: [5, 10, 20, 40],                // 차단 감지 시 누적 대기(분) — 5→10→20→40
+  blockBackoffMin: [30, 40, 60, 90],               // 차단 시 누적 대기(분) — 첫 차단부터 30분+ (사용자 지정 2026-07-23)
   volumeCap: 12,                                   // 연속 수집 12건 후 장기 휴식
   longRestMs: () => jitter(720000, 360000),        // 장기 휴식 12~18분
 }

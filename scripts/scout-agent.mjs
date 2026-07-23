@@ -60,6 +60,8 @@ const RULES = `당신은 "쿠팡 소싱 스카우트"의 두뇌다. 사용자가
 - **2026 쿠팡 검색결과는 페이지네이션 없는 단일 뷰(~85건)일 수 있다**: collect_list 결과 summary에 single_view=true와 relatedKeywords[]가 오면, 표본이 더 필요할 때 그 연관 키워드들로 추가 collect_list를 지시해 합산하라(같은 상품은 product_id로 자연 병합). 사용자에게도 "이 키워드는 단일 뷰라 N건이 전부"임을 알려라.
 - **⚠ 차단 회피 — 적게·깊게 원칙(중요)**: 쿠팡은 ~15-20회 급속 검색이면 차단된다. **한 번에 키워드를 10개 넘게 팬아웃하지 마라**(과거 29개 동시 지시로 차단됨). 확장이 자동으로 수집 사이 40~75초 대기, 12건마다 12~18분 휴식, 차단 시 5~40분 백오프한다 — 그래서 **수집은 느리다**. 키워드 8개면 대략 10~15분 걸린다고 사용자에게 미리 알려라. 명령을 한 번에 몰아넣지 말고 소수(≤8)씩 지시하라.
 - **가설 검증은 collect_detail 로**: "판매자 적고 수요 있는" 상품을 찾으려면 목록(collect_list)의 리뷰수(수요)만으론 부족하다. **경쟁 판매자 수는 collect_detail 로만** 나온다(결과의 competing_sellers 필드). 흐름: ①focused collect_list(≤8키워드) → ②scout-analyze로 수요 상위 후보 추림 → ③그 후보 URL들을 collect_detail(한 번에 ≤20개)로 판매자 수 확보 → ④competing_sellers 적고 리뷰 있는 것이 최종 후보. 넓게 훑기보다 **좁혀서 깊게 파는 것**이 차단 예산을 아끼고 진짜 신호를 얻는 길이다.
+- **끝까지 자율 진행(중요)**: 수집을 지시했으면, 완료 보고를 받을 때마다 다음 단계를 스스로 이어가라. **네가 낸 collect_list 키워드가 전부 done 되면**(더 지시할 수집이 없으면) 멈추지 말고: ① \`node scripts/scout-analyze.mjs --session <세션id>\` 실행 → ② 수요 상위 후보 URL을 뽑아 collect_detail 지시(판매자 수 확보) → ③ 상세까지 done 되면 scout-analyze 재실행 → ④ **competing_sellers 적고(≤3) 리뷰 있는 최종 소싱 후보 목록을 사용자에게 표로 보고**(상품명·가격·리뷰수·판매자수·URL). 즉 "다 수집되면 소싱 후보 선정까지"가 한 세션의 목표다. 차단으로 일시정지(paused)되면 확장이 30분+ 백오프 후 자동 재개하니, 너는 그 사이 완료된 것들로 계속 진행하되 사용자에게 "차단으로 N분 대기 중"임을 알려라.
+- **차단 대기 안내**: collect_* 결과가 paused(BLOCKED)로 오면, 확장이 30분 이상 쉬었다가 자동 재개한다. 재촉하지 말고(같은 명령 다시 내지 말 것 — 중복), 사용자에게 대기 상황만 알리고 이미 수집된 데이터로 가능한 분석을 진행하라.
 - 확장은 사람처럼 행동한다(페이지 간 8~12초). 수집은 시간이 걸린다 — 명령을 내릴 때 예상 소요를 사용자에게 알려라.
 - 수집 완료 보고를 받으면 핵심(건수·가격대·리뷰 분포·주목 상품)을 요약해 사용자에게 알려라. 데이터 파일 경로도 알려라.
 - 분석: Bash 로 \`node scripts/scout-analyze.mjs --command <명령id>\` 또는 \`--session <세션id>\` 를 직접 실행해 리포트를 만들고 상위 후보를 보고하라. 원본은 Supabase jimscanner_scout_products / jimscanner_scout_reviews.
@@ -200,7 +202,10 @@ async function runTurn(session, userMsgs, finishedCmds) {
   if (userMsgs.length) parts.push(`[사용자 메시지]\n${userMsgs.map((m) => m.content).join('\n---\n')}`)
   if (!parts.length) return
   const isNew = !session.claude_session_id
-  const prompt = isNew ? `${RULES}\n\n[세션 id] ${sid}\n\n${parts.join('\n\n')}` : parts.join('\n\n')
+  // 세션 id 는 매 턴 상기(분석 명령 scout-analyze --session <id> 실행에 필요)
+  const prompt = isNew
+    ? `${RULES}\n\n[세션 id] ${sid}\n\n${parts.join('\n\n')}`
+    : `[세션 id] ${sid}\n\n${parts.join('\n\n')}`
 
   console.log(`[${new Date().toISOString()}] 세션 ${sid.slice(0, 8)} 턴 (user ${userMsgs.length} · 결과 ${finishedCmds.length}${isNew ? ' · 신규' : ''})`)
   let res = await runClaude(prompt, session.claude_session_id || null, null)

@@ -96,10 +96,10 @@ phase: `navigating|searching|paging|parsing|uploading|throttled|blocked_retry|pa
 - **차단 회피 페이싱(background.js `PACE`)** — 쿠팡 Akamai 는 ~20회 급속 검색이면 차단(레포 실측). 그래서:
   - **키워드(수집 명령) 사이 40~75초 쿨다운** — `runNext` 가 `pacing.cooldownUntil` 을 gate 로 확인, 지나야 다음 수집 실행. 대기 중엔 큐에 남겨두고 `scout-cooldown` 알람/30초 폴링으로 재확인(MV3 SW 슬립 안전).
   - **12건 수집마다 12~18분 장기 휴식**(volumeCap) — 세션 총량 억제.
-  - **차단 감지 시 누적 백오프 5→10→20→40분**(`onBlocked`) — 전체 큐가 대기, 다음 키워드가 곧바로 또 막히지 않게. 성공하면 스트릭 리셋.
+  - **차단 감지 시 누적 백오프 30→40→60→90분**(`onBlocked`, v0.1.4) — 첫 차단부터 30분+ 정지 후 자동 재개(사용자 지정). 전체 큐가 대기, 다음 키워드가 곧바로 또 막히지 않게. 성공하면 스트릭 리셋. **실측(v0.1.3)**: 페이싱ON 완료간격 54~65초·무차단 vs OFF 11초→차단연쇄.
   - 상세 페이지 사이 11~20초(`detailCooldownMs`).
   - 모든 대기는 사이드패널에 진행 메시지로 표시(⏳/🚫/😴).
-- **두뇌 전략(적게·깊게)**: 한 번에 키워드 10개 넘게 팬아웃 금지(과거 29개 동시 지시로 차단). ≤8개씩, 넓게 훑기보다 **collect_detail 로 좁혀서 깊게**(경쟁 판매자 수 확보) — scout-agent 시스템 프롬프트에 명시.
+- **두뇌 전략(적게·깊게 + 끝까지 자율)**: 한 번에 키워드 10개 넘게 팬아웃 금지(과거 29개 동시 지시로 차단). ≤8개씩, 넓게 훑기보다 **collect_detail 로 좁혀서 깊게**(경쟁 판매자 수 확보). **수집이 다 끝나면 멈추지 말고 자동으로 소싱 후보 선정까지**: collect_list 완료 → scout-analyze → 상위 후보 collect_detail(판매자수) → 재분석 → competing_sellers≤3·리뷰 있는 최종 후보 표 보고 — scout-agent 시스템 프롬프트에 명시.
 
 ## 추가 수집 항목 (v0.1.3)
 - `competing_sellers`(int) — collect_detail 시 상세페이지의 "다른 판매자 N"(아이템위너 경쟁 셀러 수). **가설 "판매자 적음"의 핵심 지표.** best-effort 파싱(selectors.json `detail.sellerCount` + 본문 정규식), 쿠팡 접근 복구 후 실측 검증 대상. scout-analyze 가 이 값을 저경쟁 점수(lowSeller, 가중치 0.3)로 사용.
