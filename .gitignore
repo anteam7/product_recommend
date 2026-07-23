@@ -78,3 +78,6 @@ _tmp_coupang_guides/
 
 # 스카우트 수집 데이터·리포트 (개인 시장조사 — 커밋 금지, docs/scout-protocol.md)
 data/scout/
+
+# 확장 배포용 압축본(로컬에서 원격 PC 복사용) — 커밋 금지
+extension/*.zip
