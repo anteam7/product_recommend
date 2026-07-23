@@ -62,6 +62,7 @@ create table if not exists jimscanner_scout_products (
   review_count int,
   brand text,
   seller text,
+  competing_sellers int,                    -- collect_detail: 같은 상품 경쟁 판매자 수(적을수록 저경쟁). null=미수집
   delivery_badge text,                      -- rocket|rocket_fresh|rocket_global|rocket_growth|seller|normal
   image_url text,
   keyword text,                             -- 수집 당시 검색어/카테고리 라벨

@@ -111,6 +111,15 @@
       const sellerEl = document.querySelector(S.detail.sellerName)
       d.seller = txt(sellerEl).slice(0, 100) || null
       d.seller_info = sellerEl ? { name: d.seller, link: sellerEl.getAttribute('href') || null } : null
+      // 경쟁 판매자 수(아이템위너 "다른 판매자 N") — best-effort, DOM 실측 검증 대기
+      let cs = null
+      const csEl = S.detail.sellerCount ? document.querySelector(S.detail.sellerCount) : null
+      if (csEl) { const m = (csEl.textContent || '').match(/(\d+)/); if (m) cs = parseInt(m[1]) }
+      if (cs == null) {
+        const bm = (document.body.innerText || '').match(/다른\s*판매자[^0-9]{0,8}(\d{1,4})|판매자\s*(\d{1,4})\s*(?:곳|개)|(\d{1,4})\s*개\s*판매처/)
+        if (bm) cs = parseInt(bm[1] || bm[2] || bm[3])
+      }
+      d.competing_sellers = cs
     }
     if (inc('images')) {
       d.image_url = document.querySelector(S.detail.mainImages)?.getAttribute('src') || null

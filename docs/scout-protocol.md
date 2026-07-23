@@ -90,10 +90,23 @@ phase: `navigating|searching|paging|parsing|uploading|throttled|blocked_retry|pa
   delivery_info, qna, category_path[](breadcrumb)
 - **리뷰**(reviews): review_date, rating, content, images[], option_text, helpful_count
 
-## 안티봇 정책 (scripts/lib/market-price.mjs 검증 노하우 이식)
+## 안티봇 정책 (scripts/lib/market-price.mjs 검증 노하우 이식 + 페이싱 엔진 v0.1.3)
 - 검색 딥링크 금지 — 반드시 검색창 흐름. 페이지 간 8~12초 지터, DOM 액션 간 0.3~0.9초.
-- Access Denied → 메인 재워밍업 후 재시도, 연속 3회 → 자동 일시정지(BLOCKED, paused) + 채팅 알림.
 - 사용자 실브라우저 프로필에서 실행되므로 CDP 헤드리스보다 차단에 유리.
+- **차단 회피 페이싱(background.js `PACE`)** — 쿠팡 Akamai 는 ~20회 급속 검색이면 차단(레포 실측). 그래서:
+  - **키워드(수집 명령) 사이 40~75초 쿨다운** — `runNext` 가 `pacing.cooldownUntil` 을 gate 로 확인, 지나야 다음 수집 실행. 대기 중엔 큐에 남겨두고 `scout-cooldown` 알람/30초 폴링으로 재확인(MV3 SW 슬립 안전).
+  - **12건 수집마다 12~18분 장기 휴식**(volumeCap) — 세션 총량 억제.
+  - **차단 감지 시 누적 백오프 5→10→20→40분**(`onBlocked`) — 전체 큐가 대기, 다음 키워드가 곧바로 또 막히지 않게. 성공하면 스트릭 리셋.
+  - 상세 페이지 사이 11~20초(`detailCooldownMs`).
+  - 모든 대기는 사이드패널에 진행 메시지로 표시(⏳/🚫/😴).
+- **두뇌 전략(적게·깊게)**: 한 번에 키워드 10개 넘게 팬아웃 금지(과거 29개 동시 지시로 차단). ≤8개씩, 넓게 훑기보다 **collect_detail 로 좁혀서 깊게**(경쟁 판매자 수 확보) — scout-agent 시스템 프롬프트에 명시.
+
+## 추가 수집 항목 (v0.1.3)
+- `competing_sellers`(int) — collect_detail 시 상세페이지의 "다른 판매자 N"(아이템위너 경쟁 셀러 수). **가설 "판매자 적음"의 핵심 지표.** best-effort 파싱(selectors.json `detail.sellerCount` + 본문 정규식), 쿠팡 접근 복구 후 실측 검증 대상. scout-analyze 가 이 값을 저경쟁 점수(lowSeller, 가중치 0.3)로 사용.
+
+### 알려진 데이터 품질 이슈(쿠팡 접근 복구 후 DOM 재프로브로 수정)
+- `delivery_badge` 전량 'seller'(2026 SERP DOM 변경으로 로켓 뱃지 미검출) → scout-analyze 가 badgeUnreliable 로 감지해 경쟁 신호에서 제외.
+- `rating` 전량 0(별점 width% 셀렉터도 깨짐).
 
 ## 확장 업데이트 알림 (새로고침 유도)
 확장은 unpacked(개발자 모드)라 코드를 바꿔도 각 브라우저에서 수동 새로고침해야 반영된다. 이를 사용자가 놓치지 않도록:

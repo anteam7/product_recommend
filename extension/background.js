@@ -13,6 +13,47 @@ const NAV_TIMEOUT = 35000
 const PAGE_JITTER = () => jitter(8000, 4000)      // 페이지 전환 간 8~12초 (검증된 정책)
 const SETTLE = () => jitter(1800, 1200)
 
+// ── 차단 회피 페이싱 (쿠팡 Akamai 는 ~20회 급속 검색이면 차단; 느리게·상한·백오프로 지속 가능하게) ──
+const COLLECT_TYPES = ['collect_list', 'collect_detail', 'collect_reviews', 'extract_images']
+const PACE = {
+  keywordCooldownMs: () => jitter(40000, 35000),   // 수집 명령(키워드) 사이 40~75초
+  detailCooldownMs: () => jitter(11000, 9000),     // 상세 페이지 사이 11~20초
+  blockBackoffMin: [5, 10, 20, 40],                // 차단 감지 시 누적 대기(분) — 5→10→20→40
+  volumeCap: 12,                                   // 연속 수집 12건 후 장기 휴식
+  longRestMs: () => jitter(720000, 360000),        // 장기 휴식 12~18분
+}
+let blockedThisCmd = false // 이번 명령이 차단을 만났는지(afterCollect 에서 스트릭 리셋 판단)
+
+async function getPacing() {
+  const { pacing } = await st.get('pacing')
+  return pacing || { cooldownUntil: 0, consecutiveBlocks: 0, collectsSinceRest: 0 }
+}
+async function setPacing(patch) { const p = await getPacing(); await st.set({ pacing: { ...p, ...patch } }) }
+
+// 차단 감지 → 누적 백오프 대기 설정(전체 큐가 이 시각까지 대기)
+async function onBlocked() {
+  blockedThisCmd = true
+  const p = await getPacing()
+  const idx = Math.min(p.consecutiveBlocks, PACE.blockBackoffMin.length - 1)
+  const mins = PACE.blockBackoffMin[idx]
+  await setPacing({ consecutiveBlocks: p.consecutiveBlocks + 1, cooldownUntil: Date.now() + mins * 60000 })
+  notifyPanel({ type: 'progress', ev: { note: `🚫 쿠팡 차단 감지 — ${mins}분 대기 후 자동 재개(백오프)` } })
+}
+
+// 수집 명령 종료 후 페이싱 갱신: 성공이면 스트릭 리셋 + 키워드 쿨다운, 상한 도달 시 장기 휴식
+async function afterCollect(cmd) {
+  if (!COLLECT_TYPES.includes(cmd.command_type)) return
+  if (blockedThisCmd) return // onBlocked 가 이미 더 긴 쿨다운을 잡아둠
+  const p = await getPacing()
+  const collects = p.collectsSinceRest + 1
+  if (collects >= PACE.volumeCap) {
+    await setPacing({ consecutiveBlocks: 0, collectsSinceRest: 0, cooldownUntil: Date.now() + PACE.longRestMs() })
+    notifyPanel({ type: 'progress', ev: { note: `😴 ${PACE.volumeCap}건 수집 완료 — 차단 예방 장기 휴식(12~18분)` } })
+  } else {
+    await setPacing({ consecutiveBlocks: 0, collectsSinceRest: collects, cooldownUntil: Date.now() + PACE.keywordCooldownMs() })
+  }
+}
+
 const st = {
   async get(keys) { return chrome.storage.local.get(keys) },
   async set(obj) { return chrome.storage.local.set(obj) },
@@ -89,6 +130,7 @@ async function doPoll(force = false) {
   // 미아 작업 복구: 체크포인트가 있고 일시정지가 아니면 이어서
   const { checkpoint, jobControl } = await st.get(['checkpoint', 'jobControl'])
   if (!jobActive && checkpoint?.cmd && jobControl !== 'pause') resumeFromCheckpoint()
+  else runNext() // 쿨다운 대기 중이던 큐 재확인(쿨다운 경과 시 실행)
 }
 
 // ── 탭 관리 ──
@@ -168,10 +210,21 @@ const summaryOf = (s) => ({ page: s?.page, items: s?.items })
 async function runNext() {
   if (jobActive) return
   const { commandQueue = [] } = await st.get('commandQueue')
+  if (!commandQueue.length) return
+  // 수집 명령은 쿨다운(키워드 간격·차단 백오프·장기 휴식)이 지나야 실행 — 큐에 남겨두고 대기
+  const head = commandQueue[0]
+  if (COLLECT_TYPES.includes(head.command_type)) {
+    const wait = (await getPacing()).cooldownUntil - Date.now()
+    if (wait > 0) {
+      chrome.alarms.create('scout-cooldown', { when: Date.now() + Math.min(wait, 60000) + 1000 })
+      notifyPanel({ type: 'progress', ev: { note: `⏳ 차단 회피 대기 — 약 ${Math.ceil(wait / 1000)}초 후 다음 수집` } })
+      return
+    }
+  }
   const cmd = commandQueue.shift()
-  if (!cmd) return
   await st.set({ commandQueue })
   jobActive = true
+  blockedThisCmd = false
   try {
     await enqueueAck(cmd.id)
     await execute(cmd)
@@ -186,6 +239,7 @@ async function runNext() {
     }
   } finally {
     jobActive = false
+    await afterCollect(cmd)
     await doPoll(true)
     runNext()
   }
@@ -331,7 +385,8 @@ async function collectList(cmd) {
       blockStreak++
       if (blockStreak >= 3 || !(await recoverBlocked(tab.id, keyword))) {
         await saveCkpt()
-        return sendResult({ commandId: cmd.id, ok: false, error: { code: 'BLOCKED', message: `차단 ${blockStreak}회 — 일시정지`, paused: true, checkpoint: summaryOf(state) } })
+        await onBlocked() // 전체 큐에 백오프 쿨다운 적용(다음 키워드가 곧바로 또 막히지 않게)
+        return sendResult({ commandId: cmd.id, ok: false, error: { code: 'BLOCKED', message: `차단 ${blockStreak}회 — ${PACE.blockBackoffMin[Math.min((await getPacing()).consecutiveBlocks - 1, PACE.blockBackoffMin.length - 1)]}분 백오프`, paused: true, checkpoint: summaryOf(state) } })
       }
       page--; continue // 같은 페이지 재시도
     }
@@ -386,7 +441,8 @@ async function collectDetail(cmd, imagesOnly) {
       blockStreak++
       if (blockStreak >= 3) {
         await st.set({ checkpoint: { cmd, state } })
-        return sendResult({ commandId: cmd.id, ok: false, error: { code: 'BLOCKED', message: `차단 ${blockStreak}회 — 일시정지`, paused: true, checkpoint: { idx: i } } })
+        await onBlocked() // 큐 전체 백오프
+        return sendResult({ commandId: cmd.id, ok: false, error: { code: 'BLOCKED', message: `차단 ${blockStreak}회 — 백오프 대기`, paused: true, checkpoint: { idx: i } } })
       }
       if (!(await recoverBlocked(tab.id, null))) { i--; continue }
       i--; continue
@@ -397,8 +453,8 @@ async function collectDetail(cmd, imagesOnly) {
       state = { idx: i + 1, items: state.items + 1 }
       await st.set({ checkpoint: { cmd, state } })
     }
-    await enqueueProgress({ commandId: cmd.id, phase: 'parsing', page: i + 1, totalPages: urls.length, pct: Math.round(((i + 1) / urls.length) * 100), note: `상세 ${i + 1}/${urls.length}` })
-    if (i < urls.length - 1) await sleep(PAGE_JITTER())
+    await enqueueProgress({ commandId: cmd.id, phase: 'parsing', page: i + 1, totalPages: urls.length, pct: Math.round(((i + 1) / urls.length) * 100), note: `상세 ${i + 1}/${urls.length} · 판매자수 ${d?.competing_sellers ?? '?'}` })
+    if (i < urls.length - 1) await sleep(PACE.detailCooldownMs())
   }
   await st.set({ checkpoint: null })
   return sendResult({ commandId: cmd.id, ok: true, chunk: { seq: 9999, final: true }, data: { kind: 'product_detail', items: [] }, summary: { products: state.items, imagesOnly } })
@@ -479,4 +535,7 @@ chrome.runtime.onInstalled.addListener(() => {
   chrome.alarms.create('scout-poll', { periodInMinutes: 0.5 })
 })
 chrome.runtime.onStartup.addListener(() => { chrome.alarms.create('scout-poll', { periodInMinutes: 0.5 }) })
-chrome.alarms.onAlarm.addListener((a) => { if (a.name === 'scout-poll') doPoll() })
+chrome.alarms.onAlarm.addListener((a) => {
+  if (a.name === 'scout-poll') doPoll()          // 폴링 + 쿨다운 경과분 실행(doPoll 말미 runNext)
+  else if (a.name === 'scout-cooldown') runNext() // 쿨다운 만료 시 큐 재개
+})

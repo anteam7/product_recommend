@@ -82,20 +82,14 @@ const reviewCounts = products.map((p) => p.review_count ?? 0)
 const reviewSum = reviewCounts.reduce((a, b) => a + b, 0)
 const reviewMedian = median(reviewCounts) ?? 0
 
-// 경쟁 밀도 — 셀러 정보는 collect_detail 로 채워짐(없으면 표본 부족으로 표기)
-const sellers = products.map((p) => p.seller).filter(Boolean)
-const sellerSet = new Set(sellers)
-const sellerN = sellerSet.size
-let hhi = null
-if (sellers.length >= 5) {
-  const cnt = {}
-  for (const s of sellers) cnt[s] = (cnt[s] || 0) + 1
-  hhi = Math.round(Object.values(cnt).reduce((a, c) => a + Math.pow(c / sellers.length, 2), 0) * 100) / 100
-}
+// 경쟁 판매자 수(collect_detail 로 채워짐) — 가설의 핵심 지표
+const withSellerCount = products.filter((p) => Number.isFinite(p.competing_sellers))
+const lowCompetition = withSellerCount.filter((p) => p.competing_sellers <= 3)
 
-// 로켓 점유
+// 로켓 점유 (주의: 2026 DOM 변경으로 뱃지 감지 불안정 — 전량 'seller'면 미검출로 간주)
 const rocketShare = pct(products.filter((p) => /^rocket($|_fresh|_global)/.test(p.delivery_badge || '')).length, products.length) ?? 0
 const growthShare = pct(products.filter((p) => p.delivery_badge === 'rocket_growth').length, products.length) ?? 0
+const badgeUnreliable = products.length > 0 && rocketShare === 0 && growthShare === 0
 
 // 수요 최근성 — 리뷰 작성일 분포
 const now = Date.now()
@@ -114,24 +108,34 @@ for (const r of dated) {
 
 // ── 판정 (계획서 초기값 — 데이터 쌓이면 보정) ──
 const verdicts = []
-const sellerVerdict = sellerN ? (sellerN <= 15 ? '저경쟁' : sellerN <= 40 ? '중간' : '과열') : '표본없음(collect_detail 필요)'
-verdicts.push(`셀러 ${sellerN || '?'}개 → ${sellerVerdict}${hhi != null ? ` (HHI ${hhi})` : ''}`)
+// 가설의 핵심: 경쟁 판매자 수(collect_detail). 있으면 이걸 1순위로, 없으면 미수집 표기.
+if (withSellerCount.length) {
+  const csMedian = median(withSellerCount.map((p) => p.competing_sellers))
+  verdicts.push(`경쟁 판매자 수 중앙값 ${csMedian} (표본 ${withSellerCount.length}건) → 판매자 ≤3 인 저경쟁 상품 ${lowCompetition.length}건`)
+} else {
+  verdicts.push('경쟁 판매자 수 → 미수집(collect_detail 필요) · **가설의 "판매자 적음"은 이 지표 없이는 판정 불가**')
+}
 verdicts.push(`리뷰 중앙값 ${reviewMedian} → ${reviewMedian >= 30 ? '수요 있음' : '수요 약함'}`)
 if (recent30Share != null) verdicts.push(`최근 30일 리뷰 ${recent30Share}% → ${recent30Share >= 20 ? '수요 살아있음' : '수요 식음(죽은 수요 의심)'}`)
 else verdicts.push('리뷰 날짜 표본 부족 → collect_reviews 로 최근성 확인 필요 (저수요 vs 저경쟁 구분의 핵심)')
-verdicts.push(`로켓(직매입) 점유 ${rocketShare}% → ${rocketShare <= 40 ? '진입 여지' : '쿠팡 직매입 우세(회피 권장)'} · 로켓그로스 ${growthShare}%`)
+if (badgeUnreliable) verdicts.push('⚠ 로켓 뱃지 전량 미검출(2026 DOM 변경) → 경쟁강도 신호로 쓰지 말 것(셀렉터 수정 대기)')
+else verdicts.push(`로켓(직매입) 점유 ${rocketShare}% · 로켓그로스 ${growthShare}%`)
 
-const opportunity = sellerN > 0 && sellerN <= 15 && reviewMedian >= 30 && (recent30Share == null || recent30Share >= 20) && rocketShare <= 40
+const opportunity = withSellerCount.length > 0 && lowCompetition.length > 0 && reviewMedian >= 30
 
-// 후보 상품 점수: 수요(리뷰) 0.35 + 최근성 0.25 + 비로켓 0.15 + 가격대 적합 0.25(트림중앙값 ±60% 구간)
+// 후보 상품 점수: 경쟁 판매자 수가 있으면 그걸 주지표로. 없으면 수요/최근성/가격 위주(경쟁은 미확인).
+// 배지 미검출 시 nonRocket 는 변별력이 없으므로 가중치를 lowSeller/priceFit 로 재분배.
 const maxReview = Math.max(...reviewCounts, 1)
 const scored = products.map((p) => {
   const demand = Math.min((p.review_count ?? 0) / maxReview, 1)
   const rec = recentByPid[p.product_id]
   const recency = rec && rec.total >= 3 ? rec.recent / rec.total : 0.5 // 표본 없으면 중립
-  const nonRocket = /^rocket($|_fresh|_global)/.test(p.delivery_badge || '') ? 0 : 1
+  // 저경쟁 신호: 경쟁 판매자 수 알면 적을수록 1(0→1.0, 3→0.5, 10+→0), 모르면 중립 0.5
+  const lowSeller = Number.isFinite(p.competing_sellers)
+    ? Math.max(0, 1 - p.competing_sellers / 6)
+    : 0.5
   const priceFit = priceMedian && p.price ? (Math.abs(p.price - priceMedian) / priceMedian <= 0.6 ? 1 : 0.3) : 0.5
-  const score = Math.round((demand * 0.35 + recency * 0.25 + nonRocket * 0.15 + priceFit * 0.25) * 100)
+  const score = Math.round((demand * 0.3 + recency * 0.2 + lowSeller * 0.3 + priceFit * 0.2) * 100)
   return { ...p, _score: score, _recency: rec ? pct(rec.recent, rec.total) : null }
 }).sort((a, b) => b._score - a._score)
 
@@ -153,17 +157,17 @@ ${verdicts.map((v) => `- ${v}`).join('\n')}
 판매자도 적고 최근 리뷰도 없으면 저경쟁이 아니라 **저수요**다.
 
 ## 후보 상위 ${top.length}
-| # | 상품명 | 가격 | 리뷰수 | 평점 | 최근30일% | 배송 | 점수 | URL |
-|---|---|---|---|---|---|---|---|---|
-${top.map((p, i) => `| ${i + 1} | ${(p.name || '').slice(0, 40).replace(/\|/g, '/')} | ${p.price?.toLocaleString() ?? '?'} | ${p.review_count ?? '-'} | ${p.rating ?? '-'} | ${p._recency ?? '-'} | ${p.delivery_badge ?? '-'} | ${p._score} | ${p.url ?? ''} |`).join('\n')}
+| # | 상품명 | 가격 | 리뷰수 | 판매자수 | 최근30일% | 점수 | URL |
+|---|---|---|---|---|---|---|---|
+${top.map((p, i) => `| ${i + 1} | ${(p.name || '').slice(0, 40).replace(/\|/g, '/')} | ${p.price?.toLocaleString() ?? '?'} | ${p.review_count ?? '-'} | ${Number.isFinite(p.competing_sellers) ? p.competing_sellers : '미수집'} | ${p._recency ?? '-'} | ${p._score} | ${p.url ?? ''} |`).join('\n')}
 
 ## 다음 단계
-${sellerN === 0 ? '- collect_detail 로 판매자 표본 확보 (경쟁 밀도 판정의 전제)\n' : ''}${recent30Share == null ? '- 상위 후보 collect_reviews 로 수요 최근성 확인\n' : ''}- 후보를 도매꾹에서 검색해 공급가 확인 → 마진 계산 (수동)
+${withSellerCount.length === 0 ? '- **collect_detail 로 경쟁 판매자 수 확보** (가설 판정의 전제 — 지금은 미수집)\n' : ''}${recent30Share == null ? '- 상위 후보 collect_reviews 로 수요 최근성 확인\n' : ''}- 후보를 도매꾹에서 검색해 공급가 확인 → 마진 계산 (수동)
 `
 const file = path.join(dir, `${ts}-${slug}.md`)
 writeFileSync(file, md, 'utf8')
 
 console.log(`[판정] ${opportunity ? '기회' : '조건 미충족'} — ${verdicts.join(' / ')}`)
 console.log(`[후보 Top5]`)
-for (const p of top.slice(0, 5)) console.log(`  ${p._score}점 | ${(p.name || '').slice(0, 45)} | ${p.price?.toLocaleString()}원 | 리뷰 ${p.review_count ?? '-'} | ${p.delivery_badge}`)
+for (const p of top.slice(0, 5)) console.log(`  ${p._score}점 | ${(p.name || '').slice(0, 45)} | ${p.price?.toLocaleString()}원 | 리뷰 ${p.review_count ?? '-'} | 판매자 ${Number.isFinite(p.competing_sellers) ? p.competing_sellers : '?'}`)
 console.log(`[리포트] ${path.relative(REPO, file)}`)

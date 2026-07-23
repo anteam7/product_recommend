@@ -1,5 +1,5 @@
 {
-  "version": "2026-07-23.1",
+  "version": "2026-07-23.2",
   "comment": "쿠팡 DOM 셀렉터 외부화. 옵션 페이지에서 JSON 붙여넣기로 무배포 패치 가능(chrome.storage 오버라이드 > 이 파일). serp/search 는 scripts/lib/market-price.mjs 검증값, detail/review 는 다중 폴백 후보(SELECTOR_MISS 보고로 보정).",
   "search": {
     "input": "input#headerSearchKeyword, input[name=\"q\"]",
@@ -26,6 +26,7 @@
     "infoTable": "[class*=\"prod-delivery-return-policies\"] table, [class*=\"product-item\"] table, .prod-description table, table[class*=\"info\"]",
     "infoRows": "tr",
     "sellerName": "[class*=\"prod-sale-vendor\"] a, [class*=\"seller\"] a, a[href*=\"/vm/\"]",
+    "sellerCount": "[class*=\"prod-other-seller\"] a, a[href*=\"itemBundle\"], [class*=\"other-seller\"] [class*=\"count\"], [class*=\"oos-other-seller\"]",
     "mainImages": "[class*=\"prod-image\"] img, [class*=\"ProductImage\"] img",
     "detailImages": "#productDetail img, [class*=\"product-detail\"] img, [class*=\"detail-content\"] img, .vendor-item img",
     "deliveryInfo": "[class*=\"prod-shipping\"], [class*=\"delivery\"], [class*=\"shipping-fee\"]",

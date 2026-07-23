@@ -62,6 +62,7 @@ export async function POST(req: NextRequest) {
         price: toInt(raw.price), original_price: toInt(raw.original_price), discount_rate: toInt(raw.discount_rate),
         rating: Number.isFinite(Number(raw.rating)) ? Number(raw.rating) : null,
         review_count: toInt(raw.review_count), brand: toStr(raw.brand, 100), seller: toStr(raw.seller, 100),
+        competing_sellers: toInt(raw.competing_sellers),
         delivery_badge: toStr(raw.delivery_badge, 30), image_url: toStr(raw.image_url, 800),
         keyword: toStr(raw.keyword, 200), page_no: toInt(raw.page_no), rank_in_page: toInt(raw.rank_in_page),
         options: raw.options ?? null, manufacturer: toStr(raw.manufacturer, 200), origin: toStr(raw.origin, 200),
