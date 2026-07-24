@@ -101,6 +101,26 @@ async function loadCandidates() {
   return Object.values(best).sort((a, b) => b.review_count - a.review_count)
 }
 
+// 진입 판매가 = 같은 상품유형 리스팅 가격의 하위 25%(P25). 신규 노브랜드 셀러가 브랜드 프리미엄 없이 받는 현실가.
+const P25 = (arr) => { const a = arr.filter((n) => n > 0).sort((x, y) => x - y); return a.length ? a[Math.floor(a.length * 0.25)] : null }
+async function loadMarket() {
+  const rows = []
+  for (let f = 0; ; f += 1000) {
+    const { data } = await sb.from('jimscanner_scout_products').select('name,price,review_count').eq('session_id', SID).is('detail_collected_at', null).range(f, f + 999)
+    rows.push(...(data ?? [])); if (!data || data.length < 1000) break
+  }
+  return rows.filter((r) => r.name && r.price > 0)
+}
+const coreNoun = (name) => { const t = toKeyword(name).split(/\s+/).filter(Boolean); return t[t.length - 1] || '' }
+function marketEntryPrice(name, ownPrice, market) {
+  const noun = coreNoun(name)
+  if (noun.length < 2) return { entry: Math.round(ownPrice * 0.85), n: 0, basis: '−15%(유형불명)' }
+  const peers = market.filter((r) => r.name.includes(noun) && (r.review_count ?? 0) >= 50).map((r) => r.price)
+  if (peers.length < 5) return { entry: Math.round(ownPrice * 0.85), n: peers.length, basis: `−15%(표본 ${peers.length})` }
+  return { entry: P25(peers), n: peers.length, basis: `P25(${noun}·${peers.length})` }
+}
+
+const market = await loadMarket()
 const cands = await loadCandidates()
 // 수요 범위 고르게 LIMIT개
 const step = Math.max(1, Math.floor(cands.length / LIMIT))
@@ -121,38 +141,41 @@ for (const c of picks) {
   const bestMatch = bestDom || bestOversea   // 국내 우선, 없으면 해외(참고)
   const tier = TIER === 'auto' ? guessTier(c.name, c.price) : TIER
   const logi = RG_LOGI[tier] ?? RG_LOGI['소형']
+  const ep = marketEntryPrice(c.name, c.price, market)   // 현실 진입가(P25)
+  const sell = ep.entry
   let margin = null, rate = null
   if (bestMatch) {
-    const fees = (c.price * COMMISSION + logi) * VAT
-    margin = Math.round(c.price - bestMatch.supply - fees - BOX)
-    rate = Math.round((margin / c.price) * 100)
+    const fees = (sell * COMMISSION + logi) * VAT
+    margin = Math.round(sell - bestMatch.supply - fees - BOX)
+    rate = Math.round((margin / sell) * 100)
   }
-  results.push({ ...c, kw, tier, logi, match: bestMatch, margin, rate })
+  results.push({ ...c, kw, tier, logi, sell, epBasis: ep.basis, match: bestMatch, margin, rate })
   const tag = !bestMatch ? '✗매칭없음'
     : `${bestMatch.oversea ? '해외' : '국내'} ${margin > 0 ? `흑자 +${margin.toLocaleString()}(${rate}%)` : `적자 ${margin.toLocaleString()}`}`
-  console.log(`[${tag}] ${c.name.slice(0, 30)} | 쿠팡 ${c.price.toLocaleString()}${bestMatch ? ` | 도매 ${bestMatch.supply.toLocaleString()}(sim${bestMatch.s})` : ` | kw="${kw}"`}`)
+  console.log(`[${tag}] ${c.name.slice(0, 28)} | 진입가 ${sell.toLocaleString()}(기존 ${c.price.toLocaleString()})${bestMatch ? ` | 도매 ${bestMatch.supply.toLocaleString()}(sim${bestMatch.s})` : ` | kw="${kw}"`}`)
 }
 
 // 리포트 저장
 const dir = path.join(REPO, 'data', 'scout', 'reports'); mkdirSync(dir, { recursive: true })
 const domOk = results.filter((r) => r.match && !r.match.oversea && r.margin > 0).sort((a, b) => b.margin - a.margin)
 const oversOk = results.filter((r) => r.match && r.match.oversea && r.margin > 0).sort((a, b) => b.margin - a.margin)
-const row = (r) => `| ${r.margin > 0 ? '+' : ''}${r.margin.toLocaleString()} | ${r.rate}% | ${r.price.toLocaleString()} | ${r.match.supply.toLocaleString()} | ${r.logi}(${r.tier}) | ${r.review_count} | ${(r.name || '').slice(0, 32).replace(/\|/g, '/')} | ${r.match.url} |`
+const row = (r) => `| ${r.margin > 0 ? '+' : ''}${r.margin.toLocaleString()} | ${r.rate}% | ${r.sell.toLocaleString()} | ${r.price.toLocaleString()} | ${r.match.supply.toLocaleString()} | ${r.logi} | ${r.review_count} | ${(r.name || '').slice(0, 30).replace(/\|/g, '/')} | ${r.match.url} |`
 const md = `# 도매꾹 소싱·로켓그로스 마진 검증 (${new Date().toISOString().slice(0, 10)})
 
 - 수수료 ${(COMMISSION * 100).toFixed(1)}% · 로켓그로스 물류비(입출고+배송) 티어별 · 박스 ${BOX}원 · 부가세 반영
-- 마진 = 쿠팡판매가 − 도매꾹공급가 − (판매수수료 + 물류비)×1.1 − 박스
+- **진입가 = 같은 상품유형 리스팅 가격의 하위 25%(P25)** — 신규 노브랜드 셀러가 브랜드 프리미엄 없이 받는 현실가
+- 마진 = **진입가** − 도매꾹공급가 − (판매수수료 + 물류비)×1.1 − 박스
 - 검증 ${results.length}건: 국내흑자 ${domOk.length} / 해외흑자 ${oversOk.length} / 미매칭 ${results.filter((r) => !r.match).length}
 - ⚠ **로켓그로스는 국내 입고 필요** → 해외출고 매칭은 RG 부적합(판매자배송/직접수입 시 참고용)
 
 ## 국내 소싱 흑자 (로켓그로스 가능)
-| 마진 | 율 | 쿠팡가 | 도매가 | 물류 | 리뷰 | 상품명 | 도매꾹 |
-|---|---|---|---|---|---|---|---|
+| 마진 | 율 | 진입가 | 기존가 | 도매가 | 물류 | 리뷰 | 상품명 | 도매꾹 |
+|---|---|---|---|---|---|---|---|---|
 ${domOk.map(row).join('\n') || '| (없음 — 이 카테고리는 국내 도매 공급이 희소) |'}
 
 ## 해외출고 매칭 (직접 수입/판매자배송 시 참고)
-| 마진 | 율 | 쿠팡가 | 도매가 | 물류 | 리뷰 | 상품명 | 도매꾹 |
-|---|---|---|---|---|---|---|---|
+| 마진 | 율 | 진입가 | 기존가 | 도매가 | 물류 | 리뷰 | 상품명 | 도매꾹 |
+|---|---|---|---|---|---|---|---|---|
 ${oversOk.map(row).join('\n')}
 
 ## 미매칭(참고)
