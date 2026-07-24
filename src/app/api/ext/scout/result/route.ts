@@ -10,7 +10,8 @@ function admin(): any { return createAdminClient() }
 
 const isUuid = (v: unknown): v is string =>
   typeof v === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(v)
-const toInt = (v: unknown): number | null => (Number.isFinite(Number(v)) ? Math.trunc(Number(v)) : null)
+// null/undefined/'' 는 그대로 null (Number(null)===0, Number('')===0 로 0 오변환되던 버그 방지)
+const toInt = (v: unknown): number | null => (v == null || v === '' || !Number.isFinite(Number(v)) ? null : Math.trunc(Number(v)))
 const toStr = (v: unknown, max = 2000): string | null => (typeof v === 'string' && v.trim() ? v.trim().slice(0, max) : null)
 const toArr = (v: unknown, max = 50): string[] | null =>
   Array.isArray(v) ? v.filter((x) => typeof x === 'string').slice(0, max) : null

@@ -111,13 +111,14 @@
       const sellerEl = document.querySelector(S.detail.sellerName)
       d.seller = txt(sellerEl).slice(0, 100) || null
       d.seller_info = sellerEl ? { name: d.seller, link: sellerEl.getAttribute('href') || null } : null
-      // 경쟁 판매자 수(아이템위너 "다른 판매자 N") — best-effort, DOM 실측 검증 대기
+      // 경쟁 판매자 수 — 상세페이지 "다른 판매자 보기(N)" (셀렉터 .other-sellers, CDP 실측 확정 2026-07-24)
+      // 요소 있으면 N, 유효 페이지인데 요소 없으면 0(=단독 판매, 경쟁 없음). 차단 시엔 위에서 이미 리턴.
       let cs = null
       const csEl = S.detail.sellerCount ? document.querySelector(S.detail.sellerCount) : null
-      if (csEl) { const m = (csEl.textContent || '').match(/(\d+)/); if (m) cs = parseInt(m[1]) }
+      if (csEl) { const m = (csEl.textContent || '').match(/\((\d{1,4})\)|(\d{1,4})/); if (m) cs = parseInt(m[1] || m[2]) }
       if (cs == null) {
-        const bm = (document.body.innerText || '').match(/다른\s*판매자[^0-9]{0,8}(\d{1,4})|판매자\s*(\d{1,4})\s*(?:곳|개)|(\d{1,4})\s*개\s*판매처/)
-        if (bm) cs = parseInt(bm[1] || bm[2] || bm[3])
+        const bm = (document.body.innerText || '').match(/다른\s*판매자\s*보기\s*\((\d{1,4})\)/)
+        cs = bm ? parseInt(bm[1]) : 0 // "다른 판매자" 표기 없음 = 단독 판매 = 0
       }
       d.competing_sellers = cs
     }
