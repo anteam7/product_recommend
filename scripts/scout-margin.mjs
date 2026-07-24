@@ -65,18 +65,20 @@ function guessTier(name, price) {
   return '소형'
 }
 
+// getItemList 는 item 별로 price·unitQty(MOQ)·deli.fromOversea 를 이미 제공 → 상세조회 없이 국내 필터 가능
 async function domeSearch(kw) {
   try {
-    const r = await fetch(`${DBASE}?ver=4.1&mode=getItemList&aid=${DKEY}&market=dome&om=json&kw=${encodeURIComponent(kw)}&sz=12&pg=1`)
+    const r = await fetch(`${DBASE}?ver=4.1&mode=getItemList&aid=${DKEY}&market=dome&om=json&kw=${encodeURIComponent(kw)}&sz=40&pg=1`)
     const j = JSON.parse(await r.text())
-    return (j?.domeggook?.list?.item) ?? []
+    const items = (j?.domeggook?.list?.item) ?? []
+    return items.map((it) => ({
+      no: it.no, title: it.title || '',
+      price: parseInt(it.price) || null,
+      moq: parseInt(it.unitQty) || 1,
+      oversea: String(it.deli?.fromOversea) === 'true',
+      url: `https://domeggook.com/${it.no}`,
+    }))
   } catch { return [] }
-}
-async function domeView(no) {
-  try {
-    const r = await fetch(`${DBASE}?ver=4.1&mode=getItemView&aid=${DKEY}&no=${no}&om=json`)
-    return (JSON.parse(await r.text())?.domeggook) || null
-  } catch { return null }
 }
 
 // 후보 로드(상품 단위 dedup, 목록 행)
@@ -110,21 +112,12 @@ for (const c of picks) {
   const kw = toKeyword(c.name)
   const list = await domeSearch(kw)
   await sleep(250)
-  // 상위 매칭 후보 중 제목 유사도 높은 것 몇 개 상세조회
-  const scored = list.map((it) => ({ no: it.no, title: it.title, s: sim(c.name, it.title) })).sort((a, b) => b.s - a.s).slice(0, 5)
-  // 국내 매칭 우선(로켓그로스는 국내 입고 필요). 유효 공급가(>=300)만.
-  let bestDom = null, bestOversea = null
-  for (const m of scored) {
-    if (m.s < 0.25) continue
-    const d = await domeView(m.no); await sleep(250)
-    if (!d) continue
-    const supply = parseInt(d.price?.dome) || null
-    if (!supply || supply < 300) continue   // 1원·수백원 placeholder/오류 제외
-    const oversea = !!d.deli?.fromOversea
-    const cand = { no: m.no, title: (d.basis?.title || m.title || '').slice(0, 38), supply, moq: parseInt(d.qty?.domeMoq) || 1, oversea, tax: d.basis?.tax, s: Math.round(m.s * 100), url: `https://domeggook.com/${m.no}` }
-    if (oversea) { if (!bestOversea || supply < bestOversea.supply) bestOversea = cand }
-    else { if (!bestDom || supply < bestDom.supply) bestDom = cand }
-  }
+  // 제목 유사도 + 유효가(>=300)만. 국내(fromOversea=false) 우선.
+  const scored = list.map((it) => ({ ...it, s: sim(c.name, it.title) })).filter((it) => it.s >= 0.3 && it.price >= 300)
+  const pick = (arr) => arr.sort((a, b) => (b.s - a.s) || (a.price - b.price))[0] || null  // 유사도 높은 것, 동률이면 저가
+  const mk = (m) => m && { no: m.no, title: (m.title || '').slice(0, 38), supply: m.price, moq: m.moq, oversea: m.oversea, s: Math.round(m.s * 100), url: m.url }
+  const bestDom = mk(pick(scored.filter((it) => !it.oversea)))
+  const bestOversea = mk(pick(scored.filter((it) => it.oversea)))
   const bestMatch = bestDom || bestOversea   // 국내 우선, 없으면 해외(참고)
   const tier = TIER === 'auto' ? guessTier(c.name, c.price) : TIER
   const logi = RG_LOGI[tier] ?? RG_LOGI['소형']
