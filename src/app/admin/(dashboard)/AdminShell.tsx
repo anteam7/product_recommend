@@ -100,6 +100,12 @@ const NAV_GROUPS: NavGroup[] = [
         match: (p) => p.startsWith('/admin/sourcing'),
       },
       {
+        href: '/admin/pricewatch',
+        label: '📉 시세 모니터',
+        icon: '📉',
+        match: (p) => p.startsWith('/admin/pricewatch'),
+      },
+      {
         href: '/admin/trend-radar/ggsan',
         label: 'ggsan 카탈로그',
         icon: '🛒',
