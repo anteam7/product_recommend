@@ -122,3 +122,7 @@ create table if not exists jimscanner_scout_sourcing (
 );
 create index if not exists idx_scout_sourcing_rank on jimscanner_scout_sourcing (batch, margin desc);
 alter table jimscanner_scout_sourcing enable row level security;
+-- 카테고리별 판매수수료 + 로켓그로스 90일 프로모션(물류비 0) 마진 (2026-07-25)
+alter table jimscanner_scout_sourcing add column if not exists commission numeric;
+alter table jimscanner_scout_sourcing add column if not exists margin_promo int;
+alter table jimscanner_scout_sourcing add column if not exists rate_promo int;

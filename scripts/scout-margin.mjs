@@ -15,6 +15,7 @@ import { readFileSync, writeFileSync, mkdirSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
 import { createClient } from '@supabase/supabase-js'
+import { commissionRate } from './lib/coupang-commission.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const REPO = path.join(__dirname, '..')
@@ -28,7 +29,6 @@ const args = process.argv.slice(2)
 const getArg = (k, d) => { const a = args.find((x) => x.startsWith(`--${k}=`)) || (args.includes(`--${k}`) ? `--${k}=${args[args.indexOf(`--${k}`) + 1]}` : null); return a ? a.split('=').slice(1).join('=') : d }
 const SID = getArg('session', 'e0b4fbcd-177d-43d4-9631-e3b450cc94de')
 const LIMIT = parseInt(getArg('limit', '15'))
-const COMMISSION = parseFloat(getArg('commission', '0.108'))  // 판매수수료율(기본 10.8%)
 const BOX = parseInt(getArg('box', '500'))
 const TIER = getArg('tier', 'auto')                            // 극소형|소형|중형|auto
 const RG_LOGI = { 극소형: 1950, 소형: 2200, 중형: 3350, 대형1: 3575 }
@@ -126,7 +126,7 @@ const cands = await loadCandidates()
 const step = Math.max(1, Math.floor(cands.length / LIMIT))
 const picks = []; for (let i = 0; i < cands.length && picks.length < LIMIT; i += step) picks.push(cands[i])
 
-console.log(`후보 ${picks.length}건 도매꾹 소싱·마진 검증 (수수료 ${(COMMISSION * 100).toFixed(1)}% · 박스 ${BOX}원 · VAT 반영)\n`)
+console.log(`후보 ${picks.length}건 도매꾹 소싱·마진 검증 (판매수수료 카테고리별 · 박스 ${BOX}원 · VAT 반영)\n`)
 const results = []
 for (const c of picks) {
   const kw = toKeyword(c.name)
@@ -145,7 +145,7 @@ for (const c of picks) {
   const sell = ep.entry
   let margin = null, rate = null
   if (bestMatch) {
-    const fees = (sell * COMMISSION + logi) * VAT
+    const fees = (sell * commissionRate(c.name) + logi) * VAT   // 카테고리별 판매수수료
     margin = Math.round(sell - bestMatch.supply - fees - BOX)
     rate = Math.round((margin / sell) * 100)
   }
@@ -162,7 +162,7 @@ const oversOk = results.filter((r) => r.match && r.match.oversea && r.margin > 0
 const row = (r) => `| ${r.margin > 0 ? '+' : ''}${r.margin.toLocaleString()} | ${r.rate}% | ${r.sell.toLocaleString()} | ${r.price.toLocaleString()} | ${r.match.supply.toLocaleString()} | ${r.logi} | ${r.review_count} | ${(r.name || '').slice(0, 30).replace(/\|/g, '/')} | ${r.match.url} |`
 const md = `# 도매꾹 소싱·로켓그로스 마진 검증 (${new Date().toISOString().slice(0, 10)})
 
-- 수수료 ${(COMMISSION * 100).toFixed(1)}% · 로켓그로스 물류비(입출고+배송) 티어별 · 박스 ${BOX}원 · 부가세 반영
+- 판매수수료 카테고리별(coupang-commission) · 로켓그로스 물류비(입출고+배송) 티어별 · 박스 ${BOX}원 · 부가세 반영
 - **진입가 = 같은 상품유형 리스팅 가격의 하위 25%(P25)** — 신규 노브랜드 셀러가 브랜드 프리미엄 없이 받는 현실가
 - 마진 = **진입가** − 도매꾹공급가 − (판매수수료 + 물류비)×1.1 − 박스
 - 검증 ${results.length}건: 국내흑자 ${domOk.length} / 해외흑자 ${oversOk.length} / 미매칭 ${results.filter((r) => !r.match).length}
@@ -181,5 +181,12 @@ ${oversOk.map(row).join('\n')}
 ## 미매칭(참고)
 ${results.filter((r) => !r.match).map((r) => `- ${(r.name || '').slice(0, 34)} | kw="${r.kw}"`).join('\n')}
 `
-writeFileSync(path.join(dir, `${new Date().toISOString().replace(/[-:T]/g, '').slice(0, 12)}-마진검증.md`), md, 'utf8')
-console.log(`\n국내흑자 ${domOk.length} / 해외흑자 ${oversOk.length} / ${results.length}건 → data/scout/reports/*-마진검증.md`)
+const ts = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 12)
+writeFileSync(path.join(dir, `${ts}-마진검증.md`), md, 'utf8')
+// 2번(실물 검증)용 JSON — 매칭된 것만, 도매꾹 no 포함
+writeFileSync(path.join(dir, `${ts}-마진검증.json`), JSON.stringify(results.filter((r) => r.match).map((r) => ({
+  product_id: r.product_id, name: r.name, coupang_url: r.url, review_count: r.review_count,
+  sell: r.sell, price: r.price, ep_basis: r.epBasis, margin: r.margin, rate: r.rate, tier: r.tier, logi: r.logi,
+  dome_no: r.match.no, dome_supply: r.match.supply, dome_moq: r.match.moq, dome_oversea: r.match.oversea, sim: r.match.s, dome_url: r.match.url,
+})), null, 1), 'utf8')
+console.log(`\n국내흑자 ${domOk.length} / 해외흑자 ${oversOk.length} / ${results.length}건 → data/scout/reports/${ts}-마진검증.{md,json}`)

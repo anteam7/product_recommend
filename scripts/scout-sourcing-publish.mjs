@@ -7,6 +7,7 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
 import { createClient } from '@supabase/supabase-js'
+import { commissionRate } from './lib/coupang-commission.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const REPO = path.join(__dirname, '..')
@@ -17,7 +18,7 @@ const env = Object.fromEntries(
 const DKEY = env.DOMEGGOOK_API_KEY, DBASE = 'https://domeggook.com/ssl/api/'
 const sb = createClient(env.NEXT_PUBLIC_SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY)
 const SRC = process.argv[2] || 'data/scout/reports/202607250122-마진검증.json'
-const BULK = 30, COMMISSION = 0.108, BOX = 500, VAT = 1.1
+const BULK = 30, BOX = 500, VAT = 1.1  // 판매수수료는 카테고리별(commissionRate). 로켓그로스 물류비는 c.logi.
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
 const all = JSON.parse(readFileSync(path.join(REPO, SRC), 'utf8'))
@@ -46,9 +47,13 @@ for (const c of strong) {
   const deliFee = parseInt(d.deli?.dome?.fee) || parseInt(d.deli?.fee) || 0
   const inbound = Math.round(deliFee / BULK)
   const landed = unit + inbound
-  const margin = Math.round(c.sell - landed - (c.sell * COMMISSION + c.logi) * VAT - BOX)
+  const fee = commissionRate(c.name)                                            // 카테고리별 판매수수료
+  const margin = Math.round(c.sell - landed - (c.sell * fee + c.logi) * VAT - BOX)   // 정상(물류비 포함)
   const rate = Math.round((margin / c.sell) * 100)
+  const marginPromo = Math.round(c.sell - landed - (c.sell * fee) * VAT - BOX)   // 90일 프로모션(물류비 0)
+  const ratePromo = Math.round((marginPromo / c.sell) * 100)
   rows.push({
+    commission: fee, margin_promo: marginPromo, rate_promo: ratePromo,
     product_id: c.product_id, name: c.name, coupang_url: c.coupang_url, coupang_image: cImg[c.product_id] || null,
     dome_no: String(c.dome_no), dome_url: c.dome_url, dome_title: (d.basis?.title || '').slice(0, 80),
     dome_image: d.thumb?.original || d.thumb?.large || null,

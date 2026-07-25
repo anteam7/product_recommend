@@ -16,6 +16,9 @@ type Cand = {
   landed: number | null
   margin: number | null
   rate: number | null
+  margin_promo: number | null
+  rate_promo: number | null
+  commission: number | null
   moq: number | null
   inventory: number | null
   send_avg: string | null
@@ -129,6 +132,12 @@ export default function SourcingCompare() {
                   </span>
                   <span className="text-sm font-bold tabular-nums">+{won(c.margin)}<small className="text-[10px] text-gray-400 font-semibold ml-0.5">원/개</small></span>
                 </div>
+                <div className="flex items-center justify-between gap-2 -mt-1">
+                  <span className="inline-flex items-center gap-1 rounded bg-violet-100 text-violet-700 px-2 py-0.5 text-[11px] font-bold tabular-nums">
+                    🚀 90일 프로모션 {c.rate_promo}%<small className="font-semibold opacity-80">+{won(c.margin_promo)}</small>
+                  </span>
+                  <span className="text-[10px] text-gray-400">수수료 {c.commission != null ? (c.commission * 100).toFixed(1) : '?'}%</span>
+                </div>
                 <h3 className="text-sm font-semibold leading-snug line-clamp-2">{c.name}</h3>
                 <p className="text-xs text-gray-500 truncate">도매 실물: {c.dome_title}</p>
                 <div className="flex gap-2">
@@ -164,7 +173,8 @@ export default function SourcingCompare() {
       </div>
 
       <p className="text-xs text-gray-500 leading-relaxed pt-2">
-        <b className="text-gray-800">확인 방법</b> — 두 썸네일(도매꾹 ↔ 쿠팡)이 같은/유사 물건인지 대조하고, <b className="text-gray-800">옵션 확인</b> 표시가 있으면 도매꾹에서 원하는 옵션의 실제 단가를 확인하세요(표시 단가는 기본가). 마진은 방향성 추정 — 로켓그로스 반품·보관·광고비는 별도라 실질 여유는 더 얇을 수 있습니다. 진입가는 브랜드 프리미엄을 뺀 시장 하위 25%가(P25) 기준.
+        <b className="text-gray-800">마진 두 종류</b> — 큰 칩은 <b className="text-gray-800">정상 마진</b>(로켓그로스 물류비 포함, 90일 이후 지속가능 기준). <span className="text-violet-700 font-semibold">🚀 90일 프로모션</span>은 신규 판매자 첫 90일 물류비(입출고·배송·보관·반품) 0원 적용 시 마진(판매수수료만) — 초기 런칭·테스트에 유리하지만 <b className="text-gray-800">상품 선정은 정상 마진 기준</b>으로 하세요(프로모션 끝나면 물류비가 붙습니다). 판매수수료는 카테고리별 실제 요율 적용.
+        <br /><b className="text-gray-800">확인 방법</b> — 두 썸네일(도매꾹 ↔ 쿠팡)이 같은/유사 물건인지 대조하고, <b className="text-gray-800">옵션 확인</b> 표시가 있으면 도매꾹에서 실제 옵션 단가를 확인하세요. 진입가는 브랜드 프리미엄을 뺀 시장 하위 25%가(P25) 기준. 로켓그로스 최소 판매가 3,000원 이상 필수.
       </p>
     </div>
   )
