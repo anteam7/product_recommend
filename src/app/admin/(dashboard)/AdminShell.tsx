@@ -94,6 +94,12 @@ const NAV_GROUPS: NavGroup[] = [
         match: (p) => p.startsWith('/admin/trend-radar/domemedb-picks'),
       },
       {
+        href: '/admin/sourcing',
+        label: '🛒 소싱 매입',
+        icon: '🛒',
+        match: (p) => p.startsWith('/admin/sourcing'),
+      },
+      {
         href: '/admin/trend-radar/ggsan',
         label: 'ggsan 카탈로그',
         icon: '🛒',

@@ -108,3 +108,17 @@ alter table jimscanner_scout_messages enable row level security;
 alter table jimscanner_scout_commands enable row level security;
 alter table jimscanner_scout_products enable row level security;
 alter table jimscanner_scout_reviews enable row level security;
+
+-- 소싱 매입 후보 스냅샷 (2026-07-25) — /admin/sourcing 비교 페이지. scripts/scout-sourcing-publish.mjs 발행.
+create table if not exists jimscanner_scout_sourcing (
+  id uuid primary key default gen_random_uuid(),
+  product_id text, name text,
+  coupang_url text, coupang_image text,
+  dome_no text, dome_url text, dome_title text, dome_image text,
+  sell int, unit int, inbound int, landed int, margin int, rate int,
+  moq int, inventory int, send_avg text, has_option boolean default false,
+  tax text, sim int, review_count int, rank int, batch text,
+  created_at timestamptz default now()
+);
+create index if not exists idx_scout_sourcing_rank on jimscanner_scout_sourcing (batch, margin desc);
+alter table jimscanner_scout_sourcing enable row level security;
