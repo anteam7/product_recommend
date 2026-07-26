@@ -106,6 +106,18 @@ const NAV_GROUPS: NavGroup[] = [
         match: (p) => p.startsWith('/admin/pricewatch'),
       },
       {
+        href: '/admin/reprice',
+        label: '💰 가격수정 승인',
+        icon: '💰',
+        match: (p) => p.startsWith('/admin/reprice'),
+      },
+      {
+        href: '/admin/ad-products',
+        label: '📣 광고 상품 관리',
+        icon: '📣',
+        match: (p) => p.startsWith('/admin/ad-products'),
+      },
+      {
         href: '/admin/trend-radar/ggsan',
         label: 'ggsan 카탈로그',
         icon: '🛒',
