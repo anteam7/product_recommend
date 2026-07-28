@@ -7,9 +7,10 @@
  *   ④ 흑자 후보만 리포트
  *
  * 로켓그로스 물류비(입출고+배송, 쿠팡 공식 2026): 극소형 1950 / 소형 2200 / 중형 3350 (원/개)
- * 판매수수료: 카테고리별 5.5~10.8%(판매자배송과 동일) — 기본 10.8% 보수적, --commission 로 조정
+ * 판매수수료: 카테고리별 5.5~10.8%(판매자배송과 동일) — lib/coupang-commission.mjs 가 상품명으로 자동 판정
+ * 매입원가 = 도매꾹 공급가 × 구매수량(", 8개" 같은 묶음). "60개입" 등 팩 내용물은 곱하지 않고 구성확인 표시만 한다.
  *
- * 사용: node scripts/scout-margin.mjs --session <id> --limit 15 [--commission 0.108] [--box 500] [--tier 소형]
+ * 사용: node scripts/scout-margin.mjs --session <id> --limit 15 [--box 500] [--tier 소형|중형|극소형]
  */
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
@@ -24,14 +25,20 @@ const env = Object.fromEntries(
     .map((l) => { const i = l.indexOf('='); let v = l.slice(i + 1).trim(); if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) v = v.slice(1, -1); return [l.slice(0, i).trim(), v] }),
 )
 const DKEY = env.DOMEGGOOK_API_KEY, DBASE = 'https://domeggook.com/ssl/api/'
+// 키가 없으면 전 건이 조용히 '미매칭'으로 끝나고, 마스킹(replaceAll(DKEY,…))도 무력화된다 → 즉시 중단
+if (!DKEY) { console.error('DOMEGGOOK_API_KEY 가 .env.local 에 없습니다 — 전 건 미매칭으로 끝나므로 중단합니다'); process.exit(1) }
+if (!env.NEXT_PUBLIC_SUPABASE_URL || !env.SUPABASE_SERVICE_ROLE_KEY) { console.error('SUPABASE 환경변수 누락'); process.exit(1) }
 const sb = createClient(env.NEXT_PUBLIC_SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY)
 const args = process.argv.slice(2)
 const getArg = (k, d) => { const a = args.find((x) => x.startsWith(`--${k}=`)) || (args.includes(`--${k}`) ? `--${k}=${args[args.indexOf(`--${k}`) + 1]}` : null); return a ? a.split('=').slice(1).join('=') : d }
 const SID = getArg('session', 'e0b4fbcd-177d-43d4-9631-e3b450cc94de')
-const LIMIT = parseInt(getArg('limit', '15'))
-const BOX = parseInt(getArg('box', '500'))
-const TIER = getArg('tier', 'auto')                            // 극소형|소형|중형|auto
+// 숫자 인자는 오타 시 NaN 전파(후보 0건 무음 종료)를 막고 즉시 실패시킨다
+const num = (k, d) => { const v = parseInt(getArg(k, d)); if (!Number.isFinite(v) || v <= 0) { console.error(`--${k} 값이 잘못됐습니다: "${getArg(k, d)}"`); process.exit(1) } return v }
+const LIMIT = num('limit', '15')
+const BOX = num('box', '500')
 const RG_LOGI = { 극소형: 1950, 소형: 2200, 중형: 3350, 대형1: 3575 }
+const TIER = getArg('tier', 'auto')                            // 극소형|소형|중형|auto
+if (TIER !== 'auto' && !Object.hasOwn(RG_LOGI, TIER)) { console.error(`--tier 는 auto|${Object.keys(RG_LOGI).join('|')} 중 하나여야 합니다: "${TIER}"`); process.exit(1) }
 const VAT = 1.1
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
@@ -65,10 +72,33 @@ function guessTier(name, price) {
   return '소형'
 }
 
+// 쿠팡 상품명에서 '몇 개를 사는가'(구매 수량)를 뽑는다. 도매꾹 공급가는 1개 단가라 N개 묶음이면 N배로 매입해야 함.
+// 이걸 빼면 "수납정리함, 브라운, 8개"가 공급가 300원 하나로 계산돼 +9,188원 흑자로 둔갑한다.
+//
+// 핵심 구분 — 같은 숫자라도 의미가 다르다:
+//   구매 수량: "6개" "8개" "1세트" "1박스"   → 곱해야 함
+//   팩 내용물: "60개입" "3p" "60매" "15구"   → 이미 1개 안에 든 것. 곱하면 안 됨.
+// "물티슈, 6개, 60개입, 1박스"는 6팩을 사는 것이지 60배가 아니다(최댓값 규칙이면 60으로 오판).
+function setQty(name) {
+  const hits = (name || '').match(/(\d+)\s*(?:개(?!입)|세트|박스)(?![a-z가-힣])/g) || []
+  let max = 1
+  for (const h of hits) { const v = parseInt(h); if (v > max && v <= 200) max = v }
+  return max
+}
+// 팩 내용물 개수 — 곱하지는 않지만, 도매꾹 매칭이 '같은 구성'인지 사람이 확인해야 하므로 표시용으로 뽑는다.
+function packCount(name) {
+  const hits = (name || '').match(/(\d+)\s*(?:개입|매|[pP])(?![a-z가-힣])/g) || []
+  let max = 1
+  for (const h of hits) { const v = parseInt(h); if (v > max && v <= 500) max = v }
+  return max
+}
+
 // getItemList 는 item 별로 price·unitQty(MOQ)·deli.fromOversea 를 이미 제공 → 상세조회 없이 국내 필터 가능
+const domeErrors = []
 async function domeSearch(kw) {
   try {
     const r = await fetch(`${DBASE}?ver=4.1&mode=getItemList&aid=${DKEY}&market=dome&om=json&kw=${encodeURIComponent(kw)}&sz=40&pg=1`)
+    if (!r.ok) throw new Error(`HTTP ${r.status}`)               // 429/500 을 '미매칭'으로 오판하지 않게
     const j = JSON.parse(await r.text())
     const items = (j?.domeggook?.list?.item) ?? []
     return items.map((it) => ({
@@ -78,15 +108,20 @@ async function domeSearch(kw) {
       oversea: String(it.deli?.fromOversea) === 'true',
       url: `https://domeggook.com/${it.no}`,
     }))
-  } catch { return [] }
+  } catch (e) {
+    // API 실패를 조용히 삼키면 '미매칭'으로 오판된다 — 소싱 불가와 조회 실패는 다른 결론.
+    domeErrors.push(`${kw}: ${String(e.message).replaceAll(DKEY, '***')}`)   // 에러문에 API 키 유출 방지
+    return []
+  }
 }
 
 // 후보 로드(상품 단위 dedup, 목록 행)
 async function loadCandidates() {
   const rows = []
   for (let f = 0; ; f += 1000) {
-    const { data } = await sb.from('jimscanner_scout_products').select('product_id,name,price,review_count,url')
+    const { data, error } = await sb.from('jimscanner_scout_products').select('product_id,name,price,review_count,url')
       .eq('session_id', SID).is('detail_collected_at', null).range(f, f + 999)
+    if (error) throw new Error(`후보 조회 실패: ${error.message}`)   // 조회 실패를 '후보 0건'으로 오판하지 않게
     rows.push(...(data ?? [])); if (!data || data.length < 1000) break
   }
   const BRAND = /탐사|유한|홈키파|홈스타|코멧|에너자이저|닥터지|LG|삼성|3M|옥시|다우니|피죤|스카트|크리넥스|한샘|락앤락|모나미/
@@ -106,7 +141,8 @@ const P25 = (arr) => { const a = arr.filter((n) => n > 0).sort((x, y) => x - y);
 async function loadMarket() {
   const rows = []
   for (let f = 0; ; f += 1000) {
-    const { data } = await sb.from('jimscanner_scout_products').select('name,price,review_count').eq('session_id', SID).is('detail_collected_at', null).range(f, f + 999)
+    const { data, error } = await sb.from('jimscanner_scout_products').select('name,price,review_count').eq('session_id', SID).is('detail_collected_at', null).range(f, f + 999)
+    if (error) throw new Error(`시장가 조회 실패: ${error.message}`)  // 실패 시 전 건이 조용히 '−15%' 진입가로 계산되는 것 방지
     rows.push(...(data ?? [])); if (!data || data.length < 1000) break
   }
   return rows.filter((r) => r.name && r.price > 0)
@@ -140,26 +176,29 @@ for (const c of picks) {
   const bestOversea = mk(pick(scored.filter((it) => it.oversea)))
   const bestMatch = bestDom || bestOversea   // 국내 우선, 없으면 해외(참고)
   const tier = TIER === 'auto' ? guessTier(c.name, c.price) : TIER
-  const logi = RG_LOGI[tier] ?? RG_LOGI['소형']
+  const logi = Object.hasOwn(RG_LOGI, tier) ? RG_LOGI[tier] : RG_LOGI['소형']   // 프로토타입 키(constructor 등) 차단
   const ep = marketEntryPrice(c.name, c.price, market)   // 현실 진입가(P25)
   const sell = ep.entry
-  let margin = null, rate = null
+  const qty = setQty(c.name)                              // 구매 수량 — 매입 원가는 공급가 × 수량
+  const pack = packCount(c.name)                          // 팩 내용물(곱하지 않음) — 도매꾹이 같은 구성인지 육안 확인용
+  let margin = null, rate = null, cost = null
   if (bestMatch) {
     const fees = (sell * commissionRate(c.name) + logi) * VAT   // 카테고리별 판매수수료
-    margin = Math.round(sell - bestMatch.supply - fees - BOX)
+    cost = bestMatch.supply * qty
+    margin = Math.round(sell - cost - fees - BOX)
     rate = Math.round((margin / sell) * 100)
   }
-  results.push({ ...c, kw, tier, logi, sell, epBasis: ep.basis, match: bestMatch, margin, rate })
+  results.push({ ...c, kw, tier, logi, sell, qty, pack, cost, epBasis: ep.basis, match: bestMatch, margin, rate })
   const tag = !bestMatch ? '✗매칭없음'
     : `${bestMatch.oversea ? '해외' : '국내'} ${margin > 0 ? `흑자 +${margin.toLocaleString()}(${rate}%)` : `적자 ${margin.toLocaleString()}`}`
-  console.log(`[${tag}] ${c.name.slice(0, 28)} | 진입가 ${sell.toLocaleString()}(기존 ${c.price.toLocaleString()})${bestMatch ? ` | 도매 ${bestMatch.supply.toLocaleString()}(sim${bestMatch.s})` : ` | kw="${kw}"`}`)
+  console.log(`[${tag}] ${c.name.slice(0, 28)} | 진입가 ${sell.toLocaleString()}(기존 ${c.price.toLocaleString()})${bestMatch ? ` | 도매 ${bestMatch.supply.toLocaleString()}${qty > 1 ? `×${qty}=${cost.toLocaleString()}` : ''}(sim${bestMatch.s})${pack > 1 ? ` ⚠${pack}개입-구성확인` : ''}` : ` | kw="${kw}"`}`)
 }
 
 // 리포트 저장
 const dir = path.join(REPO, 'data', 'scout', 'reports'); mkdirSync(dir, { recursive: true })
 const domOk = results.filter((r) => r.match && !r.match.oversea && r.margin > 0).sort((a, b) => b.margin - a.margin)
 const oversOk = results.filter((r) => r.match && r.match.oversea && r.margin > 0).sort((a, b) => b.margin - a.margin)
-const row = (r) => `| ${r.margin > 0 ? '+' : ''}${r.margin.toLocaleString()} | ${r.rate}% | ${r.sell.toLocaleString()} | ${r.price.toLocaleString()} | ${r.match.supply.toLocaleString()} | ${r.logi} | ${r.review_count} | ${(r.name || '').slice(0, 30).replace(/\|/g, '/')} | ${r.match.url} |`
+const row = (r) => `| ${r.margin > 0 ? '+' : ''}${r.margin.toLocaleString()} | ${r.rate}% | ${r.sell.toLocaleString()} | ${r.price.toLocaleString()} | ${r.match.supply.toLocaleString()}${r.qty > 1 ? `×${r.qty}` : ''} | ${r.cost.toLocaleString()} | ${r.pack > 1 ? `⚠${r.pack}개입` : '-'} | ${r.match.s} | ${r.logi} | ${r.review_count} | ${(r.name || '').slice(0, 30).replace(/\|/g, '/')} | ${r.match.url} |`
 const md = `# 도매꾹 소싱·로켓그로스 마진 검증 (${new Date().toISOString().slice(0, 10)})
 
 - 판매수수료 카테고리별(coupang-commission) · 로켓그로스 물류비(입출고+배송) 티어별 · 박스 ${BOX}원 · 부가세 반영
@@ -169,24 +208,26 @@ const md = `# 도매꾹 소싱·로켓그로스 마진 검증 (${new Date().toIS
 - ⚠ **로켓그로스는 국내 입고 필요** → 해외출고 매칭은 RG 부적합(판매자배송/직접수입 시 참고용)
 
 ## 국내 소싱 흑자 (로켓그로스 가능)
-| 마진 | 율 | 진입가 | 기존가 | 도매가 | 물류 | 리뷰 | 상품명 | 도매꾹 |
-|---|---|---|---|---|---|---|---|---|
-${domOk.map(row).join('\n') || '| (없음 — 이 카테고리는 국내 도매 공급이 희소) |'}
+| 마진 | 율 | 진입가 | 기존가 | 도매가 | 매입원가 | 구성 | sim | 물류 | 리뷰 | 상품명 | 도매꾹 |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+${domOk.map(row).join('\n') || '| (없음 — 이 카테고리는 국내 도매 공급이 희소) | | | | | | | | | | | |'}
 
 ## 해외출고 매칭 (직접 수입/판매자배송 시 참고)
-| 마진 | 율 | 진입가 | 기존가 | 도매가 | 물류 | 리뷰 | 상품명 | 도매꾹 |
-|---|---|---|---|---|---|---|---|---|
+| 마진 | 율 | 진입가 | 기존가 | 도매가 | 매입원가 | 구성 | sim | 물류 | 리뷰 | 상품명 | 도매꾹 |
+|---|---|---|---|---|---|---|---|---|---|---|---|
 ${oversOk.map(row).join('\n')}
 
 ## 미매칭(참고)
 ${results.filter((r) => !r.match).map((r) => `- ${(r.name || '').slice(0, 34)} | kw="${r.kw}"`).join('\n')}
-`
-const ts = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 12)
+${domeErrors.length ? `\n## ⚠ 도매꾹 조회 실패 ${domeErrors.length}건 — 위 '미매칭'과 다름(소싱 불가가 아니라 확인 못 함)\n${domeErrors.map((e) => `- ${e}`).join('\n')}\n` : ''}`
+const ts = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14)   // 초 단위 — 같은 분 재실행 시 덮어쓰기 방지
 writeFileSync(path.join(dir, `${ts}-마진검증.md`), md, 'utf8')
 // 2번(실물 검증)용 JSON — 매칭된 것만, 도매꾹 no 포함
 writeFileSync(path.join(dir, `${ts}-마진검증.json`), JSON.stringify(results.filter((r) => r.match).map((r) => ({
   product_id: r.product_id, name: r.name, coupang_url: r.url, review_count: r.review_count,
   sell: r.sell, price: r.price, ep_basis: r.epBasis, margin: r.margin, rate: r.rate, tier: r.tier, logi: r.logi,
+  set_qty: r.qty, pack_count: r.pack, cost: r.cost,
   dome_no: r.match.no, dome_supply: r.match.supply, dome_moq: r.match.moq, dome_oversea: r.match.oversea, sim: r.match.s, dome_url: r.match.url,
 })), null, 1), 'utf8')
+if (domeErrors.length) console.log(`⚠ 도매꾹 조회 실패 ${domeErrors.length}건 (미매칭과 구분해서 볼 것): ${domeErrors.slice(0, 3).join(' · ')}${domeErrors.length > 3 ? ' …' : ''}`)
 console.log(`\n국내흑자 ${domOk.length} / 해외흑자 ${oversOk.length} / ${results.length}건 → data/scout/reports/${ts}-마진검증.{md,json}`)
