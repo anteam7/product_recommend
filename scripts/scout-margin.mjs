@@ -17,6 +17,7 @@ import { fileURLToPath } from 'node:url'
 import path from 'node:path'
 import { createClient } from '@supabase/supabase-js'
 import { commissionRate } from './lib/coupang-commission.mjs'
+import { setQty, packCount } from './lib/set-qty.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const REPO = path.join(__dirname, '..')
@@ -72,26 +73,7 @@ function guessTier(name, price) {
   return '소형'
 }
 
-// 쿠팡 상품명에서 '몇 개를 사는가'(구매 수량)를 뽑는다. 도매꾹 공급가는 1개 단가라 N개 묶음이면 N배로 매입해야 함.
-// 이걸 빼면 "수납정리함, 브라운, 8개"가 공급가 300원 하나로 계산돼 +9,188원 흑자로 둔갑한다.
-//
-// 핵심 구분 — 같은 숫자라도 의미가 다르다:
-//   구매 수량: "6개" "8개" "1세트" "1박스"   → 곱해야 함
-//   팩 내용물: "60개입" "3p" "60매" "15구"   → 이미 1개 안에 든 것. 곱하면 안 됨.
-// "물티슈, 6개, 60개입, 1박스"는 6팩을 사는 것이지 60배가 아니다(최댓값 규칙이면 60으로 오판).
-function setQty(name) {
-  const hits = (name || '').match(/(\d+)\s*(?:개(?!입)|세트|박스)(?![a-z가-힣])/g) || []
-  let max = 1
-  for (const h of hits) { const v = parseInt(h); if (v > max && v <= 200) max = v }
-  return max
-}
-// 팩 내용물 개수 — 곱하지는 않지만, 도매꾹 매칭이 '같은 구성'인지 사람이 확인해야 하므로 표시용으로 뽑는다.
-function packCount(name) {
-  const hits = (name || '').match(/(\d+)\s*(?:개입|매|[pP])(?![a-z가-힣])/g) || []
-  let max = 1
-  for (const h of hits) { const v = parseInt(h); if (v > max && v <= 500) max = v }
-  return max
-}
+// 매입수량·팩내용물 파싱은 발행 스크립트와 규칙이 갈리면 안 되므로 lib/set-qty.mjs 로 단일화(상단 import).
 
 // getItemList 는 item 별로 price·unitQty(MOQ)·deli.fromOversea 를 이미 제공 → 상세조회 없이 국내 필터 가능
 const domeErrors = []

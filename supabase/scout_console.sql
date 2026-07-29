@@ -126,3 +126,7 @@ alter table jimscanner_scout_sourcing enable row level security;
 alter table jimscanner_scout_sourcing add column if not exists commission numeric;
 alter table jimscanner_scout_sourcing add column if not exists margin_promo int;
 alter table jimscanner_scout_sourcing add column if not exists rate_promo int;
+-- 매입수량 반영 (2026-07-29) — 도매 공급가는 1개 단가라 "N개" 묶음 리스팅은 N배로 매입해야 한다.
+-- set_qty 가 채워져 있으면 margin 이 이미 매입수량을 반영한 값이라는 신호(화면이 중복 보정하지 않는다).
+alter table jimscanner_scout_sourcing add column if not exists set_qty int;
+alter table jimscanner_scout_sourcing add column if not exists pack_count int;
