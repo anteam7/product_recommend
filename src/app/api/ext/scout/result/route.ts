@@ -76,6 +76,26 @@ export async function POST(req: NextRequest) {
     if (rows.length) {
       const { error } = await sb.from('jimscanner_scout_products').upsert(rows, { onConflict: 'command_id,product_id' })
       if (error) return NextResponse.json({ error: `products: ${error.message}` }, { status: 500 })
+
+      // 상세 결과는 unique(command_id, product_id) 때문에 매번 새 행으로 들어간다(청크 재전송 멱등 목적).
+      // 그 행은 keyword 가 비어 소싱 맥락이 없고, 정작 원본 목록 행은 detail_collected_at 이
+      // null 로 남아 후보 풀에서 빠지지 않는다 → 같은 상품을 계속 다시 제안하고 고아 행만 쌓인다.
+      // 그래서 상세 필드를 같은 세션·상품의 목록 행에 전파한다.
+      if (kind === 'product_detail') {
+        const DETAIL_FIELDS = ['options', 'manufacturer', 'origin', 'detail_images', 'delivery_info',
+          'seller_info', 'qna', 'category_path', 'competing_sellers', 'rating', 'review_count'] as const
+        for (const r of rows as Record<string, unknown>[]) {
+          // 파싱 실패로 null 인 필드까지 덮으면 목록에서 이미 확보한 값(리뷰수 등)을 지운다 → 있는 값만 전파
+          const patch: Record<string, unknown> = { detail_collected_at: now }
+          for (const f of DETAIL_FIELDS) if (r[f] != null) patch[f] = r[f]
+          // name·price 는 전파하지 않는다. 상세 URL 은 대표 변형으로 열려 목록에서 잡은 옵션과
+          // 다른 상품일 수 있다(실측: "수납정리함 8개" → "화장품 정리함 1개"). 마진 계산 기준이 어긋난다.
+          const { error: mergeErr } = await sb.from('jimscanner_scout_products').update(patch)
+            .eq('session_id', cmd.session_id).eq('product_id', r.product_id as string)
+            .is('detail_collected_at', null)
+          if (mergeErr) return NextResponse.json({ error: `merge: ${mergeErr.message}` }, { status: 500 })
+        }
+      }
     }
   } else if (kind === 'reviews' && items.length) {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
