@@ -99,18 +99,46 @@
       name: txt(document.querySelector(S.detail.name)).slice(0, 300) || null,
       price: parseComma(txt(document.querySelector(S.detail.price))),
       original_price: parseComma(txt(document.querySelector(S.detail.originalPrice))),
-      review_count: parseComma(txt(document.querySelector(S.detail.reviewCount))),
+    }
+    // 리뷰수 — querySelector 는 문서 순서상 첫 매칭만 준다. 숫자 없는 껍데기 요소가 먼저 걸리면
+    // 그대로 null 이 되므로(실측: 셀렉터를 맞춰도 0/3), 후보를 모두 훑어 숫자가 나오는 첫 요소를 쓴다.
+    for (const el of document.querySelectorAll(S.detail.reviewCount)) {
+      const n = parseComma(txt(el))
+      if (n != null) { d.review_count = n; break }                 // "355 개 상품평" → 355
+    }
+    // 평점 — 별점은 채워진 막대의 width(%) 로 표현된다(5점 만점이라 20% = 1점).
+    // detail.rating 셀렉터가 아예 없어서 상세 평점은 지금까지 한 번도 수집된 적이 없다.
+    const barEl = S.detail.ratingBar ? document.querySelector(S.detail.ratingBar) : null
+    if (barEl) {
+      const w = (barEl.getAttribute('style') || '').match(/width:\s*([0-9.]+)%/)
+      if (w) d.rating = Math.round((parseFloat(w[1]) / 20) * 10) / 10
     }
     if (inc('options')) {
-      d.options = [...document.querySelectorAll(S.detail.optionList)].slice(0, 60).map((el) => ({
-        text: txt(el).slice(0, 200), price: parseComma(txt(el)),
-        soldout: /품절|일시품절/.test(txt(el)),
-      })).filter((o) => o.text)
+      // 옵션 텍스트는 가격이 없는 경우가 많다. parseComma 는 '원'이 선택적이라 맨 앞 숫자를 집어
+      // "색상 × 수량:그레이 × 1개" 를 1원으로 읽었다(실측 오류). 숫자에 '원'이 붙은 것만 가격으로 인정한다.
+      // ('원'의 존재만 보면 "그레이 × 1개 12,000원"에서 다시 1을 집고, "원목 브라운 2개"도 2가 된다)
+      const optPrice = (s) => { const m = String(s || '').match(/([0-9]{1,3}(?:,[0-9]{3})+|[0-9]+)\s*원/); return m ? parseInt(m[1].replace(/,/g, '')) : null }
+      d.options = [...document.querySelectorAll(S.detail.optionList)].slice(0, 60).map((el) => {
+        const t = txt(el)
+        return { text: t.slice(0, 200), price: optPrice(t), soldout: /품절|일시품절/.test(t) }
+      }).filter((o) => o.text)
+      // 옵션 목록이 안 잡히면(변형 UI·단일옵션 상품) 최소한 선택된 조합이라도 남긴다.
+      // "색상 × 수량:그레이 × 1개" — 빈 배열만 저장하면 '옵션 없음'과 '수집 실패'를 구분할 수 없다.
+      if (!d.options.length && S.detail.optionSummary) {
+        const sum = txt(document.querySelector(S.detail.optionSummary))
+        if (sum) d.options = [{ text: sum.slice(0, 200), price: null, soldout: false, summary: true }]
+      }
     }
     if (inc('seller')) {
-      const sellerEl = document.querySelector(S.detail.sellerName)
-      d.seller = txt(sellerEl).slice(0, 100) || null
-      d.seller_info = sellerEl ? { name: d.seller, link: sellerEl.getAttribute('href') || null } : null
+      // 판매자명 — 링크 텍스트에 "판매자 상품 보러가기" 안내문이 붙어 오고,
+      // 판매자 블록이 없는 로켓배송 상품에선 넓은 셀렉터가 고객센터 번호(1577-7011)를 긁어왔다.
+      // seller-info 블록으로 범위를 좁히고 안내문·접두사를 걷어낸다.
+      const blockEl = S.detail.sellerBlock ? document.querySelector(S.detail.sellerBlock) : null
+      const sellerEl = (blockEl || document).querySelector(S.detail.sellerName)
+      const clean = (s) => s.replace(/판매자\s*상품\s*보러가기/g, '').replace(/^판매자\s*:?\s*/, '').trim()
+      const name = clean(txt(sellerEl) || txt(blockEl))
+      d.seller = /^[\d-]{7,}$/.test(name) ? null : (name.slice(0, 100) || null)   // 전화번호만 남으면 미수집 취급
+      d.seller_info = d.seller ? { name: d.seller, link: sellerEl?.getAttribute('href') || null } : null
       // 경쟁 판매자 수 — 상세페이지 "다른 판매자 보기(N)" (셀렉터 .other-sellers, CDP 실측 확정 2026-07-24)
       // 요소 있으면 N, 유효 페이지인데 요소 없으면 0(=단독 판매, 경쟁 없음). 차단 시엔 위에서 이미 리턴.
       let cs = null
@@ -129,11 +157,19 @@
     }
     if (inc('delivery')) d.delivery_info = { text: txt(document.querySelector(S.detail.deliveryInfo)).slice(0, 500) || null }
     // 상품정보 테이블 → 제조사/원산지
-    const rows = [...document.querySelectorAll(`${S.detail.infoTable.split(',')[0]} ${S.detail.infoRows}`)]
-    for (const tr of rows.slice(0, 60)) {
-      const k = txt(tr.querySelector('th')), v = txt(tr.querySelector('td'))
-      if (/제조사|제조자/.test(k)) d.manufacturer = v.slice(0, 200)
-      if (/원산지|제조국/.test(k)) d.origin = v.slice(0, 200)
+    // 상품정보 테이블 → 제조사/원산지.
+    // 쿠팡 2026 DOM 실측: 항목명이 <th> 가 아니라 <td> 에 있고 값은 "다음 셀"이다.
+    //   <td>제조국(원산지)</td><td>중국</td>   <td>제조자(수입자)</td><td>SEVOREN</td>
+    // 기존 코드는 tr 안에서 th=키, td=값으로 읽어 항상 빈 값이었다(원산지·제조사 100% 결손 원인).
+    // 테이블 태그도 고정할 수 없으므로 문서 전체의 셀을 훑어 키 텍스트로 찾는다.
+    const cells = [...document.querySelectorAll(S.detail.infoCells || 'td, th')]
+    for (const cell of cells.slice(0, 400)) {
+      const k = txt(cell)
+      if (k.length > 40) continue                                  // 값 셀·본문 오탐 방지
+      const v = txt(cell.nextElementSibling)
+      if (!v || v.length > 200) continue
+      if (!d.manufacturer && /제조사|제조자/.test(k)) d.manufacturer = v.slice(0, 200)
+      if (!d.origin && /원산지|제조국/.test(k)) d.origin = v.slice(0, 200)
     }
     d.category_path = [...document.querySelectorAll(S.detail.breadcrumb)].map((a) => txt(a)).filter(Boolean).slice(0, 10)
     if (inc('qna')) {

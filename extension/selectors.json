@@ -1,5 +1,5 @@
 {
-  "version": "2026-07-24.1",
+  "version": "2026-07-29.1",
   "comment": "쿠팡 DOM 셀렉터 외부화. 옵션 페이지에서 JSON 붙여넣기로 무배포 패치 가능(chrome.storage 오버라이드 > 이 파일). serp/search 는 scripts/lib/market-price.mjs 검증값, detail/review 는 다중 폴백 후보(SELECTOR_MISS 보고로 보정).",
   "search": {
     "input": "input#headerSearchKeyword, input[name=\"q\"]",
@@ -21,16 +21,20 @@
     "name": "h1, [class*=\"prod-buy-header__title\"], [class*=\"productTitle\"], [class*=\"title\"]",
     "price": "[class*=\"total-price\"] strong, [class*=\"prod-sale-price\"] strong, [class*=\"final-price\"], [class*=\"price\"] strong",
     "originalPrice": "[class*=\"origin-price\"], [class*=\"original-price\"], del",
-    "optionList": "[class*=\"prod-option\"] li, [class*=\"Option\"] li, select[class*=\"option\"] option",
+    "optionList": "[class*=\"option-picker\"] li, [class*=\"option-picker\"] [class*=\"item\"], [class*=\"prod-option\"] li, select[class*=\"option\"] option",
+ "optionSummary": "[class*=\"option-picker-container\"]",
     "breadcrumb": "ul.breadcrumb a, [class*=\"breadcrumb\"] a, nav a[href*=\"/np/categories/\"]",
     "infoTable": "[class*=\"prod-delivery-return-policies\"] table, [class*=\"product-item\"] table, .prod-description table, table[class*=\"info\"]",
     "infoRows": "tr",
-    "sellerName": "[class*=\"prod-sale-vendor\"] a, [class*=\"seller\"] a, a[href*=\"/vm/\"]",
+    "sellerBlock": "[class*=\"seller-info\"]",
+ "sellerName": "[class*=\"seller-info\"] a, [class*=\"prod-sale-vendor\"] a, a[href*=\"/vm/\"]",
     "sellerCount": ".other-sellers, [class*=\"other-sellers\"], [class*=\"prod-other-seller\"]",
     "mainImages": "[class*=\"prod-image\"] img, [class*=\"ProductImage\"] img",
     "detailImages": "#productDetail img, [class*=\"product-detail\"] img, [class*=\"detail-content\"] img, .vendor-item img",
     "deliveryInfo": "[class*=\"prod-shipping\"], [class*=\"delivery\"], [class*=\"shipping-fee\"]",
-    "reviewCount": "[class*=\"count\"][class*=\"review\"], #prod-review-nav-link span, a[href*=\"review\"] span",
+    "reviewCount": "[class*=\"rating-count\"], [class*=\"review-atf\"] [class*=\"count\"], #prod-review-nav-link span",
+ "ratingBar": "[class*=\"rating-star-num\"]",
+ "infoCells": "td, th",
     "qnaSection": "#prod-inquiry, [class*=\"inquiry\"], [class*=\"qna\"]"
   },
   "review": {
