@@ -32,13 +32,18 @@ const SUPPORTED_SOURCES = { ggsan: '건강산', upickb2b: '유픽B2B' }
 // id 자동 판별: 쿠팡 order_id 우선 → 없으면 네이버 product_order_id (체계가 달라 충돌 없음)
 async function resolveOrder(orderId) {
   const { data: o } = await sb.from('jimscanner_coupang_orders')
-    .select('order_id, seller_product_id, product_name, option_name, shipping_count, raw_payload, purchase_status, paid_amount, order_price')
+    .select('*') // supplier_source/supplier_goods_no(오버라이드 컬럼)가 아직 없는 DB에서도 죽지 않게 명시 select 대신 * (없으면 undefined → 폴백)
     .eq('order_id', orderId).single()
   if (!o) return resolveNaverOrder(orderId)
-  const { data: L } = await sb.from('jimscanner_coupang_listings').select('source, source_goods_no, source_detail_url, dome_price_krw').eq('seller_product_id', o.seller_product_id).limit(1)
-  const src = L?.[0]?.source || 'ggsan' // 구버전 listing은 source 미기록 → ggsan 간주
+  // 주문별 매입처 오버라이드(supplier_source/supplier_goods_no 둘 다 존재 시) 우선 — "이 주문에 한해서" 매입처 변경(네이버 resolveNaverOrder와 동일 규칙).
+  // 오버라이드 시 listing의 detail_url·dome_price는 다른 상품 것이라 쓰지 않는다(금액 가드는 고객 결제액 기준만).
+  const override = !!(o.supplier_source && o.supplier_goods_no)
+  const { data: L } = override
+    ? { data: null }
+    : await sb.from('jimscanner_coupang_listings').select('source, source_goods_no, source_detail_url, dome_price_krw').eq('seller_product_id', o.seller_product_id).limit(1)
+  const src = override ? o.supplier_source : (L?.[0]?.source || 'ggsan') // 구버전 listing은 source 미기록 → ggsan 간주
   if (!SUPPORTED_SOURCES[src]) return { error: `자동주문 미지원 매입처(${src}) — 해당 매입처에서 직접 주문하세요`, order: o }
-  const goodsNo = L?.[0]?.source_goods_no
+  const goodsNo = override ? o.supplier_goods_no : L?.[0]?.source_goods_no
   if (!goodsNo) return { error: '매입처 미연결 — 이 주문 상품의 listing에 source_goods_no가 없습니다', order: o }
   const rc = o.raw_payload?.receiver || {}
   const recipient = { name: rc.name || '', zip: rc.postCode || '', addr1: rc.addr1 || '', addr2: rc.addr2 || '', phone: rc.safeNumber || rc.receiverNumber || '' }

@@ -49,8 +49,11 @@ interface OrderRow {
   ordered_at: string
   last_synced_at: string | null
   raw_payload?: { receiver?: { name?: string; postCode?: string; addr1?: string; addr2?: string; safeNumber?: string; receiverNumber?: string } } | null
-  // 조인: 매입처 바로가기용 (listings.source: ggsan | upickb2b | domeggook | manual)
+  // 매입처 바로가기용 — 주문별 오버라이드 컬럼(supplier_source/supplier_goods_no, 둘 다 있을 때만) 우선,
+  // 없으면 listings.source/source_goods_no 조인 폴백 (ggsan | upickb2b | domeggook | manual). 네이버 주문 페이지와 동일 규칙.
   supplier_source?: string | null
+  supplier_goods_no?: string | null
+  supplier_overridden?: boolean
   ggsan_goods_no?: string | null
   ggsan_url?: string | null
   // ggsan↔쿠팡 송장 동기화 컬럼 (select('*') 라 쿼리 변경 불필요, 타입만)
@@ -103,6 +106,15 @@ const SUPPLIER_LABELS: Record<string, string> = {
   manual: '수동',
 }
 
+// 매입처 상세 URL (listing.source_detail_url 없거나 주문별 오버라이드일 때) — naver-orders/page.tsx 와 동일
+function supplierUrl(source: string | null, goodsNo: string | null): string | null {
+  if (!source || !goodsNo) return null
+  const g = encodeURIComponent(goodsNo)
+  if (source === 'ggsan') return `https://www.ggsan.com/goods/goods_view.php?goodsNo=${g}`
+  if (source === 'upickb2b') return `https://upickb2b.com/product/x/${g}/category/1/display/1/`
+  return null
+}
+
 const PAGE_SIZE = 50
 
 // 실수익 = 매출 − 매입원가 − 수수료 − 부가세 (price.ts FEE_RATE와 동일 유지)
@@ -148,25 +160,33 @@ async function fetchData(opts: {
   const { data, count } = await query
   const rows = (data ?? []) as unknown as OrderRow[]
 
-  // 매입처 바로가기: listing에서 source / goods_no / detail_url 조인
+  // 매입처 바로가기: 주문별 오버라이드(supplier_source+supplier_goods_no 둘 다) 우선, 없으면 listing의 source / goods_no / detail_url 조인 폴백
   const spids = [...new Set(rows.map((r) => r.seller_product_id).filter(Boolean))] as number[]
+  const lmap = new Map<number, { source: string | null; source_goods_no: string | null; source_detail_url: string | null }>()
   if (spids.length > 0) {
     const { data: listings } = await sb
       .from('jimscanner_coupang_listings')
       .select('seller_product_id, source, source_goods_no, source_detail_url')
       .in('seller_product_id', spids)
-    const lmap = new Map<number, { source: string | null; source_goods_no: string | null; source_detail_url: string | null }>(
-      ((listings ?? []) as unknown as Array<{ seller_product_id: number; source: string | null; source_goods_no: string | null; source_detail_url: string | null }>)
-        .map((l) => [l.seller_product_id, l]),
-    )
-    for (const r of rows) {
-      const l = r.seller_product_id ? lmap.get(r.seller_product_id) : undefined
-      const goodsNo = l?.source_goods_no ?? null
-      r.supplier_source = l?.source ?? null
-      r.ggsan_goods_no = goodsNo
-      r.ggsan_url = l?.source_detail_url
-        ?? (goodsNo && l?.source === 'ggsan' ? `https://www.ggsan.com/goods/goods_view.php?goodsNo=${goodsNo}` : null)
+    for (const l of (listings ?? []) as unknown as Array<{ seller_product_id: number; source: string | null; source_goods_no: string | null; source_detail_url: string | null }>) {
+      lmap.set(l.seller_product_id, l)
     }
+  }
+  for (const r of rows) {
+    const overridden = !!(r.supplier_source && r.supplier_goods_no)
+    r.supplier_overridden = overridden
+    if (overridden) {
+      // 이 주문에 한해 다른 매입처에서 매입 — listing 값은 다른 상품이라 URL도 매입처 기준으로 새로 만든다
+      r.ggsan_goods_no = r.supplier_goods_no ?? null
+      r.ggsan_url = supplierUrl(r.supplier_source ?? null, r.supplier_goods_no ?? null)
+      continue
+    }
+    const l = r.seller_product_id ? lmap.get(r.seller_product_id) : undefined
+    const goodsNo = l?.source_goods_no ?? null
+    r.supplier_source = l?.source ?? null
+    r.supplier_goods_no = goodsNo
+    r.ggsan_goods_no = goodsNo
+    r.ggsan_url = l?.source_detail_url ?? supplierUrl(l?.source ?? null, goodsNo)
   }
   // 수령인(배송지) 가공: raw_payload.receiver → 우편번호/전체주소/연락처 (목록 표시 + 결제진행용)
   for (const r of rows) {
@@ -402,9 +422,9 @@ export default async function CoupangOrdersPage({
                           target="_blank"
                           rel="noreferrer noopener"
                           className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded bg-amber-100 text-amber-700 font-semibold hover:bg-amber-200"
-                          title={`매입처(${SUPPLIER_LABELS[r.supplier_source ?? ''] ?? r.supplier_source ?? '미상'}) 상세페이지에서 매입`}
+                          title={`매입처(${SUPPLIER_LABELS[r.supplier_source ?? ''] ?? r.supplier_source ?? '미상'}) 상세페이지에서 매입${r.supplier_overridden ? ' — 이 주문만 매입처 변경(리스팅 매칭과 다름)' : ''}`}
                         >
-                          🛒 {SUPPLIER_LABELS[r.supplier_source ?? ''] ?? r.supplier_source ?? '매입처'} 매입{r.ggsan_goods_no ? ` ${r.ggsan_goods_no}` : ''} →
+                          🛒 {SUPPLIER_LABELS[r.supplier_source ?? ''] ?? r.supplier_source ?? '매입처'} 매입{r.ggsan_goods_no ? ` ${r.ggsan_goods_no}` : ''}{r.supplier_overridden ? ' ·주문별' : ''} →
                         </a>
                       )}
                     </div>
