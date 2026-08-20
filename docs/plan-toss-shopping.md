@@ -152,3 +152,13 @@ jimscanner_coupang_listings (APPROVED, source upickb2b/ggsan, request_payload)
 - 자동 검수는 1~20분, REJECT 사유는 `GET /product-items/grouped-by-products`의 `productItems[].rejectReasons`. 재검수는 `PUT /products/{id}/v2`(썸네일 URL 교체, stocks에 id/itemId 동봉 → itemId 유지).
 - 고시 헤더 항목(PROCESSED_FOOD 319)도 content 필수. 카테고리별 판매옵션 템플릿 상이(건강식품: 수량+(택1)캡슐/정|개당수량 / 건강즙: 수량+개당용량+개당수량 / 홍삼: 수량+(택1)중량|용량|캡슐).
 - **운영 지침: 한 번에 대량 등록하지 말고 1건씩 검수 완료 확인 후 다음 등록** (사장님 지시).
+
+---
+
+## 3.7 P2 구현 내역 (2026-08-20)
+
+- `supabase/toss_orders.sql` — `jimscanner_toss_orders`(orderProductId 단위, 매입 상태머신·ggsan 추적·toss_invoice_status, RLS) + `jimscanner_toss_orders_sync_runs`
+- `scripts/local-cron-toss-orders-sync.mjs` — Windows 작업 **Toss-Orders-Sync**(매시 :17, 30분 제한): ① 31일 창 주문 수집(upsert, 매입 컬럼 보존) ② PAID→PREPARING_PRODUCT 자동 발주확인 ③ ggsan order_view 추적(취소/반품 needs_attention·실결제액·송장 감지) ④ 송장 → `PUT /orders/products/delivery` **직접 등록**(토스는 IP 허용제라 쿠팡처럼 Vercel 라우트 경유 불가) → registered/failed
+- `/admin/toss-orders`(사이드바 토스쇼핑 그룹) — 발송기한 D-1 경고, 매입 상태/주문번호 기록(PurchaseCell → `/api/admin/toss-orders/update`), 결제진행(쿠팡 PurchaseButton 재사용 — 로컬 order-server가 쿠팡→네이버→토스 순으로 주문키 해석)
+- `scripts/order-server.mjs` — `resolveTossOrder`: 매입처 = 주문별 오버라이드 > `item_management_code`("{source}:{goods_no}") > toss_listings 폴백, 완주 시 jimscanner_toss_orders 에 입금대기·주문번호 기록
+- 미구현(P3): 재고 sold_out→remainingCount 0 동기화, MSP 리프라이스 연동, 클레임 폴링

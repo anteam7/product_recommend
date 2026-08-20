@@ -29,3 +29,6 @@ create table if not exists public.jimscanner_toss_listings (
 );
 create index if not exists idx_toss_listings_cp on public.jimscanner_toss_listings (coupang_seller_product_id);
 create index if not exists idx_toss_listings_src on public.jimscanner_toss_listings (source, source_goods_no);
+
+-- RLS: service_role 전용 (2026-08-20 추가)
+alter table public.jimscanner_toss_listings enable row level security;

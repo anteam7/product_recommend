@@ -192,6 +192,18 @@ const NAV_GROUPS: NavGroup[] = [
     ],
   },
   {
+    id: 'toss',
+    label: '토스쇼핑',
+    items: [
+      {
+        href: '/admin/toss-orders',
+        label: '주문 ↔ 매입',
+        icon: '🔵',
+        match: (p) => p.startsWith('/admin/toss-orders'),
+      },
+    ],
+  },
+  {
     id: 'meta',
     label: '메타',
     items: [

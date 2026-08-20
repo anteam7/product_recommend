@@ -62,7 +62,7 @@ async function resolveNaverOrder(orderId) {
   const { data: n } = await sb.from('jimscanner_naver_orders')
     .select('product_order_id, origin_product_no, product_name, option_name, quantity, raw_payload, purchase_status, supplier_source, supplier_goods_no, total_payment_amount')
     .eq('product_order_id', String(orderId)).single()
-  if (!n) return { error: `주문 #${orderId} 을(를) 찾을 수 없습니다 (쿠팡·네이버 모두 없음)` }
+  if (!n) return resolveTossOrder(orderId)
   const order = { product_name: n.product_name, option_name: n.option_name, shipping_count: n.quantity ?? 1 }
   // 주문별 매입처 오버라이드(둘 다 존재 시) 우선 — "이 주문에 한해서" 매입처 변경 지원. 없으면 listing 매칭 폴백
   let src = null, goodsNo = null
@@ -83,6 +83,36 @@ async function resolveNaverOrder(orderId) {
     order, source: src, sourceLabel: SUPPORTED_SOURCES[src], goodsNo, detailUrl: null, recipient,
     kind: 'naver', dbKey: n.product_order_id,
     paidAmount: n.total_payment_amount ?? null, domeCost: null,
+  }
+}
+
+// 토스쇼핑 주문(orderProductId) 해석 — 매입처: 주문별 오버라이드 > item_management_code("{source}:{goods_no}") > toss_listings 폴백
+async function resolveTossOrder(orderId) {
+  const { data: t } = await sb.from('jimscanner_toss_orders')
+    .select('*')
+    .eq('order_product_id', Number(orderId) || 0).single()
+  if (!t) return { error: `주문 #${orderId} 을(를) 찾을 수 없습니다 (쿠팡·네이버·토스 모두 없음)` }
+  const order = { product_name: t.product_name, option_name: t.option_name, shipping_count: t.quantity ?? 1 }
+  let src = null, goodsNo = null, domeCost = null
+  if (t.supplier_source && t.supplier_goods_no) {
+    src = t.supplier_source; goodsNo = t.supplier_goods_no
+  } else {
+    const m = /^([a-z0-9]+):(.+)$/i.exec(t.item_management_code || '')
+    if (m) { src = m[1]; goodsNo = m[2] }
+    if (!goodsNo && t.toss_product_id) {
+      const { data: L } = await sb.from('jimscanner_toss_listings').select('source, source_goods_no, dome_price_krw').eq('toss_product_id', t.toss_product_id).limit(1)
+      src = L?.[0]?.source; goodsNo = L?.[0]?.source_goods_no; domeCost = L?.[0]?.dome_price_krw ? L[0].dome_price_krw * (t.quantity ?? 1) : null
+    }
+  }
+  if (!SUPPORTED_SOURCES[src]) return { error: `자동주문 미지원 매입처(${src || '미연결'}) — 해당 매입처에서 직접 주문하세요`, order }
+  if (!goodsNo) return { error: '매입처 미연결 — item_management_code/toss_listings 에 source_goods_no가 없습니다', order }
+  const recipient = { name: t.receiver_name || '', zip: t.receiver_zip_code || '', addr1: t.receiver_address || '', addr2: t.receiver_address_detail || '', phone: t.receiver_phone || '' }
+  if (!recipient.name || !recipient.addr1) return { error: '수령인 주소 정보가 부족합니다 (toss orders 수집 컬럼 확인)', order }
+  return {
+    order, source: src, sourceLabel: SUPPORTED_SOURCES[src], goodsNo,
+    detailUrl: src === 'upickb2b' ? `https://upickb2b.com/product/x/${goodsNo}/category/1/display/1/` : null, recipient,
+    kind: 'toss', dbKey: t.order_product_id,
+    paidAmount: t.price ?? null, domeCost,
   }
 }
 
@@ -342,6 +372,10 @@ async function execPurchase(orderKey, fullMode) {
     if (r.kind === 'naver') {
       if (out.orderNo) upd.supplier_order_no = out.orderNo
       const { error } = await sb.from('jimscanner_naver_orders').update(upd).eq('product_order_id', r.dbKey)
+      if (error) out.msg += ` (⚠ DB 기록 실패: ${error.message} — 관리자에서 수동 입력)`
+    } else if (r.kind === 'toss') {
+      if (out.orderNo) upd.ggsan_order_no = out.orderNo
+      const { error } = await sb.from('jimscanner_toss_orders').update(upd).eq('order_product_id', r.dbKey)
       if (error) out.msg += ` (⚠ DB 기록 실패: ${error.message} — 관리자에서 수동 입력)`
     } else {
       if (out.orderNo) upd.ggsan_order_no = out.orderNo
