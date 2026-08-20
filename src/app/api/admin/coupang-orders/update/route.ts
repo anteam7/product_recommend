@@ -57,6 +57,7 @@ interface OrderRow {
   shipped_at: string | null
   shipment_box_id: number | null
   shipping_status: string | null
+  coupang_invoice_status: string | null
 }
 
 /**
@@ -80,7 +81,7 @@ export async function POST(request: NextRequest) {
   // 운송비 저장은 아래 update 시도에서만 컬럼을 건드리며, 미적용이면 그 저장만 실패한다.
   const { data: row, error: e1 } = await admin
     .from('jimscanner_coupang_orders')
-    .select('id, order_id, product_name, shipping_count, purchase_status, purchase_unit_cost, purchase_ordered_at, purchase_received_at, shipped_at, shipment_box_id, shipping_status')
+    .select('id, order_id, product_name, shipping_count, purchase_status, purchase_unit_cost, purchase_ordered_at, purchase_received_at, shipped_at, shipment_box_id, shipping_status, coupang_invoice_status')
     .eq('id', id)
     .single()
   if (e1 || !row) return NextResponse.json({ error: '주문을 찾을 수 없음' }, { status: 404 })
@@ -148,7 +149,10 @@ export async function POST(request: NextRequest) {
     }
   }
 
-  // 4) 송장 / 발송 추적 — 쿠팡 API 등록이 아니라 내부 기록만 (운송장은 Wing에서 직접 등록)
+  // 4) 송장 / 발송 추적 — 내부 기록 + 쿠팡 등록 대기열.
+  //    송장번호가 채워지면 '매입처발송'(SHIPPED) + coupang_invoice_status='pending' 까지만 올린다.
+  //    '발송완료'(RECEIVED) 전이는 쿠팡 송장등록(register-invoice 라우트 / 로컬 헬퍼 /coupang-invoice)이
+  //    성공했을 때만 일어난다(2026-08-20, 이전엔 여기서 RECEIVED 직행 = 내부기록만).
   const hasCompany = body.delivery_company !== undefined
   const hasInvoice = body.invoice_number !== undefined
   if (hasCompany || hasInvoice) {
@@ -158,15 +162,14 @@ export async function POST(request: NextRequest) {
       invoiceVal = String(body.invoice_number).replace(/\s/g, '').slice(0, 40) || null
       update.invoice_number = invoiceVal
     }
-    // 송장번호가 채워지면 = 발송 처리: 발송시각 + 발주상태 '발송완료'(RECEIVED) 자동 (취소건 제외)
     if (invoiceVal) {
       if (!order.shipped_at) update.shipped_at = now
-      // SHIPPED 제외: ggsan cron 이 매입처발송으로 만든 건은 수동 송장입력으로 RECEIVED 직행 금지(검토 C-2).
-      // 쿠팡 송장등록(register-invoice)이 성공해야만 RECEIVED 로 전이된다.
-      if (order.purchase_status !== 'CANCELLED' && order.purchase_status !== 'RECEIVED' && order.purchase_status !== 'SHIPPED') {
-        update.purchase_status = 'RECEIVED'
+      const invDone = ['uploaded', 'duplicate', 'manual_done'].includes(order.coupang_invoice_status ?? 'none')
+      if (order.purchase_status !== 'CANCELLED' && order.purchase_status !== 'RECEIVED' && !invDone) {
+        update.purchase_status = 'SHIPPED'
+        update.coupang_invoice_status = 'pending'
+        update.coupang_invoice_error = null
         if (!order.purchase_ordered_at) update.purchase_ordered_at = now
-        if (!order.purchase_received_at) update.purchase_received_at = now
       }
     }
     changes.push(`송장 ${invoiceVal ?? '(삭제)'}${hasCompany && update.delivery_company ? ` ${update.delivery_company}` : ''}`)

@@ -12,7 +12,7 @@
  *
  * 업로드 직전 HARD GATE 3개(돈 안전, 통과 못 하면 abort + needs_attention, 절대 등록 호출 안 함):
  *   ① 쿠팡 현재 shipping_status 가 취소/반품이면 abort('주문취소/반품')  — invoices 직전 ordersheet 단건 재조회
- *   ② 수령인 검증: receiver_name 존재 + ggsan_invoice_number 존재 필수(불충분하면 abort)
+ *   ② 수령인 검증: receiver_name 존재 + 송장번호(ggsan_invoice_number, 없으면 수동 invoice_number) 존재 필수(불충분하면 abort)
  *   ③ carrierToCode(ggsan_carrier_name)==null 이면 abort('택배사 미매핑')
  *
  * 인증: 어드민 세션(requireAdmin) **또는** Authorization: Bearer CRON_SECRET (coupang-stock-sync 패턴).
@@ -30,11 +30,21 @@ const COUPANG_HOST = process.env.COUPANG_API_HOST || 'https://api-gateway.coupan
 
 // ─── 택배사 매핑 (scripts/lib/coupang-carrier-map.mjs 의 캐논 미러) ───
 // 라우트가 송장등록 단일 진실 소스이므로 매핑도 여기 인라인한다(scripts/*.mjs 는 src/ 에서 import 불가).
-// ggsan 실관측 단일값 CJ대한통운=CJGLS 만 확정. 그 외는 null → 호출측 needs_attention='택배사 미매핑'.
+// 코드는 쿠팡 공식 택배사 코드표(developers.coupang.com/ko/api/logistics/courier-code, 2026-08-20 확인) 기준.
+// 표에 없는 이름(GSPostbox 등)은 null → 호출측 needs_attention='택배사 미매핑'(Wing 수동등록).
 const CARRIER_MAP: Record<string, string> = {
   CJ대한통운: 'CJGLS',
   CJGLS: 'CJGLS',
   CJ택배: 'CJGLS',
+  한진택배: 'HANJIN',
+  한진: 'HANJIN',
+  롯데택배: 'HYUNDAI', // 쿠팡 코드표: HYUNDAI=롯데택배(구 현대택배)
+  우체국택배: 'EPOST',
+  우체국: 'EPOST',
+  로젠택배: 'KGB', // 쿠팡 코드표: KGB=로젠택배
+  로젠: 'KGB',
+  경동택배: 'KDEXP',
+  대신택배: 'DAESIN',
 }
 function carrierToCode(name: string | null | undefined): string | null {
   if (!name) return null
@@ -93,6 +103,10 @@ interface OrderRow {
   ggsan_invoice_number: string | null
   ggsan_carrier_name: string | null
   ggsan_shipped_at: string | null
+  /** InvoiceCell 수동 입력 송장/택배사 — ggsan_* 이 없을 때(유픽 등 비-ggsan 매입처) 등록 소스 */
+  invoice_number: string | null
+  delivery_company: string | null
+  shipped_at: string | null
   coupang_invoice_status: string | null
   coupang_invoice_attempts: number | null
 }
@@ -137,7 +151,7 @@ export async function POST(request: NextRequest) {
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const admin = createAdminClient() as any
-  const SELECT = 'id, order_id, order_item_id, shipment_box_id, vendor_item_id, product_name, shipping_status, receiver_name, purchase_status, ggsan_invoice_number, ggsan_carrier_name, ggsan_shipped_at, coupang_invoice_status, coupang_invoice_attempts'
+  const SELECT = 'id, order_id, order_item_id, shipment_box_id, vendor_item_id, product_name, shipping_status, receiver_name, purchase_status, ggsan_invoice_number, ggsan_carrier_name, ggsan_shipped_at, invoice_number, delivery_company, shipped_at, coupang_invoice_status, coupang_invoice_attempts'
 
   let query = admin.from('jimscanner_coupang_orders').select(SELECT)
   query = id ? query.eq('id', id) : query.eq('order_id', Number(order_id))
@@ -182,13 +196,19 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ ok: false, aborted: true, reason, ...extra }, { status: 200 })
   }
 
+  // ── 등록 소스: ggsan 크론이 감지한 송장(ggsan_*) 우선, 없으면 InvoiceCell 수동 입력(invoice_number/delivery_company) ──
+  //    (유픽 등 비-ggsan 매입처는 크론 추적이 없어 수동 입력이 유일한 경로, 2026-08-20)
+  const invoiceNo = (order.ggsan_invoice_number ?? order.invoice_number ?? '').replace(/\s/g, '') || null
+  const carrierName = order.ggsan_carrier_name ?? order.delivery_company ?? null
+  const invoiceSource = order.ggsan_invoice_number ? 'ggsan' : 'manual'
+
   // ════════ HARD GATE ② 수령인/송장 존재 (검토 B-3, Phase1: 별도 수령인 저장 전이라 존재성만 검증) ════════
   if (!order.receiver_name) return abort('수령인 정보 없음')
-  if (!order.ggsan_invoice_number) return abort('매입처 송장번호 없음')
+  if (!invoiceNo) return abort('송장번호 없음')
 
   // ════════ HARD GATE ③ 택배사 매핑 (검토 C-6) ════════
-  const code = carrierToCode(order.ggsan_carrier_name)
-  if (code == null) return abort('택배사 미매핑')
+  const code = carrierToCode(carrierName)
+  if (code == null) return abort(`택배사 미매핑(${carrierName ?? '미선택'})`)
 
   // ════════ HARD GATE ① 쿠팡 현재 상태 취소/반품 재조회 (검토 D-1) ════════
   if (order.shipment_box_id == null) return abort('shipmentBoxId 없음')
@@ -254,7 +274,7 @@ export async function POST(request: NextRequest) {
       orderId: order.order_id,
       vendorItemId: reqVendorItemId,
       deliveryCompanyCode: code,
-      invoiceNumber: order.ggsan_invoice_number,
+      invoiceNumber: invoiceNo,
       splitShipping: false,
       preSplitShipped: false,
       estimatedShippingDate: '',
@@ -274,10 +294,11 @@ export async function POST(request: NextRequest) {
       coupang_invoice_company_code: code,
       coupang_invoice_error: null,
       purchase_received_at: uploadedAt,
+      shipping_status: 'DEPARTURE', // 낙관 반영(배송지시) — 다음 orders-sync 가 쿠팡 실값으로 재확인
       // 기존 InvoiceCell 경로와 호환되는 미러 컬럼
-      invoice_number: order.ggsan_invoice_number,
-      delivery_company: order.ggsan_carrier_name,
-      shipped_at: order.ggsan_shipped_at ?? uploadedAt,
+      invoice_number: invoiceNo,
+      delivery_company: carrierName,
+      shipped_at: order.ggsan_shipped_at ?? order.shipped_at ?? uploadedAt,
       last_synced_at: uploadedAt,
     }).eq('id', order.id)
     await logAdminAction({
@@ -285,15 +306,15 @@ export async function POST(request: NextRequest) {
       action: 'coupang_invoice_register',
       target_type: 'coupang_order',
       target_id: order.id,
-      summary: `주문#${order.order_id} 송장등록 성공 ${code} ${order.ggsan_invoice_number} (${(order.product_name ?? '').slice(0, 24)})`,
-      metadata: { code, invoice: order.ggsan_invoice_number },
+      summary: `주문#${order.order_id} 송장등록 성공 ${code} ${invoiceNo} [${invoiceSource}] (${(order.product_name ?? '').slice(0, 24)})`,
+      metadata: { code, invoice: invoiceNo, source: invoiceSource },
     })
     return NextResponse.json({
       ok: true,
       coupang_invoice_status: 'uploaded',
       purchase_status: 'RECEIVED',
       delivery_company_code: code,
-      invoice_number: order.ggsan_invoice_number,
+      invoice_number: invoiceNo,
     })
   }
 
@@ -307,9 +328,9 @@ export async function POST(request: NextRequest) {
       coupang_invoice_company_code: code,
       needs_attention: true,
       attention_reason: '송장중복(6개월/이미등록) — 매칭 확인',
-      invoice_number: order.ggsan_invoice_number,
-      delivery_company: order.ggsan_carrier_name,
-      shipped_at: order.ggsan_shipped_at ?? uploadedAt,
+      invoice_number: invoiceNo,
+      delivery_company: carrierName,
+      shipped_at: order.ggsan_shipped_at ?? order.shipped_at ?? uploadedAt,
       last_synced_at: uploadedAt,
     }).eq('id', order.id)
     await logAdminAction({
@@ -317,8 +338,8 @@ export async function POST(request: NextRequest) {
       action: 'coupang_invoice_register',
       target_type: 'coupang_order',
       target_id: order.id,
-      summary: `주문#${order.order_id} 송장 중복(기등록) ${order.ggsan_invoice_number}`,
-      metadata: { code, invoice: order.ggsan_invoice_number, duplicate: true },
+      summary: `주문#${order.order_id} 송장 중복(기등록) ${invoiceNo} [${invoiceSource}]`,
+      metadata: { code, invoice: invoiceNo, source: invoiceSource, duplicate: true },
     })
     return NextResponse.json({
       ok: true,
@@ -338,9 +359,9 @@ export async function POST(request: NextRequest) {
       coupang_invoice_company_code: code,
       needs_attention: true,
       attention_reason: '쿠팡 등록응답 형식 미확인 — Wing에서 등록 확인 요망',
-      invoice_number: order.ggsan_invoice_number,
-      delivery_company: order.ggsan_carrier_name,
-      shipped_at: order.ggsan_shipped_at ?? uploadedAt,
+      invoice_number: invoiceNo,
+      delivery_company: carrierName,
+      shipped_at: order.ggsan_shipped_at ?? order.shipped_at ?? uploadedAt,
       last_synced_at: uploadedAt,
     }).eq('id', order.id)
     return NextResponse.json({ ok: true, coupang_invoice_status: 'uploaded', needs_attention: true, message: '등록 응답형식 미확인 — Wing 확인 요망' })

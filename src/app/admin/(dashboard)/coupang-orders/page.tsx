@@ -482,9 +482,11 @@ export default async function CoupangOrdersPage({
                   <td className="px-3 py-2 text-xs">
                     <InvoiceCell
                       id={r.id}
+                      orderId={String(r.order_id)}
                       invoiceNumber={r.invoice_number}
                       deliveryCompany={r.delivery_company}
                       shippedAt={r.shipped_at}
+                      coupangInvoiceStatus={r.coupang_invoice_status ?? null}
                     />
                   </td>
                   <td className="px-3 py-2 text-center text-xs text-gray-500">{fmtDate(r.ordered_at)}</td>
