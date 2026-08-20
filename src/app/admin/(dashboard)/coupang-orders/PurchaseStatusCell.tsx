@@ -2,6 +2,7 @@
 
 import { useState } from 'react'
 import { useRouter } from 'next/navigation'
+import { waitForJob } from '@/lib/coupang-job-client'
 
 // 드롭십(ggsan 직배송) 흐름: 미발주 → 입금대기(결제완주·무통장) → 발주완료(입금완료) → 매입처발송 → 발송완료(쿠팡 등록) → 취소
 const STATUS_OPTIONS = [
@@ -24,14 +25,12 @@ const STATUS_CLS: Record<string, string> = {
 
 interface Props {
   id: string
-  /** 쿠팡 주문번호(order_id) — 발주확인 로컬 헬퍼 폴백용 */
+  /** 쿠팡 주문번호(order_id) — 표시용(큐는 서버가 등록) */
   orderId?: string
   status: string
   orderedAt: string | null
   ggsanOrderNo?: string | null
 }
-
-const HELPER = 'http://127.0.0.1:39201'
 
 function fmtDate(s: string | null) {
   return s ? s.slice(0, 16).replace('T', ' ') : null
@@ -61,21 +60,15 @@ export function PurchaseStatusCell({ id, orderId, status, orderedAt, ggsanOrderN
       const j = await res.json()
       setSaving(false)
       if (!res.ok) { setErr(j.error || '실패'); return }
-      // 발주완료(입금완료) 시 쿠팡 발주확인(결제완료→상품준비중) 결과 안내 — 네이버 셀과 동일 패턴
+      // 발주완료(입금완료) 시 쿠팡 발주확인 — 서버가 집 PC 큐에 잡을 등록하고, 여기서 결과를 폴링해 보여준다.
       if (j.ack) {
-        if (j.ack.done) setAckMsg('✓ 쿠팡 상품준비중 처리 완료')
-        else if (j.ack.skipped) setAckMsg(`발주확인 생략: ${j.ack.reason}`)
-        else if (orderId) {
-          // Vercel 서버 IP는 쿠팡 OpenAPI IP 접근제어 밖(403) → 로컬 헬퍼(집 PC = 허용 IP)로 폴백.
-          // 로컬 ack는 멱등(이미 처리됨 통과)이라 실패 사유와 무관하게 재시도해도 안전.
-          setAckMsg('로컬 헬퍼로 발주확인 중…')
-          try {
-            const hr = await fetch(`${HELPER}/coupang-ack?id=${encodeURIComponent(orderId)}`, { method: 'POST' })
-            const hj = await hr.json()
-            setAckMsg(hj.ok ? '✓ 쿠팡 상품준비중 처리 완료 (로컬)' : `⚠ 발주확인 실패: 로컬=${hj.detail} / 서버=${j.ack.reason}`)
-          } catch {
-            setAckMsg(`⚠ 발주확인 실패: 서버=${j.ack.reason} / 로컬 헬퍼(127.0.0.1:39201)도 꺼져 있음 — 이 PC에서 재시도하거나 Wing에서 상품준비중 처리하세요`)
-          }
+        if (j.ack.skipped) setAckMsg(`발주확인 생략: ${j.ack.reason}`)
+        else if (j.ack.queued && j.ack.job_id) {
+          setAckMsg(`집 PC에서 쿠팡 발주확인 중… (잡 #${j.ack.job_id})`)
+          const r = await waitForJob(j.ack.job_id)
+          if (r.status === 'done') setAckMsg(`✓ 쿠팡 상품준비중 처리 완료${r.result_msg && r.result_msg !== 'OK' ? ` — ${r.result_msg}` : ''}`)
+          else if (r.status === 'error') setAckMsg(`⚠ 발주확인 실패: ${r.result_msg ?? '원인 미상'} — Wing에서 상품준비중 처리하세요`)
+          else setAckMsg(`⏳ 발주확인 대기 중(잡 #${j.ack.job_id}) — 집 PC 헬퍼(order-server)가 켜지면 자동 처리됩니다`)
         }
         else setAckMsg(`⚠ 발주확인 실패: ${j.ack.reason}`)
       }
@@ -119,7 +112,7 @@ export function PurchaseStatusCell({ id, orderId, status, orderedAt, ggsanOrderN
           disabled={saving}
           onClick={() => change('ORDERED')}
           className="px-2 py-0.5 rounded bg-emerald-600 text-white text-[11px] font-semibold hover:bg-emerald-700 disabled:opacity-60"
-          title="매입처 계좌로 이체를 마쳤으면 눌러주세요 — 발주완료로 전환되며 쿠팡 발주확인(상품준비중)도 자동 처리됩니다"
+          title="매입처 계좌로 이체를 마쳤으면 눌러주세요 — 발주완료로 전환되며 쿠팡 발주확인(상품준비중)은 집 PC가 자동 처리합니다"
         >
           ✓ 입금완료
         </button>
@@ -127,7 +120,7 @@ export function PurchaseStatusCell({ id, orderId, status, orderedAt, ggsanOrderN
       {orderedAt && <div className="text-[10px] text-gray-400">{fmtDate(orderedAt)}</div>}
       {err && <span className="text-[10px] text-rose-600">{err}</span>}
       {ackMsg && (
-        <span className={`text-[10px] ${ackMsg.startsWith('✓') ? 'text-emerald-600' : ackMsg.startsWith('⚠') ? 'text-rose-600' : 'text-gray-500'}`}>
+        <span className={`text-[10px] ${ackMsg.startsWith('✓') ? 'text-emerald-600' : ackMsg.startsWith('⚠') ? 'text-rose-600' : ackMsg.startsWith('⏳') ? 'text-amber-600' : 'text-gray-500'}`}>
           {ackMsg}
         </span>
       )}

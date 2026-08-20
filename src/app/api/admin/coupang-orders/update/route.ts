@@ -3,37 +3,12 @@ import { revalidatePath } from 'next/cache'
 import { createClient, isAdminEmail } from '@/lib/auth/server'
 import { createAdminClient } from '@/lib/auth/admin-supabase'
 import { logAdminAction } from '@/lib/admin-log'
-import crypto from 'node:crypto'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 
-// ─── 쿠팡 acknowledgement(상품준비중 처리): 발주완료 시 결제완료(ACCEPT)→상품준비중(INSTRUCT) 자동전환 ───
-// register-invoice STEP② 의 ack 패턴 미러. best-effort — 실패해도 발주완료 저장은 막지 않는다.
-const COUPANG_HOST = process.env.COUPANG_API_HOST || 'https://api-gateway.coupang.com'
-const ACK_OR_LATER = new Set(['INSTRUCT', 'DEPARTURE', 'DELIVERING', 'FINAL_DELIVERY'])
-
-function signCoupang(method: string, urlPath: string) {
-  const dt = new Date().toISOString().substring(2, 19).replace(/[-:]/g, '') + 'Z'
-  const signature = crypto.createHmac('sha256', process.env.COUPANG_SECRET_KEY!).update(dt + method + urlPath).digest('hex')
-  return { datetime: dt, signature }
-}
-async function coupangAcknowledge(vendorId: string, shipmentBoxId: number): Promise<{ ok: boolean; status: number; detail: string }> {
-  const urlPath = `/v2/providers/openapi/apis/api/v4/vendors/${vendorId}/ordersheets/acknowledgement`
-  const { datetime, signature } = signCoupang('PUT', urlPath)
-  const res = await fetch(`${COUPANG_HOST}${urlPath}`, {
-    method: 'PUT',
-    headers: {
-      Authorization: `CEA algorithm=HmacSHA256, access-key=${process.env.COUPANG_ACCESS_KEY!}, signed-date=${datetime}, signature=${signature}`,
-      'Content-Type': 'application/json;charset=UTF-8',
-    },
-    body: JSON.stringify({ vendorId, shipmentBoxIds: [shipmentBoxId] }),
-  })
-  const text = await res.text()
-  // HTTP 200 또는 '이미 처리됨'(상품준비중 이후 재호출) 멱등 통과
-  const alreadyDone = /이미.{0,8}(처리|확인|준비)|상품준비중|출고지시|already.{0,12}(process|acknowledg|done)/i.test(text)
-  return { ok: res.status === 200 || alreadyDone, status: res.status, detail: text.slice(0, 200) }
-}
+// 쿠팡 배송지시 이후 = 송장까지 올라간 상태. 발주확인 잡이 무의미하므로 skip.
+const INVOICE_OR_LATER = new Set(['DEPARTURE', 'DELIVERING', 'FINAL_DELIVERY'])
 
 const PURCHASE_STATUSES = ['PENDING', 'AWAITING_DEPOSIT', 'ORDERED', 'SHIPPED', 'RECEIVED', 'CANCELLED'] as const
 type PurchaseStatus = (typeof PURCHASE_STATUSES)[number]
@@ -180,29 +155,27 @@ export async function POST(request: NextRequest) {
   const { error } = await admin.from('jimscanner_coupang_orders').update(update).eq('id', id)
   if (error) return NextResponse.json({ error: error.message }, { status: 500 })
 
-  // ── 발주완료(ORDERED) 전환 시: 쿠팡 결제완료→상품준비중 자동 처리(acknowledgement) ──
-  // best-effort. 이미 상품준비중 이후면 skip. 실패해도 위 발주완료 저장은 유지(롤백 안 함).
-  let ack: { done: boolean; skipped?: boolean; reason?: string } | undefined
+  // ── 발주완료(ORDERED) 전환 시: 쿠팡 발주확인(결제완료→상품준비중)을 집 PC 큐에 등록 ──
+  // Vercel IP 는 쿠팡 OpenAPI IP 접근제어 밖(403)이라 여기서 직접 호출하지 않는다(2026-08-20 전환).
+  // order-server(집 PC) 의 coupang 잡 폴러(3초)가 실행. 헬퍼가 꺼져 있으면 큐에 남았다가 켜지면 처리(유실 없음).
+  let ack: { done: boolean; queued?: boolean; job_id?: number; skipped?: boolean; reason?: string } | undefined
   if (body.purchase_status === 'ORDERED') {
-    const vendorId = process.env.COUPANG_VENDOR_ID
     const shippingUpper = String(order.shipping_status ?? '').toUpperCase()
-    if (!vendorId || order.shipment_box_id == null) {
-      ack = { done: false, reason: !vendorId ? 'VENDOR_ID 미설정' : 'shipmentBoxId 없음' }
-    } else if (ACK_OR_LATER.has(shippingUpper)) {
-      ack = { done: false, skipped: true, reason: `이미 상품준비중 이후(${order.shipping_status})` }
+    if (order.shipment_box_id == null) {
+      ack = { done: false, reason: 'shipmentBoxId 없음' }
+    } else if (INVOICE_OR_LATER.has(shippingUpper)) {
+      ack = { done: false, skipped: true, reason: `이미 배송지시 이후(${order.shipping_status})` }
     } else {
-      try {
-        const r = await coupangAcknowledge(vendorId, order.shipment_box_id)
-        if (r.ok) {
-          // 낙관적 반영(다음 orders-sync 가 쿠팡 실값으로 재확인). UI 즉시 갱신용.
-          await admin.from('jimscanner_coupang_orders').update({ shipping_status: 'INSTRUCT', last_synced_at: new Date().toISOString() }).eq('id', id)
-          ack = { done: true }
-          changes.push('쿠팡 상품준비중 처리')
-        } else {
-          ack = { done: false, reason: `ack HTTP ${r.status}: ${r.detail}` }
-        }
-      } catch (e) {
-        ack = { done: false, reason: e instanceof Error ? e.message : String(e) }
+      const orderKey = String(order.order_id)
+      const { data: dup } = await admin.from('jimscanner_purchase_jobs')
+        .select('id').eq('order_key', orderKey).eq('mode', 'coupang_ack').in('status', ['queued', 'running']).limit(1)
+      if (dup?.length) {
+        ack = { done: false, queued: true, job_id: dup[0].id }
+      } else {
+        const { data: job, error: jobErr } = await admin.from('jimscanner_purchase_jobs')
+          .insert({ order_key: orderKey, mode: 'coupang_ack', requested_by: user.email }).select('id').single()
+        ack = jobErr ? { done: false, reason: `잡 등록 실패: ${jobErr.message}` } : { done: false, queued: true, job_id: job.id }
+        if (!jobErr) changes.push(`쿠팡 발주확인 잡#${job.id}`)
       }
     }
   }

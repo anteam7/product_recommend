@@ -417,7 +417,7 @@ setInterval(async () => {
   if (jobBusy) return
   jobBusy = true
   try {
-    const { data: jobs } = await sb.from('jimscanner_purchase_jobs').select('id, order_key, mode').eq('status', 'queued').order('id', { ascending: true }).limit(1)
+    const { data: jobs } = await sb.from('jimscanner_purchase_jobs').select('id, order_key, mode').eq('status', 'queued').in('mode', ['full', 'stage']).order('id', { ascending: true }).limit(1)
     const job = jobs?.[0]
     if (!job) return
     await sb.from('jimscanner_purchase_jobs').update({ status: 'running', started_at: new Date().toISOString() }).eq('id', job.id)
@@ -431,6 +431,26 @@ setInterval(async () => {
     console.log(`[job ${job.id}] ${out.ok ? '완료' : '실패'}: ${out.msg}`)
   } catch (e) { console.error('[job-poller]', e instanceof Error ? e.message : e) } finally { jobBusy = false }
 }, 4000)
+
+// ── 쿠팡 쓰기 잡 폴러(coupang_ack / coupang_invoice) — Vercel 어드민이 등록, 이 PC(쿠팡 허용 IP)가 실행 ──
+// 결제진행 폴러(Playwright, 수 분)와 분리해 대기 없이 처리. 직렬(coupangJobBusy). 멱등이라 재실행 안전.
+let coupangJobBusy = false
+setInterval(async () => {
+  if (coupangJobBusy) return
+  coupangJobBusy = true
+  try {
+    const { data: jobs } = await sb.from('jimscanner_purchase_jobs').select('id, order_key, mode').eq('status', 'queued').in('mode', ['coupang_ack', 'coupang_invoice']).order('id', { ascending: true }).limit(5)
+    for (const job of jobs ?? []) {
+      await sb.from('jimscanner_purchase_jobs').update({ status: 'running', started_at: new Date().toISOString() }).eq('id', job.id)
+      const r = job.mode === 'coupang_ack'
+        ? await coupangAckByOrderId(job.order_key)
+        : await coupangRegisterInvoiceByOrderId(job.order_key)
+      const msg = r.invoice_status && r.invoice_status !== 'failed' ? `${r.detail} [${r.invoice_status}]` : r.detail
+      await sb.from('jimscanner_purchase_jobs').update({ status: r.ok ? 'done' : 'error', result_msg: String(msg ?? '').slice(0, 500), finished_at: new Date().toISOString() }).eq('id', job.id)
+      console.log(`[coupang-job ${job.id}] ${job.mode} 주문 ${job.order_key} → ${r.ok ? 'done' : 'error'}: ${msg}`)
+    }
+  } catch (e) { console.error('[coupang-job-poller]', e instanceof Error ? e.message : e) } finally { coupangJobBusy = false }
+}, 3000)
 
 const htmlPage = (res, body) => { res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }); res.end(`<!doctype html><html lang=ko><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><body style="font-family:system-ui,sans-serif;max-width:620px;margin:48px auto;padding:0 18px;line-height:1.6;color:#111">${body}</body></html>`) }
 

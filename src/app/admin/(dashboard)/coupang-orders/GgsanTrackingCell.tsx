@@ -2,6 +2,7 @@
 
 import { useState } from 'react'
 import { useRouter } from 'next/navigation'
+import { runCoupangJob } from '@/lib/coupang-job-client'
 
 /**
  * 매입처(ggsan) 추적 셀 — 읽기 + 반자동 [확인·등록] 버튼.
@@ -12,7 +13,7 @@ import { useRouter } from 'next/navigation'
  *   - 매입처 송장(택배사 · 번호)
  *   - coupang_invoice_status 배지 + (pending/acknowledged/failed) 액션 버튼
  *
- * 버튼은 register-invoice 라우트(단일 진실 소스)를 호출한다. InvoiceCell 패턴 참고.
+ * 버튼은 집 PC 큐(coupang_invoice 잡)로 보내고 결과를 폴링한다(실행 로직 = scripts/lib/coupang-invoice.mjs). InvoiceCell 패턴 참고.
  */
 
 const COUPANG_INVOICE_BADGE: Record<string, { label: string; cls: string }> = {
@@ -27,7 +28,7 @@ const COUPANG_INVOICE_BADGE: Record<string, { label: string; cls: string }> = {
 
 interface Props {
   id: string
-  /** 쿠팡 주문번호(order_id) — 송장등록 로컬 헬퍼 폴백용 */
+  /** 쿠팡 주문번호(order_id) — 집 PC 큐 잡 키 */
   orderId?: string
   ggsanOrderNo: string | null
   ggsanOrderStatus: string | null
@@ -38,8 +39,6 @@ interface Props {
   needsAttention: boolean | null
   attentionReason: string | null
 }
-
-const HELPER = 'http://127.0.0.1:39201'
 
 function fmtDate(s: string | null) {
   return s ? s.slice(0, 16).replace('T', ' ') : null
@@ -75,56 +74,15 @@ export function GgsanTrackingCell({ id, orderId,
     setBusy(true)
     setMsg(null)
     setMsgErr(false)
-    try {
-      const res = await fetch('/api/admin/coupang-orders/register-invoice', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id }),
-        credentials: 'same-origin',
-      })
-      const j = await res.json().catch(() => ({}))
-      setBusy(false)
-      if (!res.ok) {
-        setMsgErr(true)
-        setMsg(j.error || `실패(HTTP ${res.status})`)
-        return
-      }
-      if (j.ok && (j.coupang_invoice_status === 'uploaded' || j.coupang_invoice_status === 'duplicate')) {
-        setMsgErr(false)
-        setMsg(j.coupang_invoice_status === 'duplicate' ? '중복(기등록) — 확인 필요' : '등록 완료')
-      } else if (j.aborted) {
-        setMsgErr(true)
-        setMsg(j.reason || '중단')
-      } else if ((j.deferred || !j.ok) && orderId) {
-        // Vercel IP는 쿠팡 OpenAPI 접근제어 밖 → 로컬 헬퍼(집 PC)로 폴백. 헬퍼는 멱등(기등록·배송지시 이후면 동기화만).
-        setMsgErr(false)
-        setMsg('로컬 헬퍼로 등록 중…')
-        try {
-          const hr = await fetch(`${HELPER}/coupang-invoice?id=${encodeURIComponent(orderId)}`, { method: 'POST' })
-          const hj = await hr.json()
-          setMsgErr(!hj.ok)
-          setMsg(hj.ok ? `${hj.invoice_status === 'uploaded' ? '등록 완료' : hj.invoice_status === 'duplicate' ? '중복(기등록) — 확인 필요' : hj.detail} (로컬)` : `실패: 로컬=${hj.detail} / 서버=${j.reason || j.message || ''}`)
-        } catch {
-          setMsgErr(true)
-          setMsg(`실패: 서버=${j.reason || j.message || '등록 실패'} / 로컬 헬퍼(127.0.0.1:39201) 꺼짐`)
-        }
-      } else if (j.deferred) {
-        setMsgErr(true)
-        setMsg(j.reason || '보류')
-      } else if (!j.ok) {
-        setMsgErr(true)
-        setMsg(j.reason || j.message || '등록 실패')
-      } else {
-        setMsgErr(false)
-        setMsg(j.message || '처리됨')
-      }
-      router.refresh()
-    } catch {
-      setBusy(false)
-      setMsgErr(true)
-      setMsg('네트워크 오류')
-    }
+    if (!orderId) { setBusy(false); setMsgErr(true); setMsg('주문번호 없음'); return }
+    // 집 PC 큐(coupang_invoice) → order-server 가 쿠팡 발주확인+송장등록 실행(Vercel 은 쿠팡 IP 접근제어 밖)
+    const out = await runCoupangJob(orderId, 'coupang_invoice', { doing: '쿠팡 송장등록', done: '등록 완료' }, (m) => { setMsgErr(false); setMsg(m) })
+    setBusy(false)
+    setMsgErr(out.startsWith('⚠'))
+    setMsg(out)
+    router.refresh()
   }
+
 
   return (
     <div className="flex flex-col gap-1 text-xs min-w-[150px]">

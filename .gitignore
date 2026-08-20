@@ -81,3 +81,4 @@ data/scout/
 
 # 확장 배포용 압축본(로컬에서 원격 PC 복사용) — 커밋 금지
 extension/*.zip
+_order-server.log

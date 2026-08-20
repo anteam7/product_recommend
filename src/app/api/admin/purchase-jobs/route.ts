@@ -16,10 +16,14 @@ async function requireAdmin() {
 }
 
 /**
- * 원격 결제진행 큐 — 로컬 헬퍼(127.0.0.1:39201)에 닿지 않는 기기(모바일 등)의 릴레이.
- * POST { order_key, mode? }  → 잡 등록 (집 PC의 order-server 폴러가 4초 내 집어 실행)
+ * 집 PC 실행 큐 — Vercel 이 직접 못 하는 일을 order-server 폴러가 집어 실행한다.
+ *   mode full|stage           원격 결제진행(매입처 주문서 작성, Playwright) — 로컬 헬퍼에 닿지 않는 기기(모바일 등)의 릴레이
+ *   mode coupang_ack          쿠팡 발주확인(결제완료→상품준비중)     ┐ Vercel IP 는 쿠팡 OpenAPI IP 접근제어 밖(403)이라
+ *   mode coupang_invoice      쿠팡 송장등록(→배송지시, 발송완료)     ┘ 쿠팡 쓰기는 전부 집 PC 에서만 (2026-08-20)
+ * POST { order_key, mode? }  → 잡 등록 (같은 주문·같은 mode 가 대기/실행 중이면 409 + 그 id)
  * GET  ?id=N                 → 잡 상태 조회 (버튼이 폴링)
  */
+const MODES = new Set(['full', 'stage', 'coupang_ack', 'coupang_invoice'])
 export async function POST(request: NextRequest) {
   const user = await requireAdmin()
   if (!user) return NextResponse.json({ error: '권한 없음' }, { status: 401 })
@@ -28,12 +32,12 @@ export async function POST(request: NextRequest) {
   try { body = await request.json() } catch { return NextResponse.json({ error: '잘못된 요청' }, { status: 400 }) }
   const orderKey = String(body.order_key ?? '').trim()
   if (!/^\d{6,24}$/.test(orderKey)) return NextResponse.json({ error: 'order_key 형식 오류' }, { status: 400 })
-  const mode = body.mode === 'stage' ? 'stage' : 'full'
+  const mode = body.mode && MODES.has(body.mode) ? body.mode : 'full'
 
   const sb = admin()
-  // 중복 가드 — 같은 주문의 잡이 대기/실행 중이면 재등록 거부
+  // 중복 가드 — 같은 주문·같은 종류의 잡이 대기/실행 중이면 재등록 거부(409 + 기존 id → 클라이언트가 그 잡을 기다림)
   const { data: dup } = await sb.from('jimscanner_purchase_jobs')
-    .select('id, status').eq('order_key', orderKey).in('status', ['queued', 'running']).limit(1)
+    .select('id, status').eq('order_key', orderKey).eq('mode', mode).in('status', ['queued', 'running']).limit(1)
   if (dup?.length) return NextResponse.json({ error: `이미 진행 중인 잡(#${dup[0].id}, ${dup[0].status})이 있습니다`, id: dup[0].id }, { status: 409 })
 
   const { data, error } = await sb.from('jimscanner_purchase_jobs')
