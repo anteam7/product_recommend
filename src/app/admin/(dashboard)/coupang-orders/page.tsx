@@ -466,6 +466,7 @@ export default async function CoupangOrdersPage({
                   <td className="px-3 py-2">
                     <GgsanTrackingCell
                       id={r.id}
+                      orderId={String(r.order_id)}
                       ggsanOrderNo={r.ggsan_order_no ?? null}
                       ggsanOrderStatus={r.ggsan_order_status ?? null}
                       ggsanInvoiceNumber={r.ggsan_invoice_number ?? null}

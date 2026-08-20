@@ -509,3 +509,22 @@ create index if not exists idx_coupang_ggsan_sync_runs_started
 가장 위험한 단일 항목: **B-3 오매칭 → C-4 중복=성공 은폐 → 잘못된 송장 영구 고착** 연쇄. 휴리스틱 자동확정 금지 + 수령인 hard gate가 이 연쇄의 차단점이다.
 
 (검토 근거 파일 절대경로: `C:\Web\jimscanner-personal\src\app\api\admin\coupang-orders\update\route.ts`, `C:\Web\jimscanner-personal\scripts\local-cron-orders-sync.mjs`, `C:\Web\jimscanner-personal\src\app\api\cron\coupang-stock-sync\route.ts`, `C:\Web\jimscanner-personal\scripts\order-server.mjs`, `C:\Web\jimscanner-personal\src\app\admin\(dashboard)\coupang-orders\InvoiceCell.tsx`, `C:\Web\jimscanner-personal\src\app\admin\(dashboard)\coupang-orders\page.tsx`)
+---
+
+## 부록 (2026-08-20) — 매입처 송장 자동수집 확장 + 쿠팡 쓰기 로컬 전환
+
+**배경:** Vercel 라우트(`register-invoice`, `update`의 ack)는 쿠팡 OpenAPI IP 접근제어에 막혀 **항상 실패**(발주확인 로그로 확정). 그 결과 ggsan 크론이 감지한 송장이 `pending`으로 고착(23건)돼 있었고, 유픽(Cafe24) 매입 건은 추적 자체가 없어 전부 수동 입력이었다.
+
+**변경:**
+| 구성요소 | 내용 |
+|---|---|
+| `scripts/lib/coupang-invoice.mjs` (신규) | 발주확인·송장등록 공용 모듈(라우트 미러: 멱등·hard gate 3·ack·invoices·DB 전이). **쿠팡이 이미 배송지시 이후면 API 호출 없이 `manual_done`+RECEIVED 동기화**. 송장번호 `normalizeInvoiceNo`(숫자만 — 유픽 CJ `6995-6837-5375` 대응) |
+| `scripts/lib/upick-tracking.mjs` (신규) | Playwright headless로 유픽 마이쇼핑 주문상세 파싱: `주문처리상태` th, `.prdBox ul.info a[href*=delivery_trace…invoice_no=]`(텍스트=택배사). CJ/한진 마크업 동일(15건 실측) |
+| `scripts/local-cron-ggsan-sync.mjs` | ① `ggsan_order_no` 형식으로 ggsan(숫자)/유픽(`YYYYMMDD-NNNNNNN`) 분기 ② 유픽 섹션 추가 ③ 쿠팡 등록을 Vercel 호출 → 로컬 모듈 직접 실행 ④ `SHIPPED+pending/failed` 재시도 스윕(매 회차) ⑤ ggsan 택배사 sno **5=한진택배** 추가(8=CJ), 과거 미매핑 건 백필 ⑥ ggsan 로그인 실패 시 유픽/스윕은 계속 |
+| `scripts/order-server.mjs` | `/coupang-ack`, `/coupang-invoice` 가 공용 모듈 사용 |
+| 어드민 `InvoiceCell`·`GgsanTrackingCell` | 서버 등록 실패 시 로컬 헬퍼 폴백 + 결과 표시 |
+| 택배사 매핑 | 쿠팡 공식 코드표 7종(CJGLS/HANJIN/HYUNDAI=롯데/EPOST/KGB=로젠/KDEXP/DAESIN) — route.ts·lib 동기 유지 |
+
+**흐름(완전자동):** 입금완료(→발주확인) → 매시 :30 크론이 ggsan/유픽 주문상세에서 송장 감지 → SHIPPED+pending → 쿠팡 송장등록(로컬) → RECEIVED + DEPARTURE(배송지시). 수동 송장입력·[확인·등록] 버튼도 같은 모듈로 귀결.
+
+**검증(2026-08-20):** 첫 실행 tracked=24 shipped=2(유픽 6/19·8/8 감지) invoice_ok=23(전부 manual_done 동기화) err=0, 두 번째 실행 멱등. **실제 invoices API 호출은 아직 0회** — 다음 유픽/ggsan 발송 건이 첫 실전(문제 시 `auto_upload=false`로 즉시 중지).

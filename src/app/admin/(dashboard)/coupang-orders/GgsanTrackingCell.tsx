@@ -27,6 +27,8 @@ const COUPANG_INVOICE_BADGE: Record<string, { label: string; cls: string }> = {
 
 interface Props {
   id: string
+  /** 쿠팡 주문번호(order_id) — 송장등록 로컬 헬퍼 폴백용 */
+  orderId?: string
   ggsanOrderNo: string | null
   ggsanOrderStatus: string | null
   ggsanInvoiceNumber: string | null
@@ -37,12 +39,13 @@ interface Props {
   attentionReason: string | null
 }
 
+const HELPER = 'http://127.0.0.1:39201'
+
 function fmtDate(s: string | null) {
   return s ? s.slice(0, 16).replace('T', ' ') : null
 }
 
-export function GgsanTrackingCell({
-  id,
+export function GgsanTrackingCell({ id, orderId,
   ggsanOrderNo,
   ggsanOrderStatus,
   ggsanInvoiceNumber,
@@ -92,6 +95,19 @@ export function GgsanTrackingCell({
       } else if (j.aborted) {
         setMsgErr(true)
         setMsg(j.reason || '중단')
+      } else if ((j.deferred || !j.ok) && orderId) {
+        // Vercel IP는 쿠팡 OpenAPI 접근제어 밖 → 로컬 헬퍼(집 PC)로 폴백. 헬퍼는 멱등(기등록·배송지시 이후면 동기화만).
+        setMsgErr(false)
+        setMsg('로컬 헬퍼로 등록 중…')
+        try {
+          const hr = await fetch(`${HELPER}/coupang-invoice?id=${encodeURIComponent(orderId)}`, { method: 'POST' })
+          const hj = await hr.json()
+          setMsgErr(!hj.ok)
+          setMsg(hj.ok ? `${hj.invoice_status === 'uploaded' ? '등록 완료' : hj.invoice_status === 'duplicate' ? '중복(기등록) — 확인 필요' : hj.detail} (로컬)` : `실패: 로컬=${hj.detail} / 서버=${j.reason || j.message || ''}`)
+        } catch {
+          setMsgErr(true)
+          setMsg(`실패: 서버=${j.reason || j.message || '등록 실패'} / 로컬 헬퍼(127.0.0.1:39201) 꺼짐`)
+        }
       } else if (j.deferred) {
         setMsgErr(true)
         setMsg(j.reason || '보류')
