@@ -9,6 +9,7 @@
  *       → [결제진행 시작] → /run?id= → Playwright(chrome) 띄워 로그인→상품→바로구매→수령인 입력→정지
  */
 import http from 'node:http'
+import crypto from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
@@ -24,6 +25,51 @@ const sb = createClient(env.NEXT_PUBLIC_SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_
 const PORT = Number(env.ORDER_SERVER_PORT || 39201)
 const BASE = env.GGSAN_BASE_URL || 'https://www.ggsan.com'
 const esc = (s) => String(s ?? '').replace(/[<>&"]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;' }[c]))
+
+// ── 쿠팡 OpenAPI (HMAC) — 발주확인(acknowledgement) 전용. src/app/api/admin/coupang-orders/update/route.ts 의 미러 ──
+const COUPANG_HOST = env.COUPANG_API_HOST || 'https://api-gateway.coupang.com'
+const COUPANG_ACK_OR_LATER = new Set(['INSTRUCT', 'DEPARTURE', 'DELIVERING', 'FINAL_DELIVERY'])
+function signCoupang(method, urlPath) {
+  const dt = new Date().toISOString().substring(2, 19).replace(/[-:]/g, '') + 'Z'
+  const signature = crypto.createHmac('sha256', env.COUPANG_SECRET_KEY).update(dt + method + urlPath).digest('hex')
+  return { datetime: dt, signature }
+}
+/** 쿠팡 order_id(숫자) 기준 발주확인. DB에 있는 우리 주문만 처리(임의 id 방지), 이미 상품준비중 이후면 멱등 통과. */
+async function coupangAckByOrderId(orderId) {
+  try {
+    if (!env.COUPANG_VENDOR_ID || !env.COUPANG_ACCESS_KEY || !env.COUPANG_SECRET_KEY) return { ok: false, status: 500, detail: '쿠팡 API 키/VENDOR_ID 미설정(.env.local)' }
+    const { data: ord, error } = await sb.from('jimscanner_coupang_orders')
+      .select('id, order_id, shipment_box_id, shipping_status')
+      .eq('order_id', orderId).limit(1).maybeSingle()
+    if (error) return { ok: false, status: 500, detail: `DB 조회 실패: ${error.message}` }
+    if (!ord) return { ok: false, status: 404, detail: '주문 없음' }
+    if (COUPANG_ACK_OR_LATER.has(String(ord.shipping_status ?? '').toUpperCase())) return { ok: true, status: 200, detail: `이미 상품준비중 이후(${ord.shipping_status})` }
+    if (ord.shipment_box_id == null) return { ok: false, status: 422, detail: 'shipmentBoxId 없음' }
+    const urlPath = `/v2/providers/openapi/apis/api/v4/vendors/${env.COUPANG_VENDOR_ID}/ordersheets/acknowledgement`
+    const { datetime, signature } = signCoupang('PUT', urlPath)
+    const res = await fetch(`${COUPANG_HOST}${urlPath}`, {
+      method: 'PUT',
+      headers: {
+        Authorization: `CEA algorithm=HmacSHA256, access-key=${env.COUPANG_ACCESS_KEY}, signed-date=${datetime}, signature=${signature}`,
+        'Content-Type': 'application/json;charset=UTF-8',
+      },
+      body: JSON.stringify({ vendorId: env.COUPANG_VENDOR_ID, shipmentBoxIds: [Number(ord.shipment_box_id)] }),
+    })
+    const text = await res.text()
+    // update/route.ts 와 동일한 멱등 판정: 200 또는 '이미 처리됨' 류 메시지
+    const alreadyDone = /이미.{0,8}(처리|확인|준비)|상품준비중|출고지시|already.{0,12}(process|acknowledg|done)/i.test(text)
+    if (res.status === 200 || alreadyDone) {
+      // 낙관적 반영 — 다음 orders-sync 가 쿠팡 실값으로 재확인
+      await sb.from('jimscanner_coupang_orders').update({ shipping_status: 'INSTRUCT', last_synced_at: new Date().toISOString() }).eq('id', ord.id)
+      console.log(`[coupang-ack] order#${orderId} box=${ord.shipment_box_id} → INSTRUCT (${alreadyDone ? 'already' : 'OK'})`)
+      return { ok: true, status: 200, detail: alreadyDone ? '이미 처리됨' : 'OK' }
+    }
+    console.log(`[coupang-ack] order#${orderId} HTTP ${res.status} ${text.slice(0, 200)}`)
+    return { ok: false, status: 502, detail: `HTTP ${res.status} ${text.slice(0, 150)}` }
+  } catch (e) {
+    return { ok: false, status: 502, detail: e?.message || String(e) }
+  }
+}
 
 // 자동주문 지원 매입처 (listings.source → 표시명)
 const SUPPORTED_SOURCES = { ggsan: '건강산', upickb2b: '유픽B2B' }
@@ -451,6 +497,28 @@ http.createServer(async (req, res) => {
         res.writeHead(502, cors)
         res.end(JSON.stringify({ ok: false, detail: `HTTP ${r.status} ${fail?.code ?? ''} ${fail?.message ?? JSON.stringify(r.body).slice(0, 150)}` }))
       }
+      return
+    }
+    // 쿠팡 발주확인(acknowledgement: 결제완료 ACCEPT → 상품준비중 INSTRUCT) — Vercel 어드민의 ack가
+    // 쿠팡 OpenAPI IP 접근제어(403)로 실패할 때 브라우저가 이 로컬 헬퍼(집 PC = 허용 IP)로 폴백 호출한다.
+    // /naver-confirm 과 동일 패턴. CORS는 어드민 origin만 허용. id = 쿠팡 order_id(숫자).
+    if (u.pathname === '/coupang-ack') {
+      const origin = req.headers.origin || ''
+      const allowed = ['https://product-recommend-nine.vercel.app', 'http://localhost:3001', 'http://localhost:3000'].includes(origin)
+      const cors = {
+        'Access-Control-Allow-Origin': allowed ? origin : 'null',
+        'Access-Control-Allow-Methods': 'POST, OPTIONS',
+        'Access-Control-Allow-Headers': 'Content-Type',
+        'Access-Control-Allow-Private-Network': 'true',
+        'Content-Type': 'application/json; charset=utf-8',
+      }
+      if (req.method === 'OPTIONS') { res.writeHead(204, cors); res.end(); return }
+      if (!allowed || req.method !== 'POST') { res.writeHead(403, cors); res.end(JSON.stringify({ ok: false, detail: '허용되지 않은 origin/method' })); return }
+      const id = String(u.searchParams.get('id') || '').trim()
+      if (!/^\d{8,20}$/.test(id)) { res.writeHead(400, cors); res.end(JSON.stringify({ ok: false, detail: 'id 형식 오류' })); return }
+      const r = await coupangAckByOrderId(id)
+      res.writeHead(r.ok ? 200 : r.status === 404 ? 404 : 502, cors)
+      res.end(JSON.stringify({ ok: r.ok, detail: r.detail }))
       return
     }
     if (u.pathname === '/order') {

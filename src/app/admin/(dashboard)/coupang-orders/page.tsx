@@ -457,6 +457,7 @@ export default async function CoupangOrdersPage({
                   <td className="px-3 py-2 text-center">
                     <PurchaseStatusCell
                       id={r.id}
+                      orderId={String(r.order_id)}
                       status={r.purchase_status}
                       orderedAt={r.purchase_ordered_at}
                       ggsanOrderNo={r.ggsan_order_no}
