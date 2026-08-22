@@ -5,6 +5,7 @@ import { PurchaseCostCell } from './PurchaseCostCell'
 import { InvoiceCell } from './InvoiceCell'
 import { GgsanTrackingCell } from './GgsanTrackingCell'
 import PurchaseButton from './PurchaseButton'
+import SyncOrdersButton from './SyncOrdersButton'
 
 export const dynamic = 'force-dynamic'
 
@@ -288,6 +289,7 @@ export default async function CoupangOrdersPage({
             <strong>{meta.total.toLocaleString()}</strong>건
           </p>
         </div>
+        <SyncOrdersButton />
       </header>
 
       {/* 확인 필요(needs_attention) 배너 — 미결제·매칭실패·등록실패·반품·택배사 미매핑 등 돈·배송 직결 건 */}

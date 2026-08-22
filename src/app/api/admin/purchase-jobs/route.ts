@@ -20,10 +20,11 @@ async function requireAdmin() {
  *   mode full|stage           원격 결제진행(매입처 주문서 작성, Playwright) — 로컬 헬퍼에 닿지 않는 기기(모바일 등)의 릴레이
  *   mode coupang_ack          쿠팡 발주확인(결제완료→상품준비중)     ┐ Vercel IP 는 쿠팡 OpenAPI IP 접근제어 밖(403)이라
  *   mode coupang_invoice      쿠팡 송장등록(→배송지시, 발송완료)     ┘ 쿠팡 쓰기는 전부 집 PC 에서만 (2026-08-20)
+ *   mode coupang_orders_sync  쿠팡 주문 즉시 수집(크론 전이라도) — order_key는 특정 주문이 아닌 고정 센티널
  * POST { order_key, mode? }  → 잡 등록 (같은 주문·같은 mode 가 대기/실행 중이면 409 + 그 id)
  * GET  ?id=N                 → 잡 상태 조회 (버튼이 폴링)
  */
-const MODES = new Set(['full', 'stage', 'coupang_ack', 'coupang_invoice'])
+const MODES = new Set(['full', 'stage', 'coupang_ack', 'coupang_invoice', 'coupang_orders_sync'])
 export async function POST(request: NextRequest) {
   const user = await requireAdmin()
   if (!user) return NextResponse.json({ error: '권한 없음' }, { status: 401 })

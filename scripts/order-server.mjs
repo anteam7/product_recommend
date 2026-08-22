@@ -15,6 +15,7 @@ import path from 'node:path'
 import { createClient } from '@supabase/supabase-js'
 import { naverApi } from './lib/naver-api.mjs'
 import { createCoupangInvoiceOps } from './lib/coupang-invoice.mjs'
+import { createCoupangOrdersSyncOps } from './lib/coupang-orders-sync.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const env = Object.fromEntries(
@@ -31,6 +32,9 @@ const esc = (s) => String(s ?? '').replace(/[<>&"]/g, (c) => ({ '<': '&lt;', '>'
 const coupangOps = createCoupangInvoiceOps({ sb, env, log: console.log })
 const coupangAckByOrderId = (orderId) => coupangOps.ackByOrderId(orderId)
 const coupangRegisterInvoiceByOrderId = (orderId) => coupangOps.registerInvoice({ orderId })
+
+// ── 쿠팡 주문 수집(ordersheets) — 크론(local-cron-orders-sync.mjs)과 공유. [지금 수집] 버튼이 즉시 실행한다. ──
+const coupangOrdersSyncOps = createCoupangOrdersSyncOps({ sb, env, log: console.log })
 
 // 어드민 브라우저 → 로컬 헬퍼 폴백 호출용 CORS (naver-confirm / coupang-ack / coupang-invoice 공용)
 const ADMIN_ORIGINS = ['https://product-recommend-nine.vercel.app', 'http://localhost:3001', 'http://localhost:3000']
@@ -432,22 +436,30 @@ setInterval(async () => {
   } catch (e) { console.error('[job-poller]', e instanceof Error ? e.message : e) } finally { jobBusy = false }
 }, 4000)
 
-// ── 쿠팡 쓰기 잡 폴러(coupang_ack / coupang_invoice) — Vercel 어드민이 등록, 이 PC(쿠팡 허용 IP)가 실행 ──
+// ── 쿠팡 쓰기 잡 폴러(coupang_ack / coupang_invoice / coupang_orders_sync) — Vercel 어드민이 등록, 이 PC(쿠팡 허용 IP)가 실행 ──
 // 결제진행 폴러(Playwright, 수 분)와 분리해 대기 없이 처리. 직렬(coupangJobBusy). 멱등이라 재실행 안전.
 let coupangJobBusy = false
 setInterval(async () => {
   if (coupangJobBusy) return
   coupangJobBusy = true
   try {
-    const { data: jobs } = await sb.from('jimscanner_purchase_jobs').select('id, order_key, mode').eq('status', 'queued').in('mode', ['coupang_ack', 'coupang_invoice']).order('id', { ascending: true }).limit(5)
+    const { data: jobs } = await sb.from('jimscanner_purchase_jobs').select('id, order_key, mode').eq('status', 'queued').in('mode', ['coupang_ack', 'coupang_invoice', 'coupang_orders_sync']).order('id', { ascending: true }).limit(5)
     for (const job of jobs ?? []) {
       await sb.from('jimscanner_purchase_jobs').update({ status: 'running', started_at: new Date().toISOString() }).eq('id', job.id)
-      const r = job.mode === 'coupang_ack'
-        ? await coupangAckByOrderId(job.order_key)
-        : await coupangRegisterInvoiceByOrderId(job.order_key)
-      const msg = r.invoice_status && r.invoice_status !== 'failed' ? `${r.detail} [${r.invoice_status}]` : r.detail
-      await sb.from('jimscanner_purchase_jobs').update({ status: r.ok ? 'done' : 'error', result_msg: String(msg ?? '').slice(0, 500), finished_at: new Date().toISOString() }).eq('id', job.id)
-      console.log(`[coupang-job ${job.id}] ${job.mode} 주문 ${job.order_key} → ${r.ok ? 'done' : 'error'}: ${msg}`)
+      let ok, msg
+      if (job.mode === 'coupang_orders_sync') {
+        const s = await coupangOrdersSyncOps.syncRecentOrders({ triggeredBy: 'remote-queue' })
+        ok = s.errors === 0
+        msg = `조회 ${s.total}건 · 갱신 ${s.inserted}건${s.errors ? ` · 오류 ${s.errors}건(${s.errorSamples[0] ?? ''})` : ''}`
+      } else {
+        const r = job.mode === 'coupang_ack'
+          ? await coupangAckByOrderId(job.order_key)
+          : await coupangRegisterInvoiceByOrderId(job.order_key)
+        ok = r.ok
+        msg = r.invoice_status && r.invoice_status !== 'failed' ? `${r.detail} [${r.invoice_status}]` : r.detail
+      }
+      await sb.from('jimscanner_purchase_jobs').update({ status: ok ? 'done' : 'error', result_msg: String(msg ?? '').slice(0, 500), finished_at: new Date().toISOString() }).eq('id', job.id)
+      console.log(`[coupang-job ${job.id}] ${job.mode} ${job.order_key} → ${ok ? 'done' : 'error'}: ${msg}`)
     }
   } catch (e) { console.error('[coupang-job-poller]', e instanceof Error ? e.message : e) } finally { coupangJobBusy = false }
 }, 3000)
