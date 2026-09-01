@@ -24,6 +24,8 @@
 | [`CLAUDE.md`](./CLAUDE.md) | 하네스 규칙 (작업 순서, 제약, DB 연결) |
 | [`platform_direction.md`](./platform_direction.md) | **최우선 방향 정의서** (파이프라인, 쿠팡 연동, 로드맵) |
 | [`docs/architecture.md`](./docs/architecture.md) | 발굴→소싱→등록→운영 파이프라인 아키텍처 |
+| [`docs/coupang-integration-guide.md`](./docs/coupang-integration-guide.md) | 쿠팡 Open API 연동 레퍼런스(이 레포 종속) — 인증·엔드포인트·등록상태머신·가격(MSP)·DB스키마·크론·함정. 새 AI가 이 레포에서 쿠팡 작업 시작 시 1순위 |
+| [`docs/coupang-integration-starter.md`](./docs/coupang-integration-starter.md) | 쿠팡 연동 **독립형** 원샷 가이드(레포 비종속, 타 프로젝트/타 AI 전달용) — 사전 질문 체크리스트 + 실행 가능한 코드 전체(인증·등록·가격재고·주문·송장) |
 | [`docs/personas-and-scenarios.md`](./docs/personas-and-scenarios.md) | 팀 페르소나·작업 시나리오·운영 일지 (셀러 조직 시뮬레이션, 이커머스 프레임워크 근거) |
 | [`docs/phase-roadmap.md`](./docs/phase-roadmap.md) | 단계별 로드맵 |
 | [`docs/tech-stack.md`](./docs/tech-stack.md) | 기술 스택 & 개발 환경 |
