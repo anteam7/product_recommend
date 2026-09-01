@@ -119,12 +119,13 @@ function buildItemAttributes(categoryAttrs, options) {
   const volume = parseOptionNum(options, /용량/)
   const isLiquid = volume != null
 
+  // 공백 없는 "숫자+단위" 포맷(77bio XLSM 원본 표기와 동일, 예: "200g")으로 테스트 — 2026-09-01
   const buildValue = (a) => {
     const name = a.attributeTypeName
-    if (name === fallbackName) return `1 ${pickUnit(a.usableUnits, ['개', '박스', '세트', '팩'])}`
-    if (name === '개당 캡슐/정') return `${capsule?.value ?? 30} ${pickUnit(a.usableUnits, ['정', '회분'])}`
-    if (name === '개당 중량') return `${weight?.value ?? (isLiquid ? 1 : 0)} ${pickUnit(a.usableUnits, ['g', 'kg'])}`
-    if (name === '개당 용량') return `${volume?.value ?? 0} ${pickUnit(a.usableUnits, ['ml', 'L'])}`
+    if (name === fallbackName) return `1${pickUnit(a.usableUnits, ['개', '박스', '세트', '팩'])}`
+    if (name === '개당 캡슐/정') return `${capsule?.value ?? 30}${pickUnit(a.usableUnits, ['정', '회분'])}`
+    if (name === '개당 중량') return `${weight?.value ?? (isLiquid ? 1 : 0)}${pickUnit(a.usableUnits, ['g', 'kg'])}`
+    if (name === '개당 용량') return `${volume?.value ?? 0}${pickUnit(a.usableUnits, ['ml', 'L'])}`
     return '상세설명 참조'
   }
   // groupNumber(캡슐/중량/용량처럼 상호배타)는 실제 상품형태에 맞는 것 하나만 채우고 나머지는 생략
@@ -142,19 +143,38 @@ function buildItemAttributes(categoryAttrs, options) {
     }
   }
   const selected = [...groups.values(), ...rest]
+  // 2026-09-01 재실측: 전부 NONE(수량 포함)도 "필수 구매 옵션 없음" 오류가 재현됨 — isAllowSingleItem=true
+  // 카테고리에서도 최소한 "수량"만은 EXPOSED로 남겨야 하는 것으로 보임(구 ggsan 방식과 동일하되, 그룹 대표
+  // 속성(개당캡슐/중량/용량)만 NONE으로 낮춘 조합은 아직 미검증 — 이번 테스트).
+  // 수량 + 그룹 대표(개당캡슐/중량/용량 중 하나) 둘 다 EXPOSED(메타 그대로) — 값 포맷만 공백없이 테스트
   const out = selected.map(a => {
     const isMandatoryNumeric = a.required === 'MANDATORY' && ['개당 캡슐/정', '개당 중량', '개당 용량'].includes(a.attributeTypeName)
-    const value = (a.attributeTypeName === fallbackName || isMandatoryNumeric) ? buildValue(a) : ''
-    // 단일상품(isAllowSingleItem=true)은 "옵션 선택"이 없는 상품이므로 아무것도 노출(EXPOSED)하지 않는다 —
-    // 여기서 exposed:EXPOSED를 쓰면(구 ggsan 방식) 오히려 "존재하지 않는 옵션을 노출하려 한다"는 오류가 남.
-    return { attributeTypeName: a.attributeTypeName, attributeValueName: value, exposed: 'NONE' }
+    const isExposedCandidate = a.attributeTypeName === fallbackName || isMandatoryNumeric
+    const value = isExposedCandidate ? buildValue(a) : ''
+    const exposed = isExposedCandidate ? 'EXPOSED' : 'NONE'
+    return { attributeTypeName: a.attributeTypeName, attributeValueName: value, exposed }
   })
-  const suryangVal = out.find(a => a.attributeTypeName === fallbackName)?.attributeValueName
-  const itemName = suryangVal || '1 개'
+  const itemName = out.filter(a => a.exposed === 'EXPOSED').map(a => a.attributeValueName).join(' ') || '1개'
   return { attributes: out, itemName }
 }
 function extractImgUrls(html) {
   return [...String(html || '').matchAll(/<img[^>]+src=["']([^"']+)["']/gi)].map(m => m[1])
+}
+// 77bio 원본 제목은 "웰러스바른철분"처럼 브랜드+제품명+복합어가 공백 없이 붙어있어 노출상품명으로 부자연스러움
+// (2026-09-02 사용자 피드백). 정규식으로는 복합어 분리에 한계가 있어 jimscanner_bio77_products.display_title
+// 컬럼에 자연어 판단으로 미리 띄어쓰기를 넣어둠(156건 전체, 2026-09-02) — 이 함수는 그 값을 우선 쓰고,
+// display_title이 비어있는(신규 수집분 등) 경우에만 기계적 폴백(브랜드 띄어쓰기+수량만 부착)으로 대체한다.
+// 중량/용량(개당 캡슐·중량·용량)은 구매옵션(itemName)에 이미 노출되므로 제목에서 중복 표기하지 않는다
+// — 사용자 지시(2026-09-02): "옵션이랑 중복되면 안 됨". 광고성/효능 문구도 추가하지 않음(coupang-name-audit.mjs 규정).
+function enhanceTitle(row) {
+  if (row.display_title) return row.display_title
+  let t = row.title
+  if (row.brand && t.startsWith(row.brand) && t[row.brand.length] !== ' ') {
+    t = `${row.brand} ${t.slice(row.brand.length)}`
+  }
+  const qtyOpt = (row.options ?? []).find(o => /^수량$/.test(o?.type || ''))
+  if (qtyOpt?.value && !t.includes(qtyOpt.value)) t = `${t} ${qtyOpt.value}`
+  return t
 }
 
 function buildPayload(row, meta) {
@@ -171,8 +191,9 @@ function buildPayload(row, meta) {
   ]
   const contents = detailImgs.slice(0, 10).map(u => ({ contentsType: 'IMAGE_NO_SPACE', contentDetails: [{ content: u, detailType: 'IMAGE' }] }))
 
+  const displayTitle = enhanceTitle(row)
   const noticeCategory = pickNoticeCategory(meta.noticeCategories)
-  const notices = buildNotices(noticeCategory, row.title)
+  const notices = buildNotices(noticeCategory, displayTitle)
   const { attributes: itemAttributes, itemName } = buildItemAttributes(meta.attributes ?? [], row.options)
 
   const items = [{
@@ -184,9 +205,9 @@ function buildPayload(row, meta) {
   }]
 
   const payload = {
-    vendorId: VENDOR_ID, sellerProductName: row.title, displayProductName: row.title,
+    vendorId: VENDOR_ID, sellerProductName: displayTitle, displayProductName: displayTitle,
     displayCategoryCode: row.coupang_category_code, brand: row.brand ?? row.title.split(/\s+/)[0],
-    generalProductName: row.title, productGroup: row.title.split(/\s+/).slice(0, 3).join(' '),
+    generalProductName: displayTitle, productGroup: row.title.split(/\s+/).slice(0, 3).join(' '),
     manufacture: '상세설명 참조', saleStartedAt: new Date().toISOString().slice(0, 19), saleEndedAt: '2099-12-31T00:00:00',
     deliveryMethod: 'SEQUENCIAL', deliveryCompanyCode: 'CJGLS', deliveryChargeType: 'FREE', deliveryCharge: 0,
     freeShipOverAmount: 0, deliveryChargeOnReturn: 3000, remoteAreaDeliverable: 'N', unionDeliveryType: 'NOT_UNION_DELIVERY',
@@ -284,8 +305,14 @@ for (let i = 0; i < withMargin.length; i++) {
     console.log(`${idx} ✓ ${row.goods_no} ${row.title.slice(0, 36).padEnd(36)} | ${built.salePrice.toLocaleString().padStart(7)}원 (${built.marginPct}%) | sellerPID=${sellerProductId}`)
 
     if (!NO_APPROVAL && sellerProductId) {
-      await sleep(500)
-      const appr = await api('PUT', `/v2/providers/seller_api/apis/api/v1/marketplace/seller-products/${sellerProductId}/approvals`)
+      // 등록 직후 바로 승인요청하면 쿠팡 쪽 전파 지연으로 "임시저장 상태만 승인 가능" 오류가 날 수 있어 재시도.
+      let appr
+      for (let attempt = 0; attempt < 3; attempt++) {
+        await sleep(1500)
+        appr = await api('PUT', `/v2/providers/seller_api/apis/api/v1/marketplace/seller-products/${sellerProductId}/approvals`)
+        if (appr.status === 200 && (appr.body?.code === 'SUCCESS' || appr.body?.code === 200)) break
+        if (!/임시저장.*상태.*상품만/.test(appr.body?.message ?? '')) break // 다른 종류의 실패면 재시도 무의미
+      }
       const apprOk = appr.status === 200 && (appr.body?.code === 'SUCCESS' || appr.body?.code === 200)
       if (apprOk) {
         await sb.from('jimscanner_coupang_listings').update({ status: 'PENDING_APPROVAL', last_synced_at: new Date().toISOString() }).eq('id', inserted.id)
