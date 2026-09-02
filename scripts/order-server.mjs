@@ -379,11 +379,13 @@ async function runFlowUpick(goodsNo, qty, recipient, detailUrl, full = null) {
 // "돈 안 움직이는 완주" 경로가 없음 — full 완주는 지원하지 않고 항상 결제 직전에서 정지한다
 // (가상계좌 발급도 실제 주문 생성을 동반해 안전하게 자동 확정할 근거가 아직 없음, 사용자 지시 2026-09-02).
 const BIO77_BASE = env.BIO77_BASE_URL || 'https://77bio.co.kr'
+// 완주(가상계좌) 실측 확인된 KG이니시스 단계(2026-09-02): 결제하기 → dialog>iframe#iframe(name은 매번 랜덤)
+// → [전체동의 체크] → [다음] → [입금은행 선택] → [다음] → [최종 확인 페이지에서 "결제" 링크] → order_end.php.
+// 예치금 사용은 병합몰(order.php) 쪽 #useDepositAll 체크 한 번으로 전액 자동 적용됨(부분충당도 이 한 번으로 처리).
+const BIO77_PREFERRED_BANK = '기업은행' // 77bio 예치금 입금계좌와 동일 은행으로 통일(예치금 부족분 가상계좌 발급용)
 async function runFlowBio77(goodsNo, qty, recipient, full = null) {
-  // full 요청이어도 무통장 같은 안전한 완주 경로가 없어 항상 stage(정지)로 동작 — 주문서까지는 채워서
-  // ggsan/upick과 UX를 맞추고, 결제만 사람이 직접 하도록 메시지로 안내한다.
   const { ctx, page } = await openBrowser()
-  if (full) full.ctxRef = ctx // full 요청도 브라우저 참조는 넘겨 원격 잡 종료 시 정리 가능하게(실제 완주는 안 함)
+  if (full) full.ctxRef = ctx
 
   // 1) 로그인
   await page.goto(`${BIO77_BASE}/member/login.php`, { waitUntil: 'domcontentloaded', timeout: 30000 })
@@ -417,8 +419,77 @@ async function runFlowBio77(goodsNo, qty, recipient, full = null) {
     set('taxZonecode', biz.zip); set('taxAddress', biz.addr1); set('taxAddressSub', biz.addr2)
   }, { rcp: recipient, biz: BIZ_INFO })
   await op.bringToFront().catch(() => {})
-  const downgradeNote = full ? ' (77bio는 완주 자동화 미지원 — 정지 모드로 대신 진행됨)' : ''
-  return { ok: true, msg: `주문서 작성 완료 — 열린 77bio 창에서 결제수단(가상계좌 등) 선택 후 [결제하기]를 직접 누르세요${downgradeNote}` }
+
+  if (!full) {
+    return { ok: true, msg: '주문서 작성 완료 — 열린 77bio 창에서 결제수단(가상계좌 등) 선택 후 [결제하기]를 직접 누르세요' }
+  }
+
+  // ── 완주: 예치금 전액사용 → 가상계좌 선택 → 결제하기 → KG이니시스 팝업 진행 ──
+  // 가드는 예치금 적용 전 "합계금액"(진짜 매입원가, 예치금 사용 여부와 무관)으로 검사한다.
+  const grandTotal = await op.evaluate(() => {
+    const hid = document.querySelector('input[name=settlePrice]')
+    if (hid && /^\d+$/.test(hid.value) && +hid.value > 0) return +hid.value
+    const m = /합계금액[^0-9]{0,20}([\d,]{3,})\s*원/.exec(document.body.innerText)
+    return m ? parseInt(m[1].replace(/,/g, '')) : null
+  }).catch(() => null)
+  const g = guardFail('77bio', grandTotal, full.maxPay)
+  if (g) return { ok: false, msg: g }
+
+  // 예치금 "전액 사용하기" — 라벨이 없으면(예치금 0원 등) 조용히 생략
+  await op.evaluate(() => {
+    const label = [...document.querySelectorAll('label.check_s')].find((l) => (l.textContent || '').trim() === '전액 사용하기')
+    const id = label?.getAttribute('for')
+    const cb = id ? document.getElementById(id) : null
+    if (cb && !cb.checked) { cb.checked = true; cb.click(); cb.dispatchEvent(new Event('change', { bubbles: true })) }
+  })
+  await op.waitForTimeout(500)
+  // 가상계좌 선택
+  const pvSelected = await op.evaluate(() => {
+    const r = document.querySelector('#settleKind_pv')
+    if (!r) return false
+    r.checked = true; r.click(); r.dispatchEvent(new Event('change', { bubbles: true }))
+    return true
+  })
+  if (!pvSelected) return { ok: false, msg: '가상계좌 결제수단을 찾지 못함 — 완주 중단(열린 창에서 직접 진행)' }
+  await op.waitForTimeout(300)
+  await op.evaluate(() => { const b = [...document.querySelectorAll('button')].find((x) => /결제하기/.test(x.innerText || '')); if (b) b.click() })
+
+  // KG이니시스 팝업(iframe) — id="iframe"는 고정, name은 세션마다 랜덤이라 id로 잡는다
+  const pg = op.frameLocator('iframe#iframe')
+  const nextLink = () => pg.getByRole('link', { name: /이동|^다\s*음$/ }).first()
+  try {
+    await pg.getByRole('checkbox', { name: '전체동의' }).click({ timeout: 20000 })
+    await op.waitForTimeout(500)
+    await nextLink().click({ timeout: 10000 }) // 약관 → 입금은행 선택
+    await op.waitForTimeout(1200)
+    const bankSelect = pg.locator('select#vbankBankCode')
+    await bankSelect.waitFor({ timeout: 10000 })
+    const hasPreferred = await bankSelect.locator(`option:text("${BIO77_PREFERRED_BANK}")`).count()
+    await bankSelect.selectOption(hasPreferred ? { label: BIO77_PREFERRED_BANK } : { index: 1 })
+    await op.waitForTimeout(500)
+    await nextLink().click({ timeout: 10000 }) // 입금은행 선택 → 최종 확인
+    await op.waitForTimeout(1200)
+    await pg.getByRole('link', { name: /^결\s*제$/ }).first().click({ timeout: 10000 }) // 최종 결제
+  } catch (e) {
+    return { ok: false, msg: `KG이니시스 결제창 진행 실패(${e.message}) — 열린 77bio/결제창에서 직접 이어서 진행하세요` }
+  }
+
+  const done = await op.waitForURL(/order_end\.php/i, { timeout: 30000 }).then(() => true).catch(() => false)
+  if (!done) return { ok: false, msg: '결제 완료 페이지 확인 실패 — 열린 창에서 주문 상태를 직접 확인하세요(가상계좌가 이미 발급됐을 수 있음)' }
+  await op.waitForTimeout(1000)
+  const orderNo = await op.evaluate(() => new URL(location.href).searchParams.get('orderNo')).catch(() => null)
+  const va = await op.evaluate(() => {
+    const t = document.body.innerText
+    return {
+      bank: /입금은행\s*:\s*([^\n]+)/.exec(t)?.[1]?.trim() ?? null,
+      account: /가상계좌\s*:\s*([\d-]+)/.exec(t)?.[1]?.trim() ?? null,
+      holder: /예금자명\s*:\s*([^\n]+)/.exec(t)?.[1]?.trim() ?? null,
+      deadline: /송금일자\s*:\s*([^\n]+)/.exec(t)?.[1]?.trim() ?? null,
+      amount: (() => { const m = /입금하실\s*금액\s*:\s*([\d,]+)\s*원/.exec(t); return m ? parseInt(m[1].replace(/,/g, '')) : null })(),
+    }
+  }).catch(() => ({}))
+  const vaNote = va.account ? ` | 가상계좌 ${va.bank} ${va.account}(예금주 ${va.holder}) ${va.amount?.toLocaleString() ?? '?'}원을 ${va.deadline ?? '기한내'}까지 입금 필요` : ' | 예치금으로 전액 결제됨(가상계좌 미발급)'
+  return { ok: true, done: true, orderNo, total: grandTotal, virtualAccount: va, msg: `77bio 주문 완료 — 주문번호 ${orderNo ?? '(확인필요)'}${vaNote}` }
 }
 
 // ── 결제진행 실행(공용) — /run 핸들러와 원격 큐 폴러가 같이 쓴다 ──
@@ -455,6 +526,11 @@ async function execPurchase(orderKey, fullMode) {
     if (r.domeCost > 0) {
       const qty = r.order.shipping_count || 1
       upd.purchase_unit_cost = Math.round(r.domeCost / qty)
+    }
+    // 77bio 가상계좌 완주 시 입금 계좌 정보를 기록해둬야 사람이 어디로 얼마를 보낼지 알 수 있다.
+    if (out.virtualAccount?.account) {
+      const va = out.virtualAccount
+      upd.purchase_note = `[가상계좌] ${va.bank ?? ''} ${va.account} (예금주 ${va.holder ?? '?'}) ${va.amount?.toLocaleString() ?? '?'}원을 ${va.deadline ?? '기한내'}까지 입금`
     }
     if (r.kind === 'naver') {
       if (out.orderNo) upd.supplier_order_no = out.orderNo
