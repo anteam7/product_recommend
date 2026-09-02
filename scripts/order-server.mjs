@@ -54,7 +54,7 @@ function adminCors(req) {
 }
 
 // 자동주문 지원 매입처 (listings.source → 표시명)
-const SUPPORTED_SOURCES = { ggsan: '건강산', upickb2b: '유픽B2B' }
+const SUPPORTED_SOURCES = { ggsan: '건강산', upickb2b: '유픽B2B', bio77: '77바이오' }
 
 // 주문 → 매입처(source) + goods_no + 수령인 해석
 // id 자동 판별: 쿠팡 order_id 우선 → 없으면 네이버 product_order_id (체계가 달라 충돌 없음)
@@ -372,6 +372,55 @@ async function runFlowUpick(goodsNo, qty, recipient, detailUrl, full = null) {
   return { ok: true, done: true, orderNo, total, msg: `무통장 주문 완료 — 주문번호 ${orderNo ?? '(파싱 실패, 창에서 확인)'} · 총액 ${total.toLocaleString()}원 · 입금대기` }
 }
 
+// Playwright: 77bio 주문서 자동 작성 → 결제 직전 정지 (브라우저 열어둠)
+// 같은 상용몰 엔진(ggsan과 동일 필드명: receiverName/receiverZonecode/receiverAddress/
+// receiverAddressSub/receiverCellPhone, tax*)이라 ggsan 로직을 그대로 재사용 가능(2026-09-02 실측).
+// 결제수단이 신용카드(pc)/실시간계좌이체(pb)/가상계좌(pv)뿐이라 ggsan의 무통장(gb) 같은
+// "돈 안 움직이는 완주" 경로가 없음 — full 완주는 지원하지 않고 항상 결제 직전에서 정지한다
+// (가상계좌 발급도 실제 주문 생성을 동반해 안전하게 자동 확정할 근거가 아직 없음, 사용자 지시 2026-09-02).
+const BIO77_BASE = env.BIO77_BASE_URL || 'https://77bio.co.kr'
+async function runFlowBio77(goodsNo, qty, recipient, full = null) {
+  // full 요청이어도 무통장 같은 안전한 완주 경로가 없어 항상 stage(정지)로 동작 — 주문서까지는 채워서
+  // ggsan/upick과 UX를 맞추고, 결제만 사람이 직접 하도록 메시지로 안내한다.
+  const { ctx, page } = await openBrowser()
+  if (full) full.ctxRef = ctx // full 요청도 브라우저 참조는 넘겨 원격 잡 종료 시 정리 가능하게(실제 완주는 안 함)
+
+  // 1) 로그인
+  await page.goto(`${BIO77_BASE}/member/login.php`, { waitUntil: 'domcontentloaded', timeout: 30000 })
+  await page.fill('input[name=loginId]', env.BIO77_USER)
+  await page.fill('input[name=loginPwd]', env.BIO77_PASS)
+  await Promise.all([
+    page.waitForNavigation({ timeout: 15000 }).catch(() => {}),
+    page.evaluate(() => { const f = document.querySelector('input[name=loginPwd]')?.form; if (f) (f.requestSubmit ? f.requestSubmit() : f.submit()) }),
+  ])
+  await page.waitForTimeout(1500)
+  if (!(await page.evaluate(() => /로그아웃/.test(document.body.innerText)))) return { ok: false, msg: '77bio 로그인 실패 — 자격증명 확인 필요' }
+  // 2) 상품 페이지 + 수량
+  await page.goto(`${BIO77_BASE}/goods/goods_view.php?goodsNo=${goodsNo}`, { waitUntil: 'domcontentloaded', timeout: 30000 })
+  await page.waitForTimeout(1000)
+  if (qty > 1) await page.evaluate((q) => { const el = document.querySelector('input[name="goodsCnt[]"]'); if (el) { el.value = String(q); el.dispatchEvent(new Event('change', { bubbles: true })) } }, qty)
+  // 3) 바로구매 (같은 탭에서 /order/order.php로 이동 — ggsan과 달리 새 탭 없음, 실측 확인됨)
+  await page.evaluate(() => { const b = [...document.querySelectorAll('.btn_add_order, a, button, input')].find((x) => /바로구매/.test(x.innerText || x.value || '')); if (b) { b.scrollIntoView({ block: 'center' }); b.click() } })
+  await page.waitForTimeout(2500)
+  const op = ctx.pages().find((p) => /\/order\/order\.php/.test(p.url())) || page
+  if (!/\/order\//.test(op.url())) return { ok: false, msg: '주문서로 이동 실패 — 품절/재고부족 여부 확인' }
+  // 4) 배송지=직접입력 + 수령인 입력 + 세금계산서(사업자) 정보 (readonly 대비 JS set)
+  await op.evaluate(({ rcp, biz }) => {
+    const set = (n, v) => { const el = document.querySelector(`[name="${n}"]`); if (el) { el.removeAttribute('readonly'); el.value = v; el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })) } }
+    const shipNew = document.querySelector('#shippingNew')
+    if (shipNew) { shipNew.checked = true; shipNew.click(); shipNew.dispatchEvent(new Event('change', { bubbles: true })) }
+    set('receiverName', rcp.name); set('receiverZonecode', rcp.zip); set('receiverAddress', rcp.addr1); set('receiverAddressSub', rcp.addr2); set('receiverCellPhone', rcp.phone)
+    const taxRadio = document.querySelector('#receiptTax')
+    if (taxRadio) { taxRadio.checked = true; taxRadio.click(); taxRadio.dispatchEvent(new Event('change', { bubbles: true })) }
+    set('taxBusiNo', biz.busiNo); set('taxCompany', biz.company); set('taxCeoNm', biz.ceo)
+    set('taxService', biz.service); set('taxItem', biz.item)
+    set('taxZonecode', biz.zip); set('taxAddress', biz.addr1); set('taxAddressSub', biz.addr2)
+  }, { rcp: recipient, biz: BIZ_INFO })
+  await op.bringToFront().catch(() => {})
+  const downgradeNote = full ? ' (77bio는 완주 자동화 미지원 — 정지 모드로 대신 진행됨)' : ''
+  return { ok: true, msg: `주문서 작성 완료 — 열린 77bio 창에서 결제수단(가상계좌 등) 선택 후 [결제하기]를 직접 누르세요${downgradeNote}` }
+}
+
 // ── 결제진행 실행(공용) — /run 핸들러와 원격 큐 폴러가 같이 쓴다 ──
 // fullMode=true: 무통장 완주 + 입금대기·주문번호·매입가 DB 기록. false: 직전 정지.
 async function execPurchase(orderKey, fullMode) {
@@ -389,7 +438,9 @@ async function execPurchase(orderKey, fullMode) {
   }
   const out = r.source === 'upickb2b'
     ? await runFlowUpick(r.goodsNo, r.order.shipping_count, r.recipient, r.detailUrl, full)
-    : await runFlowGgsan(r.goodsNo, r.order.shipping_count, r.recipient, full)
+    : r.source === 'bio77'
+      ? await runFlowBio77(r.goodsNo, r.order.shipping_count, r.recipient, full)
+      : await runFlowGgsan(r.goodsNo, r.order.shipping_count, r.recipient, full)
   out.sourceLabel = r.sourceLabel
   out.ctxRef = full?.ctxRef ?? null   // 원격 잡이 완료 후 브라우저를 닫을 수 있게 노출
   // 완주 성공 → 주문상태=입금대기 + 매입처 주문번호·매입가 자동 기록
@@ -397,6 +448,14 @@ async function execPurchase(orderKey, fullMode) {
     const now = new Date().toISOString()
     const upd = { purchase_status: 'AWAITING_DEPOSIT', purchase_ordered_at: now, updated_at: now }
     if (out.total > 0) upd.purchase_total_cost = out.total
+    // purchase_unit_cost를 안 채우면 어드민 PurchaseCostCell이 "운송비 = 합계 - 상품가×수량"으로 역산하면서
+    // 상품가가 0 → 총 결제금액 전체가 운송비 칸에 들어가 보이는 문제가 있었다(2026-09-02 사용자 리포트,
+    // ggsan/upickb2b/bio77 공통 — execPurchase가 이 셋을 전부 거치므로 여기 한 곳만 고치면 됨).
+    // r.domeCost는 resolveOrder(쿠팡)에서만 listings.dome_price_krw × 수량으로 채워짐(네이버/토스는 스키마상 미보유).
+    if (r.domeCost > 0) {
+      const qty = r.order.shipping_count || 1
+      upd.purchase_unit_cost = Math.round(r.domeCost / qty)
+    }
     if (r.kind === 'naver') {
       if (out.orderNo) upd.supplier_order_no = out.orderNo
       const { error } = await sb.from('jimscanner_naver_orders').update(upd).eq('product_order_id', r.dbKey)

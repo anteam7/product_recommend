@@ -25,8 +25,9 @@ interface Props {
 export function PurchaseCostCell({ id, unitCost, totalCost, shippingCount, orderPrice }: Props) {
   const router = useRouter()
   const qty = shippingCount ?? 1
-  // 운송비 초기값 = 합계 − 상품가×수량 (파생)
-  const initShip = totalCost == null ? '' : String(Math.max(0, totalCost - (unitCost ?? 0) * qty))
+  // 운송비 초기값 = 합계 − 상품가×수량 (파생). 상품가를 모르면(unitCost=null) 합계 전체를 운송비로
+  // 오인식하게 되므로(2026-09-02 사용자 리포트) 상품가가 실제로 저장돼 있을 때만 역산한다.
+  const initShip = (totalCost == null || unitCost == null) ? '' : String(Math.max(0, totalCost - unitCost * qty))
   const [unit, setUnit] = useState(unitCost == null ? '' : String(unitCost))
   const [ship, setShip] = useState(initShip)
   const [saving, setSaving] = useState(false)

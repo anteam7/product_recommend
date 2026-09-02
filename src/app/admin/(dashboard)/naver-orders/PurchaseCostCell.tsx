@@ -24,7 +24,9 @@ interface Props {
 export function PurchaseCostCell({ id, unitCost, totalCost, quantity, paymentAmount, commissionAmount }: Props) {
   const router = useRouter()
   const qty = quantity ?? 1
-  const initShip = totalCost == null ? '' : String(Math.max(0, totalCost - (unitCost ?? 0) * qty))
+  // 상품가를 모르면(unitCost=null) 합계 전체를 운송비로 오인식하므로(2026-09-02 사용자 리포트,
+  // coupang-orders/PurchaseCostCell.tsx와 동일 버그) 상품가가 실제로 저장돼 있을 때만 역산한다.
+  const initShip = (totalCost == null || unitCost == null) ? '' : String(Math.max(0, totalCost - unitCost * qty))
   const [unit, setUnit] = useState(unitCost == null ? '' : String(unitCost))
   const [ship, setShip] = useState(initShip)
   const [saving, setSaving] = useState(false)
