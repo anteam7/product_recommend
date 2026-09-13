@@ -39,6 +39,18 @@ export function isPlaywrightSlug(slug: string): boolean {
   return (PLAYWRIGHT_SLUGS as readonly string[]).includes(slug)
 }
 
+/**
+ * WAF 가 데이터센터 IP 를 차단해 Vercel 에서 페치 불가한 사이트 — cron 라우트에서 제외.
+ * - hoyausa: Cloudflare 가 Vercel(icn1 포함) 발 요청을 즉시 HTTP 403 (2026-06-12 부터 매일,
+ *   jimscanner_rate_fetch_runs 기준 97회 연속). 로컬(주거용 IP)에서는 동일 코드로 200 정상.
+ *   갱신은 로컬 CLI: `npx tsx scripts/run-rate-fetcher.ts --slug hoyausa`
+ */
+export const VERCEL_BLOCKED_SLUGS = ['hoyausa'] as const
+
+export function isVercelBlockedSlug(slug: string): boolean {
+  return (VERCEL_BLOCKED_SLUGS as readonly string[]).includes(slug)
+}
+
 export async function runForSlug(
   admin: SupabaseClient,
   slug: string,
