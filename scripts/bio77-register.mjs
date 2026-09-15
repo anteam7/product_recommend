@@ -166,6 +166,16 @@ function extractImgUrls(html) {
 // display_title이 비어있는(신규 수집분 등) 경우에만 기계적 폴백(브랜드 띄어쓰기+수량만 부착)으로 대체한다.
 // 중량/용량(개당 캡슐·중량·용량)은 구매옵션(itemName)에 이미 노출되므로 제목에서 중복 표기하지 않는다
 // — 사용자 지시(2026-09-02): "옵션이랑 중복되면 안 됨". 광고성/효능 문구도 추가하지 않음(coupang-name-audit.mjs 규정).
+// 77bio 소싱 상품 중 "정제/캡슐(알약)" 형태에 한해 "알약케이스 사은품증정" 문구를 노출상품명 끝에 붙이고
+// 사은품(알약케이스, goodsNo=1000000215) 상세이미지를 상세설명 끝에 덧붙인다(2026-09-04 사용자 지시).
+// 물리형태는 title 키워드만으로 신뢰 불가(실측: "신바이오틱스3000골드"/"아르기닌6000M"는 title에 분말/스틱
+// 표기가 없는데도 실제로는 파우치형 — 썸네일 육안판정 필요) → is_pill_form 컬럼(수동/fork 판정, NULL=미판정)이
+// true인 상품만 대상으로 한다. 법정 고시정보(품명/포장단위 등, buildNotices)에는 마케팅 문구가 섞이면 안 되므로
+// enhanceTitle(순수 상품명)과 sellerProductName용(사은품 문구 포함)을 분리한다.
+// 기존 등록분(APPROVED/PENDING_APPROVAL)은 scripts/bio77-add-giftnote.mjs로 일괄 반영.
+const GIFT_NOTE = '알약케이스 사은품증정'
+const GIFT_DETAIL_IMG_URL = 'https://appletreea1.speedgabia.com/000000_77bio_total/1000000215/Detail_1000000215.jpg'
+const MAX_TITLE_LEN = 100 // 쿠팡 sellerProductName 상한(여유있게 보수적으로 가드) — bio77-add-giftnote.mjs와 동일 기준
 function enhanceTitle(row) {
   if (row.display_title) return row.display_title
   let t = row.title
@@ -176,6 +186,12 @@ function enhanceTitle(row) {
   if (qtyOpt?.value && !t.includes(qtyOpt.value)) t = `${t} ${qtyOpt.value}`
   return t
 }
+/** sellerProductName/displayProductName/generalProductName 전용 — 정제/캡슐 형태 확정(is_pill_form=true)일 때만 사은품 문구 부착. 길이초과 시 생략. */
+function saleTitle(baseTitle, row) {
+  if (row.is_pill_form !== true || baseTitle.includes(GIFT_NOTE)) return baseTitle
+  const withGift = `${baseTitle} ${GIFT_NOTE}`
+  return withGift.length <= MAX_TITLE_LEN ? withGift : baseTitle
+}
 
 function buildPayload(row, meta) {
   const salePrice = row.msp_price_krw
@@ -185,13 +201,16 @@ function buildPayload(row, meta) {
   const realMargin = salePrice - (row.dome_price_krw + OUTBOUND_SHIP) - fee - vat
   const marginPct = parseFloat(((realMargin / salePrice) * 100).toFixed(2))
 
+  const isGiftEligible = row.is_pill_form === true
   const detailImgs = extractImgUrls(row.detail_html)
   const items_images = [
     { imageOrder: 0, imageType: 'REPRESENTATION', vendorPath: row.thumb_url },
   ]
-  const contents = detailImgs.slice(0, 10).map(u => ({ contentsType: 'IMAGE_NO_SPACE', contentDetails: [{ content: u, detailType: 'IMAGE' }] }))
+  const contentUrls = (isGiftEligible && detailImgs.length > 0) ? [...detailImgs.slice(0, 9), GIFT_DETAIL_IMG_URL] : detailImgs.slice(0, 10)
+  const contents = contentUrls.map(u => ({ contentsType: 'IMAGE_NO_SPACE', contentDetails: [{ content: u, detailType: 'IMAGE' }] }))
 
   const displayTitle = enhanceTitle(row)
+  const saleName = saleTitle(displayTitle, row) // 사은품 문구 포함(is_pill_form=true만) — 노출상품명 전용, 고시정보(notices)엔 쓰지 않음
   const noticeCategory = pickNoticeCategory(meta.noticeCategories)
   const notices = buildNotices(noticeCategory, displayTitle)
   const { attributes: itemAttributes, itemName } = buildItemAttributes(meta.attributes ?? [], row.options)
@@ -205,9 +224,9 @@ function buildPayload(row, meta) {
   }]
 
   const payload = {
-    vendorId: VENDOR_ID, sellerProductName: displayTitle, displayProductName: displayTitle,
+    vendorId: VENDOR_ID, sellerProductName: saleName, displayProductName: saleName,
     displayCategoryCode: row.coupang_category_code, brand: row.brand ?? row.title.split(/\s+/)[0],
-    generalProductName: displayTitle, productGroup: row.title.split(/\s+/).slice(0, 3).join(' '),
+    generalProductName: saleName, productGroup: row.title.split(/\s+/).slice(0, 3).join(' '),
     manufacture: '상세설명 참조', saleStartedAt: new Date().toISOString().slice(0, 19), saleEndedAt: '2099-12-31T00:00:00',
     deliveryMethod: 'SEQUENCIAL', deliveryCompanyCode: 'CJGLS', deliveryChargeType: 'FREE', deliveryCharge: 0,
     freeShipOverAmount: 0, deliveryChargeOnReturn: 3000, remoteAreaDeliverable: 'N', unionDeliveryType: 'NOT_UNION_DELIVERY',
