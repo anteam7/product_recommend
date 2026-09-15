@@ -172,6 +172,12 @@ const NAV_GROUPS: NavGroup[] = [
     label: '쿠팡 자동등록',
     items: [
       {
+        href: '/admin/purchase-catalog',
+        label: '매입 대상 상품',
+        icon: '🧾',
+        match: (p) => p.startsWith('/admin/purchase-catalog'),
+      },
+      {
         href: '/admin/coupang-publish',
         label: '등록 상품 관리',
         icon: '🅒',

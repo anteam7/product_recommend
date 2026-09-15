@@ -51,6 +51,8 @@ const COUPANG_FEE_RATE = 0.106  // 기타 영양제(73137) 판매수수료 10.6%
 
 const args = process.argv.slice(2)
 const retryFailed = args.includes('--retry-failed')
+// --only=goods1,goods2 — 어드민 매입 카탈로그에서 체크한 상품만 등록 (scripts/register-agent.mjs 가 사용)
+const ONLY = new Set((args.find((a) => a.startsWith('--only='))?.split('=').slice(1).join('=') || '').split(',').map((s) => s.trim()).filter(Boolean))
 
 const metaCacheDir = path.join(__dirname, '..', '_tmp_meta_cache')
 if (!existsSync(metaCacheDir)) mkdirSync(metaCacheDir, { recursive: true })
@@ -332,10 +334,16 @@ const { data: existing } = await sb
   .select('source_goods_no')
   .eq('source', 'ggsan')
 const existingSet = new Set((existing ?? []).map((r) => r.source_goods_no))
-const targets = filtered.filter((r) => !existingSet.has(r.goods_no))
+const targets = filtered.filter((r) => !existingSet.has(r.goods_no) && (ONLY.size === 0 || ONLY.has(String(r.goods_no))))
 
 console.log(`=== v2 일괄 등록 시작 ===`)
 console.log(`대상: ${targets.length}건 (이미 등록 ${existingSet.size}건 제외)\n`)
+if (ONLY.size) {
+  // --only 로 지정했는데 대상에서 빠진 건(카테고리 예측 없음·시세 verdict 탈락·이미 등록)은 조용히 사라지면 안 되므로 보고한다.
+  const got = new Set(targets.map((t) => String(t.goods_no)))
+  const missing = [...ONLY].filter((no) => !got.has(no))
+  if (missing.length) console.log(`⚠ --only 지정분 중 제외: ${missing.join(',')} (카테고리 예측 없음 / verdict 탈락 / 이미 등록)`)
+}
 
 const summary = { success: 0, fail: 0, errors: [] }
 

@@ -32,6 +32,9 @@ const STABLE_CATEGORY_CODES = new Set([73137, 58927])  // 안정 등록되는 �
 
 const arg = (k, d) => { const a = process.argv.find((x) => x.startsWith(`--${k}=`)); return a ? a.split('=').slice(1).join('=') : d }
 const NO = arg('no'); const PRICE_OVERRIDE = parseInt(arg('price') || '0') || 0; const LIMIT = parseInt(arg('limit') || '0') || 0
+// --only=no1,no2 — 어드민 매입 카탈로그에서 체크한 상품만 등록 (scripts/register-agent.mjs 가 사용).
+// 사람이 직접 고른 것이므로 --min-margin/--limit 필터는 적용하지 않는다.
+const ONLY = new Set((arg('only') || '').split(',').map((s) => s.trim()).filter(Boolean))
 const REQUESTED = process.argv.includes('--request'); const DRY = process.argv.includes('--dry')
 const MIN_MARGIN = parseFloat(arg('min-margin') || '0') || 0  // 배치 시 이 순마진% 미만 상품 제외
 const CLEAR = process.argv.includes('--clear')  // upickb2b 임시저장 draft 전체 삭제(재등록 전 정리)
@@ -189,12 +192,17 @@ if (NO) {
   const { data: existing } = await sb.from('jimscanner_coupang_listings').select('source_goods_no').eq('source', 'upickb2b')
   const ex = new Set((existing || []).map((r) => r.source_goods_no))
   const EXCLUDE = /사은품|증정|샘플|체험단|판촉/
-  let pool = (cand || []).filter((r) => !ex.has(r.product_no) && !EXCLUDE.test(r.title || ''))
+  let pool = (cand || []).filter((r) => !ex.has(r.product_no) && !EXCLUDE.test(r.title || '') && (ONLY.size === 0 || ONLY.has(String(r.product_no))))
   const before = pool.length
-  if (MIN_MARGIN > 0) pool = pool.filter((r) => computePrice(r).marginPct >= MIN_MARGIN)
+  if (MIN_MARGIN > 0 && ONLY.size === 0) pool = pool.filter((r) => computePrice(r).marginPct >= MIN_MARGIN)
   console.log(`후보 ${before}건 → 마진 ${MIN_MARGIN}%+ 통과 ${pool.length}건 (사은품/샘플 + 박한마진 제외)`)
   rows = pool
-  if (LIMIT) rows = rows.slice(0, LIMIT)
+  if (LIMIT && ONLY.size === 0) rows = rows.slice(0, LIMIT)
+  if (ONLY.size) {
+    const got = new Set(rows.map((r) => String(r.product_no)))
+    const missing = [...ONLY].filter((no) => !got.has(no))
+    if (missing.length) console.log(`⚠ --only 지정분 중 제외: ${missing.join(',')} (모든마켓 판매불가/품절/사은품/이미 등록)`)
+  }
 }
 
 console.log(`=== upickb2b→쿠팡 ${NO ? '단건' : '배치'} 등록 ${DRY ? '[DRY]' : ''} | 대상 ${rows.length}건 | requested=${REQUESTED} ===\n`)

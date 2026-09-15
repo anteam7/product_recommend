@@ -106,6 +106,7 @@ const SUPPLIER_LABELS: Record<string, string> = {
   upickb2b: '유픽B2B',
   domeggook: '도매꾹',
   bio77: '77바이오',
+  wellroot: '웰루트',
   manual: '수동',
 }
 
@@ -120,6 +121,8 @@ function supplierUrl(source: string | null, goodsNo: string | null): string | nu
   if (source === 'ggsan') return `https://www.ggsan.com/goods/goods_view.php?goodsNo=${g}`
   if (source === 'upickb2b') return `https://upickb2b.com/product/x/${g}/category/1/display/1/`
   if (source === 'bio77') return `https://77bio.co.kr/goods/goods_view.php?goodsNo=${g}`
+  // 웰루트는 결제진행(자동주문) 미지원 — 링크만 제공하고 PURCHASE_AUTOMATED_SOURCES 에는 넣지 않는다(2026-09-16)
+  if (source === 'wellroot') return `https://wellrootb2b.com/product/detail.html?product_no=${g}`
   return null
 }
 

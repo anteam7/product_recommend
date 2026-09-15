@@ -40,6 +40,9 @@ const DRY = args.includes('--dry')
 const NO_APPROVAL = args.includes('--no-approval')
 const LIMIT = +(args.find(a => a.startsWith('--limit='))?.split('=')[1] || 10)
 const MIN_MARGIN = +(args.find(a => a.startsWith('--min-margin='))?.split('=')[1] || 0.15)
+// --only=goods1,goods2 — 어드민 매입 카탈로그에서 체크한 상품만 등록 (scripts/register-agent.mjs 가 사용).
+// 사람이 직접 고른 것이므로 --limit/--min-margin 필터를 적용하지 않는다.
+const ONLY = new Set((args.find(a => a.startsWith('--only='))?.split('=').slice(1).join('=') || '').split(',').map(s => s.trim()).filter(Boolean))
 
 const metaCacheDir = path.join(__dirname, '..', '_tmp_meta_cache')
 if (!existsSync(metaCacheDir)) mkdirSync(metaCacheDir, { recursive: true })
@@ -244,19 +247,24 @@ const { data: existing } = await sb.from('jimscanner_coupang_listings').select('
 const existingSet = new Set((existing ?? []).map(r => r.source_goods_no))
 
 const withMargin = (candidates ?? [])
-  .filter(r => !existingSet.has(r.goods_no) && r.dome_price_krw > 0 && r.msp_price_krw > 0)
+  .filter(r => !existingSet.has(r.goods_no) && r.dome_price_krw > 0 && r.msp_price_krw > 0 && (ONLY.size === 0 || ONLY.has(String(r.goods_no))))
   .map(r => {
     const fee = Math.round(r.msp_price_krw * COUPANG_FEE_RATE)
     const vat = Math.round(r.msp_price_krw / 11)
     const margin = r.msp_price_krw - (r.dome_price_krw + OUTBOUND_SHIP) - fee - vat
     return { ...r, marginPct: margin / r.msp_price_krw }
   })
-  .filter(r => r.marginPct >= MIN_MARGIN)
+  .filter(r => ONLY.size > 0 || r.marginPct >= MIN_MARGIN)
   .sort((a, b) => b.marginPct - a.marginPct)
-  .slice(0, LIMIT)
+  .slice(0, ONLY.size > 0 ? ONLY.size : LIMIT)
 
 console.log(`=== bio77 → 쿠팡 등록 ${DRY ? '[DRY]' : ''} ===`)
 console.log(`대상: ${withMargin.length}건 (마진 ${(MIN_MARGIN * 100).toFixed(0)}%↑, 이미등록 ${existingSet.size}건 제외, limit=${LIMIT})\n`)
+if (ONLY.size) {
+  const got = new Set(withMargin.map(t => String(t.goods_no)))
+  const missing = [...ONLY].filter(no => !got.has(no))
+  if (missing.length) console.log(`⚠ --only 지정분 중 제외: ${missing.join(',')} (쿠팡 판매불가/품절/카테고리 없음/이미 등록)\n`)
+}
 
 const summary = { success: 0, fail: 0, approved: 0, errors: [] }
 for (let i = 0; i < withMargin.length; i++) {
