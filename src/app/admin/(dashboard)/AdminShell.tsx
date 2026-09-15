@@ -130,6 +130,12 @@ const NAV_GROUPS: NavGroup[] = [
         match: (p) => p.startsWith('/admin/trend-radar/beseller'),
       },
       {
+        href: '/admin/wellroot-msp',
+        label: '웰루트 MSP 확인',
+        icon: '🌿',
+        match: (p) => p.startsWith('/admin/wellroot-msp'),
+      },
+      {
         href: '/admin/trend-radar/tv-ggsan-match',
         label: 'TV ↔ ggsan 매칭',
         icon: '📺',

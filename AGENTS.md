@@ -38,6 +38,7 @@
 | [`docs/plan-2026-07-swot-workorders.md`](./docs/plan-2026-07-swot-workorders.md) | 강점·약점 실측 분석 + 보강 작업지시서 WO-01~08 (병목=판매전환·영양제편중·발굴→등록 단절) |
 | [`docs/plan-beseller-naver-compete.md`](./docs/plan-beseller-naver-compete.md) | 비셀러↔네이버 가격경쟁력 태깅 설계 (그룹 최저옵션 vs 네이버 P20, 등급 strong/ok/weak) |
 | [`docs/plan-beseller-naver-register.md`](./docs/plan-beseller-naver-register.md) | 비셀러 강력그룹→네이버 등록 설계 (옵션묶음·마진 판매가·식품 카테고리/고시) |
+| [`docs/plan-wellroot-collect.md`](./docs/plan-wellroot-collect.md) | 웰루트B2B(Cafe24) 상품 수집 설계 — 재판매 180/444, MSP 5형태(텍스트구간·단일·이미지·base64 PNG·미발견) OCR, 스키마·파이프라인 (구현 미착수) |
 | [`docs/scout-protocol.md`](./docs/scout-protocol.md) | 쿠팡 소싱 스카우트 — 크롬 확장(손)↔로컬 Claude 두뇌 아키텍처·JSON 프로토콜·설치 |
 | [`SEPARATION_NOTES.md`](./SEPARATION_NOTES.md) | 본업 분리(옵션 A) 내역 + 잔재 제거 가이드 |
 | [`README.md`](./README.md) | 레포 개요 / 로컬 실행 |
