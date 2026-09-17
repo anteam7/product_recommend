@@ -103,3 +103,29 @@ node scripts/register-agent.mjs --once     # 대기 중인 잡 1배치만 처리
 - **브랜드 유추 주의(2026-09-17 실측)** — ggsan·upickb2b·bio77 등록기는 `brand = 상품명 첫 토큰` 관행을 쓴다. 타사 상표가 걸리면 쿠팡이 "브랜드 ID가 필요합니다"로 거절한다. 웰루트 등록기는 공급처가 명시한 brand 컬럼이 있을 때만 보내고 없으면 생략하는 방식으로 고쳤다.
 - **실패 건 재시도** — 등록기들이 FAILED 행까지 "이미 등록됨"으로 세서 재시도가 막힌다(bio77 등 해당). 웰루트만 FAILED 제외로 고쳐져 있다. 다른 공급처는 listings 의 FAILED 행을 지우고 다시 큐에 넣어야 한다.
 - **쿠팡 필수 구매옵션 의무화(2026-02~)** — 예측 카테고리가 `isAllowSingleItem=false` 면 단일상품 등록이 불가해 SKIP 된다. 웰루트 실측에서 128건 중 62건이 여기 걸렸다(환·분말·가루류). 살리려면 옵션조합(items[] 다중 variant) 등록 구현이 필요하다.
+
+---
+
+## 8. 등록 후 마무리 — `scripts/coupang-followup-approvals.mjs`
+
+등록 직후에는 쿠팡 검수(수시간~1-2일) 전이라 `vendorItemId`가 없어 **재고를 넣을 수 없다**. 재고가 0이면 검수를 통과해도 판매가 시작되지 않으므로, 검수 통과 시점에 이 스크립트로 마무리한다.
+
+```bash
+node scripts/coupang-followup-approvals.mjs --dry              # 웰루트 현황만 확인
+node scripts/coupang-followup-approvals.mjs                    # 재고 30개 설정
+node scripts/coupang-followup-approvals.mjs --source=bio77 --qty=10
+node scripts/coupang-followup-approvals.mjs --only=216 --qty=5
+```
+
+대상은 `TEMPORARY_SAVE / PENDING_APPROVAL / APPROVED` 상태의 listings이며 쿠팡 statusName 별로:
+
+| statusName | 처리 |
+|---|---|
+| 승인반려·거절 | `REJECTED` + 사유 기록 (재시도 불가) |
+| 임시저장 | 승인요청 재호출 → `PENDING_APPROVAL` |
+| 검수 대기(vendorItemId 없음) | 대기 보고만 — 나중에 다시 실행 |
+| 승인완료 | `APPROVED`·`approved_at` 기록 + **재고가 0인 vendorItem에만 재고 설정** → `displayable=true` |
+
+- **이미 재고가 있는 상품은 건드리지 않는다.** 재고는 stock-sync 크론 소관이라 덮어쓰면 품절 처리된 상품이 되살아난다. 강제로 덮어쓰려면 `--force-stock`.
+- `--source` 기본값은 `wellroot`. 전 공급처를 돌리려면 `--source=all` 을 명시해야 한다.
+- 기존 `bio77-retry-approvals.mjs`·`coupang-bulk-approve-stock.mjs` 는 임시저장 건만 다루고 검수 통과분 재고를 넣지 않는다.
