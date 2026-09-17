@@ -220,7 +220,17 @@ function cleanTitle(row) {
   if (t.length > MAX_TITLE_LEN) t = t.slice(0, MAX_TITLE_LEN).trim()
   return t
 }
-
+/**
+ * 브랜드 — 쿠팡은 등록되지 않은/타사 상표 브랜드명을 보내면
+ * "브랜드 ID가 필요합니다. WING 브랜드 관리에서 등록해 주세요"로 거절한다(2026-09-17 실측, #216 보령프로바이오틱스).
+ * 상품명 첫 토큰으로 브랜드를 유추하면(다른 등록 스크립트들의 관행) "(간유산균)보령프로바이오틱스" 같은
+ * 쓰레기 값이나 타사 상표가 그대로 나가므로, **공급처가 명시한 brand 컬럼이 있을 때만** 보낸다.
+ * 생략하면 쿠팡이 '기타' 취급한다 — 확실할 때만 보내는 쪽이 안전하다.
+ */
+function pickBrand(row) {
+  const b = String(row.brand ?? '').trim()
+  return b.length >= 2 ? b : null
+}
 async function buildPayload(row, meta, categoryCode, categoryName) {
   const price = computePrice(row)
   const title = cleanTitle(row)
@@ -253,7 +263,7 @@ async function buildPayload(row, meta, categoryCode, categoryName) {
   }]
   const payload = {
     vendorId: VENDOR_ID, sellerProductName: title, displayProductName: title,
-    displayCategoryCode: categoryCode, brand: row.brand ?? title.split(/\s+/)[0],
+    displayCategoryCode: categoryCode, ...(pickBrand(row) ? { brand: pickBrand(row) } : {}),
     generalProductName: title, productGroup: title.split(/\s+/).slice(0, 3).join(' '),
     manufacture: '상세설명 참조', saleStartedAt: new Date().toISOString().slice(0, 19), saleEndedAt: '2099-12-31T00:00:00',
     deliveryMethod: 'SEQUENCIAL', deliveryCompanyCode: 'CJGLS', deliveryChargeType: 'FREE', deliveryCharge: 0,
@@ -287,8 +297,9 @@ const { data: rows, error: qErr } = ONLY.length
   : await baseSel.eq('coupang_eligible', true)
 if (qErr) { console.error('대상 조회 실패:', qErr.message); process.exit(1) }
 
-const { data: existing } = await sb.from('jimscanner_coupang_listings').select('source_goods_no').eq('source', 'wellroot')
-const existingSet = new Set((existing ?? []).map(r => r.source_goods_no))
+const { data: existing } = await sb.from('jimscanner_coupang_listings').select('source_goods_no, status').eq('source', 'wellroot')
+// FAILED 는 재시도 가능해야 하므로 기등록으로 치지 않는다(SKIPPED 는 카테고리 제약이라 계속 막는다)
+const existingSet = new Set((existing ?? []).filter(r => r.status !== 'FAILED').map(r => r.source_goods_no))
 
 const skipped = []
 const candidates = (rows ?? [])
@@ -327,7 +338,7 @@ for (let i = 0; i < targets.length; i++) {
         await sb.from('jimscanner_coupang_listings').insert({
           vendor_id: VENDOR_ID, source: 'wellroot', source_goods_no: row.product_no, source_detail_url: row.detail_url,
           registered_title: title, display_category_code: cat.code, display_category_name: cat.name,
-          brand: row.brand ?? title.split(/\s+/)[0], dome_price_krw: row.supply_price_krw, msp_price_krw: row.msp_price_krw,
+          brand: pickBrand(row), dome_price_krw: row.supply_price_krw, msp_price_krw: row.msp_price_krw,
           list_price_krw: row._p.listPrice, status: 'SKIPPED', displayable: false,
           rejection_reason: 'isAllowSingleItem=false — 옵션조합 등록 미구현으로 보류',
         })
