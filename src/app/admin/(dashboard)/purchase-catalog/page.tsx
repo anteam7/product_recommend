@@ -199,7 +199,7 @@ export default async function PurchaseCatalogPage({ searchParams }: {
       <div className="text-xs text-gray-500">
         {total.toLocaleString()}건 · {o.page}/{totalPages} 페이지
         <span className="ml-2 text-gray-400">
-          마진 = MSP − (공급가 + 매입배송비) − 쿠팡수수료 10.6% − 순부가세. 손익분기가 = 마진 0이 되는 판매가.
+          마진 = MSP − (공급가 + 매입배송비) − 쿠팡수수료 − 순부가세. 수수료는 등록 카테고리별(영양제 7.6% / 그 외 식품 10.6%). 손익분기가 = 마진 0이 되는 판매가.
         </span>
       </div>
 

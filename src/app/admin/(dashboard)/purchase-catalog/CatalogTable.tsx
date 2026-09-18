@@ -23,6 +23,8 @@ export interface CatalogRow {
   note: string | null
   real_cost: number | null
   breakeven_price: number | null
+  fee_rate: number | null
+  fee_category: string | null
   msp_fee: number | null
   msp_vat: number | null
   msp_margin: number | null
@@ -122,6 +124,7 @@ export function CatalogTable({ rows }: { rows: CatalogRow[] }) {
               <th className="p-2 text-right">배송비</th>
               <th className="p-2 text-right">원가</th>
               <th className="p-2 text-right">MSP</th>
+              <th className="p-2 text-right">수수료</th>
               <th className="p-2 text-right">MSP 마진</th>
               <th className="p-2 text-right">손익분기</th>
               <th className="p-2 text-center">쿠팡</th>
@@ -129,7 +132,7 @@ export function CatalogTable({ rows }: { rows: CatalogRow[] }) {
           </thead>
           <tbody className="divide-y">
             {rows.length === 0 && (
-              <tr><td colSpan={9} className="p-6 text-center text-gray-400">조건에 맞는 상품이 없습니다.</td></tr>
+              <tr><td colSpan={10} className="p-6 text-center text-gray-400">조건에 맞는 상품이 없습니다.</td></tr>
             )}
             {rows.map((r) => {
               const meta = SOURCE_META[r.source]
@@ -170,6 +173,9 @@ export function CatalogTable({ rows }: { rows: CatalogRow[] }) {
                   <td className="p-2 text-right tabular-nums">
                     {won(r.msp)}
                     {r.msp_suspicious && <span className="ml-1 text-amber-600" title="MSP가 공급가보다 낮습니다 — 수집 파싱 오류 의심">⚠</span>}
+                  </td>
+                  <td className="p-2 text-right tabular-nums text-gray-500 text-[11px]" title={`수수료 카테고리: ${r.fee_category ?? '미확인'}`}>
+                    {r.fee_rate != null ? `${(r.fee_rate * 100).toFixed(1)}%` : '—'}
                   </td>
                   <td className={`p-2 text-right tabular-nums ${neg ? 'text-rose-600' : 'text-emerald-700'}`}>
                     {won(r.msp_margin)}

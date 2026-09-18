@@ -31,6 +31,7 @@ with base as (
          true                     as supports_coupang,
          (g.status = 'active' and coalesce(g.min_sell_price_krw,0) > 0) as coupang_target,
          null::text               as note,
+         nullif(g.raw_payload->'coupang_predicted_category'->>'id','')::int as category_code,
          g.updated_at             as updated_at
   from public.jimscanner_ggsan_products g
 
@@ -43,7 +44,7 @@ with base as (
          u.min_sell_price_krw, u.tiered_msp,
          u.status, (u.status = 'active'), true,
          (u.status = 'active' and coalesce(u.min_sell_price_krw,0) > 0),
-         u.sellable_platforms, u.updated_at
+         u.sellable_platforms, null::int, u.updated_at
   from public.jimscanner_upickb2b_products u
 
   union all
@@ -54,6 +55,7 @@ with base as (
          b.status, (b.status = '정상'), true,
          (b.status = '정상' and b.coupang_sellable and coalesce(b.msp_price_krw,0) > 0),
          case when b.coupang_sellable then null else '쿠팡 판매불가 표기' end,
+         b.coupang_category_code,
          b.updated_at
   from public.jimscanner_bio77_products b
 
@@ -64,7 +66,7 @@ with base as (
          e.supply_price, null::int, 0, '무료배송(공급처 부담)',
          e.min_sell_price, null::jsonb,
          e.status, (e.status = 'active'), false, false,
-         '네이버 전용 — 쿠팡 등록기 없음', e.updated_at
+         '네이버 전용 — 쿠팡 등록기 없음', null::int, e.updated_at
   from public.jimscanner_beseller_products e
 
   union all
@@ -80,27 +82,36 @@ with base as (
            case when w.has_option           then '옵션상품' end,
            case when w.register_excluded    then '등록제외: ' || coalesce(w.register_excluded_reason,'') end,
            case when coalesce(w.msp_price_krw,0) = 0 then 'MSP 미확인' end), ''),
+         w.coupang_category_code,
          w.updated_at
   from public.jimscanner_wellroot_products w
 ),
 calc as (
+  -- 수수료율은 등록 카테고리로 정해진다(영양제 7.6% vs 그 외 식품 10.6%) — 고정 상수를 쓰면 마진 순위가 뒤바뀐다.
+  -- 근거표: jimscanner_coupang_category_commission (supabase/coupang_category_commission.sql)
+  -- 손익분기가 유도: margin = S - C - S·f - (S-C)/11 = 0 → S = 0.909091·C / (0.909091 - f)
   select b.*,
          (coalesce(b.supply_price,0) + coalesce(b.ship_fee,0))                                as real_cost,
-         ceil((0.9091 * (coalesce(b.supply_price,0) + coalesce(b.ship_fee,0)) / 0.8031) / 100) * 100 as breakeven_price
+         coalesce(cc.rate, 0.106)                                                             as fee_rate,
+         coalesce(cc.name, '(미확인)')                                                         as fee_category,
+         ceil((0.909091 * (coalesce(b.supply_price,0) + coalesce(b.ship_fee,0))
+               / (0.909091 - coalesce(cc.rate, 0.106))) / 100) * 100                          as breakeven_price
   from base b
+  left join public.jimscanner_coupang_category_commission cc on cc.display_category_code = b.category_code
 )
 select c.source, c.goods_no, c.title, c.brand, c.thumb_url, c.detail_url,
        c.supply_price, c.list_price, c.ship_fee, c.ship_basis, c.msp, c.tiered_msp,
        c.status, c.is_active, c.supports_coupang, c.coupang_target, c.note, c.updated_at,
        c.real_cost, c.breakeven_price::int as breakeven_price,
+       c.category_code, c.fee_rate, c.fee_category,
        -- MSP 판매 시 마진
-       case when coalesce(c.msp,0) > 0 then round(c.msp * 0.106)::int end                     as msp_fee,
+       case when coalesce(c.msp,0) > 0 then round(c.msp * c.fee_rate)::int end                     as msp_fee,
        case when coalesce(c.msp,0) > 0 then greatest(0, round((c.msp - c.real_cost) / 11.0))::int end as msp_vat,
        case when coalesce(c.msp,0) > 0
-            then (c.msp - c.real_cost - round(c.msp * 0.106) - greatest(0, round((c.msp - c.real_cost) / 11.0)))::int
+            then (c.msp - c.real_cost - round(c.msp * c.fee_rate) - greatest(0, round((c.msp - c.real_cost) / 11.0)))::int
        end                                                                                     as msp_margin,
        case when coalesce(c.msp,0) > 0
-            then round(((c.msp - c.real_cost - round(c.msp * 0.106) - greatest(0, round((c.msp - c.real_cost) / 11.0))) / c.msp::numeric) * 100, 1)
+            then round(((c.msp - c.real_cost - round(c.msp * c.fee_rate) - greatest(0, round((c.msp - c.real_cost) / 11.0))) / c.msp::numeric) * 100, 1)
        end                                                                                     as msp_margin_pct,
        -- MSP가 공급가보다 낮음 = 수집 파싱 오류 의심(유픽 'MSP 900원' 등) — 화면에 ⚠ 표시
        (coalesce(c.msp,0) > 0 and c.msp < c.supply_price) as msp_suspicious,

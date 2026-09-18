@@ -129,3 +129,36 @@ node scripts/coupang-followup-approvals.mjs --only=216 --qty=5
 - **이미 재고가 있는 상품은 건드리지 않는다.** 재고는 stock-sync 크론 소관이라 덮어쓰면 품절 처리된 상품이 되살아난다. 강제로 덮어쓰려면 `--force-stock`.
 - `--source` 기본값은 `wellroot`. 전 공급처를 돌리려면 `--source=all` 을 명시해야 한다.
 - 기존 `bio77-retry-approvals.mjs`·`coupang-bulk-approve-stock.mjs` 는 임시저장 건만 다루고 검수 통과분 재고를 넣지 않는다.
+
+---
+
+## 9. 수수료율 — 카테고리별 (2026-09-18)
+
+초기 구현은 `10.6%` 고정이었다. 실제로는 **등록 카테고리마다 다르고**, 그 차이가 마진 순위를 뒤집는다
+(웰루트 119건 기준 15% 이상이 48건 → 57건으로 바뀐다).
+
+**왜 사용자 제공 표를 바로 못 썼나** — `scripts/lib/coupang-commission.mjs`(사용자 제공, 2026-07)는
+대분류 이름 기준 + 상품명 텍스트 매칭이다. 실제 등록은 말단 카테고리(루테인·건강분말)로 들어가므로
+웰루트 128건 중 **95건이 기본값 10.8%로 빠졌고**, 카테고리명 기준과 상품명 기준이 서로 다른 답을 냈다.
+
+**해결** — 쿠팡 카테고리 트리에서 전체 경로를 받아 경로 기준으로 판정한다.
+
+```
+GET /v2/providers/seller_api/apis/api/v1/marketplace/meta/display-categories/{code}
+  → { name, child[] }   (부모는 안 주므로 루트에서 내려가며 경로를 만든다)
+```
+
+| 경로 | 수수료 |
+|---|---|
+| `식품 > 건강식품 > 건강식품 > *` (유산균·루테인·쏘팔메토·마카·아연·비타민) | **7.6%** |
+| 그 외 식품 하위 (전통건강식품·환/분말·가루/조미료·다이어트식품·신선식품·차류) | **10.6%** |
+
+사용자 확정(2026-09-18): 건강분말·건강환·가루류·다이어트식품은 전부 식품 10.6%.
+
+- 적재: `node scripts/coupang-build-commission-table.mjs [--reuse] [--dry]` → `jimscanner_coupang_category_commission` (식품 하위 1,527개)
+- 뷰가 `category_code` 로 조인해 `fee_rate`·`fee_category` 를 노출하고, 마진·손익분기가 계산에 쓴다
+- 카테고리 코드 출처: ggsan `raw_payload.coupang_predicted_category.id` · bio77/wellroot `coupang_category_code` · upickb2b/beseller 없음(기본 10.6%)
+- 손익분기가 유도: `margin = S - C - S·f - (S-C)/11 = 0` → `S = 0.909091·C / (0.909091 - f)`
+
+**아직 확정 아님** — 쿠팡 OpenAPI 에는 카테고리별 수수료 조회가 없고(4개 경로 모두 404), 주문 테이블에도
+정산 금액 컬럼이 없어 실측 검증이 불가능하다. **첫 정산 내역이 나오면 7.6%/10.6% 를 대조할 것.**
