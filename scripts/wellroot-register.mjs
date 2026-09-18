@@ -291,6 +291,14 @@ async function buildPayload(row, meta, categoryCode, categoryName, qtys = [1]) {
     if (await downloadable(u)) contentImgs.push(u)
     if (contentImgs.length >= 10) break
   }
+  // 쿠팡은 상세설명(contents)이 비면 "상세설명은 적어도 한개 이상 등록 되어야 합니다"로 승인반려한다
+  // (2026-09-17 #159 폴리시아 실측 — detail_images 가 0장이었다). 대표 이미지로라도 채운다.
+  if (contentImgs.length === 0) {
+    for (const u of [...mains, rep].filter(Boolean)) {
+      if (await downloadable(u)) { contentImgs.push(u); break }
+    }
+    if (contentImgs.length === 0) throw new Error('상세설명에 넣을 이미지가 없음 — 쿠팡 승인반려 대상이라 등록 보류')
+  }
   const items_images = [{ imageOrder: 0, imageType: 'REPRESENTATION', vendorPath: rep }]
   const contents = contentImgs.map(u => ({ contentsType: 'IMAGE_NO_SPACE', contentDetails: [{ content: u, detailType: 'IMAGE' }] }))
 
