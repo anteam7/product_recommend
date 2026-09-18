@@ -160,10 +160,15 @@ function buildItemAttributes(categoryAttrs, options, qty = 1) {
 
   const buildValue = (a) => {
     const name = a.attributeTypeName
-    if (name === fallbackName) return `${qty}${pickUnit(a.usableUnits, ['개', '박스', '세트', '팩'])}`
-    if (name === '개당 캡슐/정') return `${capsule?.value ?? 30}${pickUnit(a.usableUnits, ['정', '회분'])}`
-    if (name === '개당 중량') return `${weight?.value ?? (isLiquid ? 1 : 0)}${pickUnit(a.usableUnits, ['g', 'kg'])}`
-    if (name === '개당 용량') return `${volume?.value ?? 0}${pickUnit(a.usableUnits, ['ml', 'L'])}`
+    const u = a.usableUnits ?? []
+    if (name === fallbackName) return `${qty}${pickUnit(u, ['개', '박스', '세트', '팩'])}`
+    // 카테고리마다 필수 속성 이름이 다르다(개당 캡슐/정 · 개당 수량 · 최소 중량 · 최소 용량 …).
+    // 이름을 정규식으로 느슨하게 잡고, 못 잡으면 usableUnits 로 판정한다. 값이 비면 쿠팡이
+    // "필수 구매 옵션 존재하지 않습니다"로 거절한다(2026-09-18 #267 작두콩차 실측).
+    if (/캡슐|정|개입/.test(name) || u.includes('정') || u.includes('개입')) return `${capsule?.value ?? 30}${pickUnit(u, ['정', '회분', '개입'])}`
+    if (/중량|무게/.test(name) || u.includes('g')) return `${weight?.value ?? (isLiquid ? 1 : 0)}${pickUnit(u, ['g', 'kg'])}`
+    if (/용량/.test(name) || u.includes('ml')) return `${volume?.value ?? 0}${pickUnit(u, ['ml', 'L'])}`
+    if (/수량/.test(name)) return `${qty}${pickUnit(u, ['개', '박스', '세트', '팩'])}`
     return '상세설명 참조'
   }
   const groups = new Map()
@@ -181,7 +186,7 @@ function buildItemAttributes(categoryAttrs, options, qty = 1) {
   }
   const selected = [...groups.values(), ...rest]
   const out = selected.map(a => {
-    const isMandatoryNumeric = a.required === 'MANDATORY' && ['개당 캡슐/정', '개당 중량', '개당 용량'].includes(a.attributeTypeName)
+    const isMandatoryNumeric = a.required === 'MANDATORY' && /중량|무게|용량|캡슐|정|개입|수량/.test(a.attributeTypeName)
     const isExposedCandidate = a.attributeTypeName === fallbackName || isMandatoryNumeric
     const value = isExposedCandidate ? buildValue(a) : ''
     return { attributeTypeName: a.attributeTypeName, attributeValueName: value, exposed: isExposedCandidate ? 'EXPOSED' : 'NONE' }
@@ -410,7 +415,15 @@ for (let i = 0; i < targets.length; i++) {
       continue
     }
 
-    const r = await api('POST', '/v2/providers/seller_api/apis/api/v1/marketplace/seller-products', built.payload)
+    let r = await api('POST', '/v2/providers/seller_api/apis/api/v1/marketplace/seller-products', built.payload)
+    // 공급처가 명시한 브랜드도 WING 에 등록돼 있지 않으면 거절된다(2026-09-18 웰루아·살므시 실측).
+    // 브랜드를 빼면 쿠팡이 '기타'로 처리하며 통과하므로, 이 오류일 때만 브랜드 없이 한 번 더 시도한다.
+    if (built.payload.brand && /브랜드.{0,3}ID가 필요/.test(JSON.stringify(r.body))) {
+      console.log(`      ↻ 브랜드 "${built.payload.brand}" 미등록 — 브랜드 없이 재시도`)
+      delete built.payload.brand
+      await sleep(500)
+      r = await api('POST', '/v2/providers/seller_api/apis/api/v1/marketplace/seller-products', built.payload)
+    }
     const success = r.status === 200 && r.body?.code === 'SUCCESS'
     const sellerProductId = typeof r.body?.data === 'number' ? r.body.data : null
     writeFileSync(path.join(__dirname, '..', `_tmp_wellroot_register_${row.product_no}.json`), JSON.stringify({ payload: built.payload, response: r.body }, null, 2), 'utf8')
