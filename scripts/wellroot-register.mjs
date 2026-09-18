@@ -151,8 +151,14 @@ function parseOptionNum(options, typeRe) {
 //   - isAllowSingleItem=false 카테고리는 호출 전에 SKIP 처리한다
 //   - "수량"(또는 "총 수량") + 그룹 대표 필수속성만 EXPOSED, 나머지는 NONE
 function buildItemAttributes(categoryAttrs, options, qty = 1) {
-  const hasSuryang = categoryAttrs.some(a => a.attributeTypeName === '수량')
-  const fallbackName = hasSuryang ? '수량' : '총 수량'
+  // 수량 축 속성은 카테고리마다 '수량' 또는 '총 수량' 이고, 둘 다 있으면서 '총 수량' 만 MANDATORY 인
+  // 카테고리가 있다(58960 배즙·72797 석류주스). '수량' 이 있다는 이유로 '총 수량' 을 건너뛰면
+  // 필수 속성이 빠져 "필수 구매 옵션 존재하지 않습니다"로 거절된다(2026-09-18 #453 석류정 실측).
+  // → 필수인 쪽을 우선 고른다.
+  const qtyAttrs = categoryAttrs.filter(a => a.attributeTypeName === '수량' || a.attributeTypeName === '총 수량')
+  const fallbackName = (qtyAttrs.find(a => a.required === 'MANDATORY')
+    ?? qtyAttrs.find(a => a.attributeTypeName === '수량')
+    ?? qtyAttrs[0])?.attributeTypeName ?? '수량'
   const capsule = parseOptionNum(options, /캡슐|정|개입/)
   const weight = parseOptionNum(options, /중량|무게/)
   const volume = parseOptionNum(options, /용량/)
