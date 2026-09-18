@@ -74,7 +74,7 @@ for (let i = 0; i < rows.length; i++) {
     const detail = await api('GET', `${P}/seller-products/${r.seller_product_id}`)
     const d = detail.body?.data
     if (!d) { console.log(`${tag} | ✗ 상품 조회 실패 HTTP ${detail.status}`); sum.fail++; await sleep(400); continue }
-    const statusName = d.statusName ?? ''
+    let statusName = d.statusName ?? ''
     const vendorItemIds = (d.items ?? []).map(it => it.vendorItemId).filter(Boolean)
 
     // ① 반려 — 재시도 불가, DB에 사유를 남긴다
@@ -96,6 +96,9 @@ for (let i = 0; i < rows.length; i++) {
       await sb.from('jimscanner_coupang_listings').update({ status: 'PENDING_APPROVAL', last_synced_at: new Date().toISOString() }).eq('id', r.id)
       console.log(`${tag} | ✓ 승인요청 완료`)
       sum.requested++; await sleep(1200)
+      // 승인요청 직후엔 statusName·vendorItemId 가 바뀌므로 다시 읽는다(안 그러면 방금 요청한 건이 "임시저장"으로 찍힌다)
+      const re = await api("GET", `${P}/seller-products/${r.seller_product_id}`)
+      if (re.body?.data) { Object.assign(d, re.body.data); statusName = re.body.data.statusName ?? statusName; vendorItemIds.push(...(re.body.data.items ?? []).map(it => it.vendorItemId).filter(Boolean).filter(v => !vendorItemIds.includes(v))) }
     }
 
     // ③ 검수 대기 — vendorItemId가 아직 없으면 할 수 있는 게 없다

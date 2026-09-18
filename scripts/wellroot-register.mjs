@@ -48,6 +48,11 @@ const argOf = k => args.find(a => a.startsWith(`--${k}=`))?.split('=').slice(1).
 const LIMIT = +(argOf('limit') || 0) || 0
 const ONLY = (argOf('only') || '').split(',').map(s => s.trim()).filter(Boolean)
 const MIN_MARGIN = +(argOf('min-margin') ?? 0.10)
+// 묶음(옵션조합) 등록 — 쿠팡 "필수 구매옵션 의무화"(2026-02~)로 isAllowSingleItem=false 인 카테고리는
+// items[] 에 변형이 2개 이상 있어야 등록된다. 웰루트는 수량별 MSP·수량 구간 배송비가 있어 "수량" 축이 자연스럽다.
+//   --bundle=1,2,3  변형 수량(기본 1,2,3) · --force-bundle  단일등록이 가능한 카테고리도 묶음으로
+const BUNDLE_QTYS = (argOf('bundle') || '1,2,3').split(',').map(s => parseInt(s.trim(), 10)).filter(n => Number.isFinite(n) && n > 0)
+const FORCE_BUNDLE = args.includes('--force-bundle')
 
 const metaCacheDir = path.join(__dirname, '..', '_tmp_meta_cache')
 if (!existsSync(metaCacheDir)) mkdirSync(metaCacheDir, { recursive: true })
@@ -129,7 +134,9 @@ function optionsFromTitle(title) {
     out.push({ type: '개당 용량', value: `${+v.toFixed(2)}ml` })
   }
   const bm = [...t.matchAll(/[xX×*]\s*(\d+)\s*(정|캡슐|포|병|개입|회분)/g)]
-  const single = t.match(/\b(\d+)\s*(정|캡슐|포|병|개입|회분)\b/)
+  // 한글 뒤에서는 \b 가 동작하지 않는다(\w 에 한글이 없어 "90정" 끝에 경계가 생기지 않음) → 후행 부정탐색으로 대체.
+  // 이걸 놓치면 캡슐/정 수량 파싱이 실패해 기본값 30정이 그대로 등록된다(2026-09-17 #317 양배추정 90정 실측).
+  const single = t.match(/(\d+)\s*(정|캡슐|포|병|개입|회분)(?![가-힣])/)
   const bundle = bm.length ? { v: +bm[bm.length - 1][1], u: bm[bm.length - 1][2] } : (single ? { v: +single[1], u: single[2] } : null)
   if (bundle) out.push({ type: '개당 캡슐/정', value: `${bundle.v}${bundle.u}` })
   return out
@@ -143,7 +150,7 @@ function parseOptionNum(options, typeRe) {
 // ★ bio77-register.mjs:114-159 의 검증된 공식 그대로 (2026-09-01 확정, "숫자+단위 공백 없음")
 //   - isAllowSingleItem=false 카테고리는 호출 전에 SKIP 처리한다
 //   - "수량"(또는 "총 수량") + 그룹 대표 필수속성만 EXPOSED, 나머지는 NONE
-function buildItemAttributes(categoryAttrs, options) {
+function buildItemAttributes(categoryAttrs, options, qty = 1) {
   const hasSuryang = categoryAttrs.some(a => a.attributeTypeName === '수량')
   const fallbackName = hasSuryang ? '수량' : '총 수량'
   const capsule = parseOptionNum(options, /캡슐|정|개입/)
@@ -153,7 +160,7 @@ function buildItemAttributes(categoryAttrs, options) {
 
   const buildValue = (a) => {
     const name = a.attributeTypeName
-    if (name === fallbackName) return `1${pickUnit(a.usableUnits, ['개', '박스', '세트', '팩'])}`
+    if (name === fallbackName) return `${qty}${pickUnit(a.usableUnits, ['개', '박스', '세트', '팩'])}`
     if (name === '개당 캡슐/정') return `${capsule?.value ?? 30}${pickUnit(a.usableUnits, ['정', '회분'])}`
     if (name === '개당 중량') return `${weight?.value ?? (isLiquid ? 1 : 0)}${pickUnit(a.usableUnits, ['g', 'kg'])}`
     if (name === '개당 용량') return `${volume?.value ?? 0}${pickUnit(a.usableUnits, ['ml', 'L'])}`
@@ -179,7 +186,7 @@ function buildItemAttributes(categoryAttrs, options) {
     const value = isExposedCandidate ? buildValue(a) : ''
     return { attributeTypeName: a.attributeTypeName, attributeValueName: value, exposed: isExposedCandidate ? 'EXPOSED' : 'NONE' }
   })
-  const itemName = out.filter(a => a.exposed === 'EXPOSED').map(a => a.attributeValueName).join(' ') || '1개'
+  const itemName = out.filter(a => a.exposed === 'EXPOSED').map(a => a.attributeValueName).join(' ') || `${qty}개`
   return { attributes: out, itemName }
 }
 
@@ -189,10 +196,44 @@ function buildItemAttributes(categoryAttrs, options) {
  * 이렇게 하면 MSP가 원가보다 낮은 상품(웰루트 한천가루 등)도 적자 등록되지 않는다.
  * 원가 = 공급가(VAT 포함) + 웰루트 배송비 1건. 웰루트가 고객에게 직배송하므로 배송비는 1회만 계산한다.
  */
-function computePrice(row) {
-  const dome = row.supply_price_krw || 0
-  const ship = row.shipping_fee_krw ?? DEFAULT_SOURCE_SHIP
-  const msp = row.msp_price_krw ?? 0
+/** N개 묶음 매입 배송비 — 웰루트는 수량 구간제(대개 1~12개 한 박스 3,000원)라 묶음일수록 개당 배송비가 싸진다. */
+function shipFor(row, n) {
+  const tiers = Array.isArray(row.shipping_tiers) ? row.shipping_tiers : []
+  const hit = tiers.find(t => n >= (t.min ?? 1) && n <= (t.max ?? 9999))
+  return hit?.fee ?? row.shipping_fee_krw ?? DEFAULT_SOURCE_SHIP
+}
+/**
+ * N개 묶음의 MSP 하한. 공급사 수량별 MSP(tiered_msp)가 있으면 그 값을 쓰고,
+ * 없으면 1개 MSP × N 으로 잡는다 — 하한을 높게 잡는 건 위반이 아니라 안전한 쪽이다.
+ */
+function mspFloor(row, n) {
+  const t = row.tiered_msp && typeof row.tiered_msp === 'object' ? row.tiered_msp : null
+  const exact = t?.[String(n)]
+  if (typeof exact === 'number' && exact > 0) return exact
+  return (row.msp_price_krw ?? 0) * n
+}
+/**
+ * 가격 정책 — MSP는 "이 밑으로 팔지 말 것"이라는 하한이지 지정가가 아니다.
+ *   listPrice = max(MSP 하한, 목표순마진(MIN_MARGIN) 달성가)
+ * 묶음(N개)에 특히 중요하다: 공급사 수량별 MSP는 볼륨 할인이라 그대로 팔면 마진율이 단품보다 낮아진다.
+ * 원가 = N × 공급가(VAT 포함) + 배송비 1회(웰루트가 고객에게 직배송하므로 묶음이어도 배송은 1건).
+ */
+/**
+ * 실제로 만들 변형 수량. 공급사가 수량별 MSP를 명시한 구간만 쓴다.
+ * (예: tiered_msp={1:30000,2:50000} 인데 3개 변형을 만들면 하한이 3×30,000=90,000 으로 잡혀
+ *  2개 50,000원보다 터무니없이 비싸진다 — 하한을 높게 잡는 건 안전하지만 팔리지 않는 가격이 된다.)
+ * 수량별 MSP가 아예 없는 상품은 쿠팡 변형 요건(2개 이상)만 채우도록 1·2개로 만든다(2개 하한 = 2×1개 MSP).
+ */
+function variantQtys(row, requested) {
+  const t = row.tiered_msp && typeof row.tiered_msp === 'object' ? row.tiered_msp : null
+  if (!t) return requested.slice(0, 2)
+  const have = requested.filter(n => n === 1 || (typeof t[String(n)] === 'number' && t[String(n)] > 0))
+  return have.length >= 2 ? have : requested.slice(0, 2)
+}
+function computePriceFor(row, n = 1) {
+  const dome = (row.supply_price_krw || 0) * n
+  const ship = shipFor(row, n)
+  const msp = mspFloor(row, n)
   const realCost = dome + ship
   // 목표 순마진(m) 가격: sale = 0.9091*원가 / (0.8031 - m)   (수수료 10.6% + 순VAT, 매입 입력VAT 공제 반영)
   const priceForNet = (cost, m) => Math.ceil((0.9091 * cost / (0.8031 - m)) / 100) * 100
@@ -203,11 +244,12 @@ function computePrice(row) {
   const netVat = Math.max(0, Math.round(grossSpread / 11))
   const margin = grossSpread - fee - netVat
   return {
-    dome, ship, msp, realCost, breakeven, listPrice, fee, margin,
+    qty: n, dome, ship, msp, realCost, breakeven, listPrice, fee, margin,
     marginPct: +(margin / listPrice * 100).toFixed(2),
     abovePriceFloor: listPrice > msp,   // MSP보다 높게 매긴 경우(원가 때문) — 경쟁력 확인 필요
   }
 }
+const computePrice = row => computePriceFor(row, 1)
 
 /** 공급사 내부 안내문(최저가 제한·폐쇄몰 등)이 상품명에 섞여 나가지 않도록 방어 — docs 메모 supplier_note_contamination */
 function cleanTitle(row) {
@@ -231,12 +273,12 @@ function pickBrand(row) {
   const b = String(row.brand ?? '').trim()
   return b.length >= 2 ? b : null
 }
-async function buildPayload(row, meta, categoryCode, categoryName) {
-  const price = computePrice(row)
+async function buildPayload(row, meta, categoryCode, categoryName, qtys = [1]) {
+  const prices = qtys.map(n => computePriceFor(row, n))
+  const price = prices[0]
   const title = cleanTitle(row)
   const noticeCategory = pickNoticeCategory(meta.noticeCategories)
   const notices = buildNotices(noticeCategory, title)
-  const { attributes: itemAttributes, itemName } = buildItemAttributes(meta.attributes ?? [], optionsFromTitle(title))
 
   // 이미지 — 대표 1장 + 상세 최대 10장. MSP 안내표(data:/docs.google 스크린샷)는 수집기가 제외했으나 한 번 더 거른다.
   const mains = Array.isArray(row.images_main) ? row.images_main : []
@@ -252,15 +294,23 @@ async function buildPayload(row, meta, categoryCode, categoryName) {
   const items_images = [{ imageOrder: 0, imageType: 'REPRESENTATION', vendorPath: rep }]
   const contents = contentImgs.map(u => ({ contentsType: 'IMAGE_NO_SPACE', contentDetails: [{ content: u, detailType: 'IMAGE' }] }))
 
-  const items = [{
-    itemName,
-    originalPrice: Math.ceil(price.listPrice * 1.2 / 100) * 100,
-    salePrice: price.listPrice,
-    maximumBuyCount: 0, maximumBuyForPerson: 0, maximumBuyForPersonPeriod: 1,
-    outboundShippingTimeDay: 2, unitCount: 1, adultOnly: 'EVERYONE', taxType: 'TAX',
-    parallelImported: 'NOT_PARALLEL_IMPORTED', overseasPurchased: 'NOT_OVERSEAS_PURCHASED', pccNeeded: false,
-    externalVendorSku: row.product_no, images: items_images, notices, attributes: itemAttributes, contents, offerCondition: 'NEW',
-  }]
+  // 변형(items[]) — 수량 축. 쿠팡은 isAllowSingleItem=false 카테고리에서 변형이 2개 이상이어야 등록을 받는다.
+  // 각 변형은 구매옵션 값(수량)이 서로 달라야 하고 externalVendorSku 도 달라야 한다.
+  const opts = optionsFromTitle(title)
+  const items = qtys.map((n, i) => {
+    const p = prices[i]
+    const { attributes, itemName } = buildItemAttributes(meta.attributes ?? [], opts, n)
+    return {
+      itemName,
+      originalPrice: Math.ceil(p.listPrice * 1.2 / 100) * 100,
+      salePrice: p.listPrice,
+      maximumBuyCount: 0, maximumBuyForPerson: 0, maximumBuyForPersonPeriod: 1,
+      outboundShippingTimeDay: 2, unitCount: n, adultOnly: 'EVERYONE', taxType: 'TAX',
+      parallelImported: 'NOT_PARALLEL_IMPORTED', overseasPurchased: 'NOT_OVERSEAS_PURCHASED', pccNeeded: false,
+      externalVendorSku: qtys.length > 1 ? `${row.product_no}-${n}` : row.product_no,
+      images: items_images, notices, attributes, contents, offerCondition: 'NEW',
+    }
+  })
   const payload = {
     vendorId: VENDOR_ID, sellerProductName: title, displayProductName: title,
     displayCategoryCode: categoryCode, ...(pickBrand(row) ? { brand: pickBrand(row) } : {}),
@@ -273,7 +323,7 @@ async function buildPayload(row, meta, categoryCode, categoryName) {
     returnCharge: RETURN_CHARGE, outboundShippingPlaceCode: OUTBOUND_SHIPPING_PLACE_CODE, vendorUserId: 'anteam7',
     requested: false, items, notices: [], requiredDocuments: [],
   }
-  return { payload, price, title, categoryName, contentCount: contentImgs.length }
+  return { payload, price, prices, qtys, title, categoryName, contentCount: contentImgs.length }
 }
 
 /** 카테고리 예측 (결과는 DB 캐시 — 매 실행 호출하지 않는다) */
@@ -331,18 +381,12 @@ for (let i = 0; i < targets.length; i++) {
     const cat = await resolveCategory(row, title)
     const meta = await getCategoryMeta(cat.code)
 
-    // 쿠팡 "필수 구매옵션 입력 의무화"(2026-02-02~) — isAllowSingleItem=false 카테고리는 진짜 옵션(변형) 상품만 등록 가능
-    if (meta.isAllowSingleItem === false) {
-      console.log(`${idx} ⏭ ${row.product_no} [${cat.code}] ${title.slice(0, 34).padEnd(34)} | isAllowSingleItem=false — SKIP`)
-      if (!DRY) {
-        await sb.from('jimscanner_coupang_listings').insert({
-          vendor_id: VENDOR_ID, source: 'wellroot', source_goods_no: row.product_no, source_detail_url: row.detail_url,
-          registered_title: title, display_category_code: cat.code, display_category_name: cat.name,
-          brand: pickBrand(row), dome_price_krw: row.supply_price_krw, msp_price_krw: row.msp_price_krw,
-          list_price_krw: row._p.listPrice, status: 'SKIPPED', displayable: false,
-          rejection_reason: 'isAllowSingleItem=false — 옵션조합 등록 미구현으로 보류',
-        })
-      }
+    // 쿠팡 "필수 구매옵션 입력 의무화"(2026-02-02~) — isAllowSingleItem=false 카테고리는 변형(items[]) 2개 이상 필요.
+    // 웰루트는 수량별 MSP·수량 구간 배송비가 있어 "수량" 묶음이 자연스러운 변형 축이다(1개/2개/3개).
+    const needBundle = meta.isAllowSingleItem === false || FORCE_BUNDLE
+    const qtys = needBundle ? variantQtys(row, BUNDLE_QTYS) : [1]
+    if (needBundle && qtys.length < 2) {
+      console.log(`${idx} ⏭ ${row.product_no} [${cat.code}] ${title.slice(0, 32).padEnd(32)} | 변형 2개 이상 필요(--bundle) — SKIP`)
       summary.skip++; await sleep(300); continue
     }
     const noticeNames = (meta.noticeCategories ?? []).map(n => n.noticeCategoryName)
@@ -350,10 +394,11 @@ for (let i = 0; i < targets.length; i++) {
       throw new Error(`비식품 카테고리(${noticeNames.join(',') || '고시없음'}) — 건강식품만 등록`)
     }
 
-    const built = await buildPayload(row, meta, cat.code, cat.name)
+    const built = await buildPayload(row, meta, cat.code, cat.name, qtys)
     if (DRY) {
-      const p = built.price
-      console.log(`${idx} (dry) ${String(row.product_no).padStart(4)} ${built.title.slice(0, 28).padEnd(28)} | 공급 ${String(p.dome).padStart(6)}+배송 ${String(p.ship).padStart(5)} → 판매 ${String(p.listPrice).padStart(6)} (MSP ${String(p.msp).padStart(6)}${p.abovePriceFloor ? '↑' : ' '}) 마진 ${String(p.margin).padStart(6)} ${String(p.marginPct).padStart(5)}% [${cat.code}${cat.cached ? '' : '*'}] 상세 ${built.contentCount}장`)
+      const variants = built.prices.map(p => `${p.qty}개 ${p.listPrice.toLocaleString()}원(MSP하한 ${p.msp.toLocaleString()}${p.abovePriceFloor ? "↑" : "="}, 마진 ${p.margin.toLocaleString()} ${p.marginPct}%)`).join(" · ")
+      console.log(`${idx} (dry) ${String(row.product_no).padStart(4)} ${built.title.slice(0, 26).padEnd(26)} | 공급 ${String(row.supply_price_krw).padStart(6)} [${cat.code}${cat.cached ? "" : "*"}${needBundle ? " 묶음" : ""}] 상세 ${built.contentCount}장`)
+      console.log(`        ${variants}`)
       continue
     }
 
@@ -390,7 +435,7 @@ for (let i = 0; i < targets.length; i++) {
       await sleep(500); continue
     }
     summary.success++
-    console.log(`${idx} ✓ ${row.product_no} ${built.title.slice(0, 30).padEnd(30)} | ${built.price.listPrice.toLocaleString()}원 (${built.price.marginPct}%) sellerPID=${sellerProductId}`)
+    console.log(`${idx} ✓ ${row.product_no} ${built.title.slice(0, 30).padEnd(30)} | ${built.qtys.length > 1 ? built.qtys.length + "변형 " : ""}${built.price.listPrice.toLocaleString()}원~ (${built.price.marginPct}%) sellerPID=${sellerProductId}`)
 
     if (!NO_APPROVAL && sellerProductId) {
       // 등록 직후 바로 승인요청하면 쿠팡 전파 지연으로 "임시저장 상태만 승인 가능" 오류가 날 수 있어 재시도
