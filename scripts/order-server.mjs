@@ -383,7 +383,15 @@ const BIO77_BASE = env.BIO77_BASE_URL || 'https://77bio.co.kr'
 // → [전체동의 체크] → [다음] → [입금은행 선택] → [다음] → [최종 확인 페이지에서 "결제" 링크] → order_end.php.
 // 예치금 사용은 병합몰(order.php) 쪽 #useDepositAll 체크 한 번으로 전액 자동 적용됨(부분충당도 이 한 번으로 처리).
 const BIO77_PREFERRED_BANK = '기업은행' // 77bio 예치금 입금계좌와 동일 은행으로 통일(예치금 부족분 가상계좌 발급용)
+// 사은품(알약케이스, goodsNo=1000000215) 증정 대상 여부 — bio77-add-giftnote.mjs가 판정해둔
+// is_pill_form=true 상품만 발주 시 주문서 배송메시지(orderMemo)에 "사은품0215"를 남겨 물류가 동봉하게 한다.
+async function isBio77GiftEligible(goodsNo) {
+  const { data, error } = await sb.from('jimscanner_bio77_products').select('is_pill_form').eq('goods_no', goodsNo).maybeSingle()
+  if (error) { console.log(`  [bio77] is_pill_form 조회 실패(goods_no=${goodsNo}): ${error.message} — 사은품 문구 생략`); return false }
+  return data?.is_pill_form === true
+}
 async function runFlowBio77(goodsNo, qty, recipient, full = null) {
+  const giftEligible = await isBio77GiftEligible(goodsNo)
   const { ctx, page } = await openBrowser()
   if (full) full.ctxRef = ctx
 
@@ -407,17 +415,22 @@ async function runFlowBio77(goodsNo, qty, recipient, full = null) {
   const op = ctx.pages().find((p) => /\/order\/order\.php/.test(p.url())) || page
   if (!/\/order\//.test(op.url())) return { ok: false, msg: '주문서로 이동 실패 — 품절/재고부족 여부 확인' }
   // 4) 배송지=직접입력 + 수령인 입력 + 세금계산서(사업자) 정보 (readonly 대비 JS set)
-  await op.evaluate(({ rcp, biz }) => {
+  //    사은품 대상(is_pill_form=true)이면 배송메시지(orderMemo)에 "사은품0215"를 남겨 물류가 알약케이스를 동봉하게 한다.
+  await op.evaluate(({ rcp, biz, gift }) => {
     const set = (n, v) => { const el = document.querySelector(`[name="${n}"]`); if (el) { el.removeAttribute('readonly'); el.value = v; el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })) } }
     const shipNew = document.querySelector('#shippingNew')
     if (shipNew) { shipNew.checked = true; shipNew.click(); shipNew.dispatchEvent(new Event('change', { bubbles: true })) }
     set('receiverName', rcp.name); set('receiverZonecode', rcp.zip); set('receiverAddress', rcp.addr1); set('receiverAddressSub', rcp.addr2); set('receiverCellPhone', rcp.phone)
+    if (gift) {
+      const memo = document.querySelector('input[name="orderMemo"]')
+      if (memo) { memo.removeAttribute('readonly'); memo.value = '사은품0215'; memo.dispatchEvent(new Event('input', { bubbles: true })); memo.dispatchEvent(new Event('change', { bubbles: true })) }
+    }
     const taxRadio = document.querySelector('#receiptTax')
     if (taxRadio) { taxRadio.checked = true; taxRadio.click(); taxRadio.dispatchEvent(new Event('change', { bubbles: true })) }
     set('taxBusiNo', biz.busiNo); set('taxCompany', biz.company); set('taxCeoNm', biz.ceo)
     set('taxService', biz.service); set('taxItem', biz.item)
     set('taxZonecode', biz.zip); set('taxAddress', biz.addr1); set('taxAddressSub', biz.addr2)
-  }, { rcp: recipient, biz: BIZ_INFO })
+  }, { rcp: recipient, biz: BIZ_INFO, gift: giftEligible })
   await op.bringToFront().catch(() => {})
 
   if (!full) {
@@ -530,7 +543,9 @@ async function execPurchase(orderKey, fullMode) {
     // 77bio 가상계좌 완주 시 입금 계좌 정보를 기록해둬야 사람이 어디로 얼마를 보낼지 알 수 있다.
     if (out.virtualAccount?.account) {
       const va = out.virtualAccount
-      upd.purchase_note = `[가상계좌] ${va.bank ?? ''} ${va.account} (예금주 ${va.holder ?? '?'}) ${va.amount?.toLocaleString() ?? '?'}원을 ${va.deadline ?? '기한내'}까지 입금`
+      // deadline 파싱값에 이미 "까지"가 붙어 오는 경우가 있어(실측: "2026-09-18 까지") 중복 표기를 막는다
+      const due = String(va.deadline ?? '기한내').replace(/[ ]*까지[ ]*$/, "").trim()
+      upd.purchase_note = `[가상계좌] ${va.bank ?? ''} ${va.account} (예금주 ${va.holder ?? '?'}) ${va.amount?.toLocaleString() ?? '?'}원을 ${due}까지 입금`
     }
     if (r.kind === 'naver') {
       if (out.orderNo) upd.supplier_order_no = out.orderNo
