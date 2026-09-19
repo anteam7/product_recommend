@@ -5,6 +5,7 @@ import { PurchaseCostCell } from './PurchaseCostCell'
 import { InvoiceCell } from './InvoiceCell'
 import { GgsanTrackingCell } from './GgsanTrackingCell'
 import PurchaseButton from './PurchaseButton'
+import { DepositInfo } from './DepositInfo'
 import SyncOrdersButton from './SyncOrdersButton'
 
 export const dynamic = 'force-dynamic'
@@ -454,6 +455,9 @@ export default async function CoupangOrdersPage({
                         <span className="text-[10px] text-gray-400 ml-1">헬퍼 꺼져 있으면 자동 기동</span>
                       </div>
                     )}
+                    {/* 77bio 가상계좌는 주문마다 번호가 새로 발급된다(건강산·유픽B2B 는 고정 무통장 계좌라 불필요).
+                        이 값이 행에 안 보이면 어디로 얼마를 보낼지 알 수 없어 [✓입금완료] 처리가 막힌다. */}
+                    {r.purchase_note && <DepositInfo note={r.purchase_note} awaiting={r.purchase_status === 'AWAITING_DEPOSIT'} />}
                   </td>
                   <td className="px-3 py-2 text-center tabular-nums">{r.shipping_count}</td>
                   <td className="px-3 py-2 text-right tabular-nums font-semibold">{fmt(r.order_price)}</td>
