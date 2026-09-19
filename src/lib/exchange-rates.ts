@@ -3,7 +3,7 @@ import { createAdminClient } from '@/lib/auth/admin-supabase'
 export type Currency = 'USD' | 'JPY' | 'CNY' | 'EUR'
 export const TRACKED_CURRENCIES: Currency[] = ['USD', 'JPY', 'CNY', 'EUR']
 
-// 네이버 금융 환율 테이블의 marketindexCd 매핑.
+// 네이버 증권 환율 상세 API(하나은행 고시 매매기준율)의 reutersCode 매핑.
 // JPY는 100엔 단위로 고시되므로 1엔 단위로 환산 저장.
 const NAVER_FX_CODE: Record<Currency, string> = {
   USD: 'FX_USDKRW',
@@ -56,48 +56,60 @@ function formatIsoDate(d: Date): string {
   return `${y}-${m}-${day}`
 }
 
-/**
- * 네이버 금융 고시환율 페이지에서 현재 매매기준율 조회.
- * 페이지는 euc-kr 인코딩이지만 marketindexCd·숫자 모두 ASCII라 바이트 보존(latin1) 디코딩이면 파싱 가능.
- */
-async function fetchNaverRates(): Promise<Map<Currency, number>> {
-  const res = await fetch('https://finance.naver.com/marketindex/exchangeList.naver', {
-    cache: 'no-store',
-    headers: { 'User-Agent': 'Mozilla/5.0 (compatible; jimscanner/1.0)' },
-  })
-  if (!res.ok) {
-    throw new Error(`네이버 금융 HTTP ${res.status}`)
+// 잘못된 코드도 HTTP 200 + isSuccess:false 로 오므로 상태 코드가 아니라 본문으로 성공을 판정한다.
+const NAVER_FX_DETAIL_URL = 'https://m.stock.naver.com/front-api/marketIndex/productDetail?category=exchange&reutersCode='
+
+// 고시 단위가 바뀌면(JPY 100엔↔1엔) 100배 틀린 값이 전 사이트 비용 계산에 들어가므로 1단위 원화 기준으로 거른다.
+const PLAUSIBLE_KRW: Record<Currency, [number, number]> = {
+  USD: [500, 5000],
+  JPY: [2, 50],
+  CNY: [50, 1000],
+  EUR: [500, 5000],
+}
+
+/** 네이버 증권 환율 상세 응답 → 1단위 원화 매매기준율. 형식·값이 이상하면 throw. */
+export function parseNaverFxDetail(body: unknown, currency: Currency): number {
+  const detail = body as { isSuccess?: unknown; result?: { reutersCode?: unknown; closePrice?: unknown } } | null
+  const result = detail?.isSuccess === true ? detail.result : undefined
+  if (!result || result.reutersCode !== NAVER_FX_CODE[currency]) {
+    throw new Error(`네이버 증권 응답 형식 변경 가능성 (${currency})`)
   }
-
-  const buf = await res.arrayBuffer()
-  const html = Buffer.from(buf).toString('latin1')
-
-  const rateMap = new Map<Currency, number>()
-  for (const currency of TRACKED_CURRENCIES) {
-    const code = NAVER_FX_CODE[currency]
-    const divisor = NAVER_UNIT_DIVISOR[currency]
-    const re = new RegExp(`marketindexCd=${code}[\\s\\S]*?<td class="sale">([\\d,.]+)</td>`)
-    const match = re.exec(html)
-    if (!match) continue
-    const raw = parseFloat(match[1].replace(/,/g, ''))
-    if (!Number.isFinite(raw) || raw <= 0) continue
-    rateMap.set(currency, raw / divisor)
+  const rate = parseFloat(String(result.closePrice ?? '').replace(/,/g, '')) / NAVER_UNIT_DIVISOR[currency]
+  const [min, max] = PLAUSIBLE_KRW[currency]
+  if (!Number.isFinite(rate) || rate < min || rate > max) {
+    throw new Error(`${currency} 환율 값 이상: ${String(result.closePrice)} (1단위 허용 ${min}~${max}원)`)
   }
+  return rate
+}
 
-  if (rateMap.size === 0) {
-    throw new Error('네이버 금융 응답에서 환율 파싱 실패 (페이지 구조 변경 가능성)')
-  }
-
-  return rateMap
+async function fetchNaverRates(): Promise<{ rates: Map<Currency, number>; errors: Map<Currency, string> }> {
+  const rates = new Map<Currency, number>()
+  const errors = new Map<Currency, string>()
+  await Promise.all(
+    TRACKED_CURRENCIES.map(async (currency) => {
+      try {
+        const res = await fetch(`${NAVER_FX_DETAIL_URL}${NAVER_FX_CODE[currency]}`, {
+          cache: 'no-store',
+          headers: { 'User-Agent': 'Mozilla/5.0 (compatible; jimscanner/1.0)' },
+          signal: AbortSignal.timeout(10_000),
+        })
+        if (!res.ok) throw new Error(`네이버 증권 HTTP ${res.status}`)
+        rates.set(currency, parseNaverFxDetail(await res.json(), currency))
+      } catch (err) {
+        errors.set(currency, err instanceof Error ? err.message : String(err))
+      }
+    }),
+  )
+  return { rates, errors }
 }
 
 /**
- * 현재 고시환율 반환. 네이버 금융이 1차 소스.
- * rateDate는 호출 시점의 날짜 (네이버 페이지엔 명시적 고시일 파싱이 어려움).
+ * 현재 고시환율 반환. 네이버 증권(하나은행 고시)이 1차 소스. 통화별로 따로 받아 한 통화 실패가 나머지를 막지 않는다.
+ * rateDate는 호출 시점의 KST 날짜.
  */
-export async function fetchLatestRates(): Promise<{ rates: Map<Currency, number>; rateDate: string }> {
-  const rates = await fetchNaverRates()
-  return { rates, rateDate: formatIsoDate(new Date()) }
+export async function fetchLatestRates(): Promise<{ rates: Map<Currency, number>; errors: Map<Currency, string>; rateDate: string }> {
+  const { rates, errors } = await fetchNaverRates()
+  return { rates, errors, rateDate: formatIsoDate(new Date()) }
 }
 
 type UpdateResult = {
@@ -109,7 +121,7 @@ type UpdateResult = {
 }
 
 /**
- * 추적 통화 전체를 한국수출입은행 매매기준율로 갱신.
+ * 추적 통화 전체를 네이버 증권(하나은행 고시) 매매기준율로 갱신.
  * - jimscanner_exchange_rates (현재값) upsert
  * - jimscanner_exchange_rate_logs (운영 로그) insert
  * - jimscanner_exchange_rate_history (영업일별 트렌드) upsert
@@ -118,17 +130,8 @@ export async function updateAllRates(triggeredBy: string): Promise<UpdateResult[
   const supabase = createAdminClient()
   const results: UpdateResult[] = []
 
-  let rateMap: Map<Currency, number> | null = null
-  let rateDate: string | null = null
-  let fetchError: string | null = null
-
-  try {
-    const latest = await fetchLatestRates()
-    rateMap = latest.rates
-    rateDate = latest.rateDate
-  } catch (err) {
-    fetchError = err instanceof Error ? err.message : String(err)
-  }
+  // 통화별 실패는 errors 로 돌아오므로 여기서는 throw 하지 않는다.
+  const { rates: rateMap, errors: rateErrors, rateDate } = await fetchLatestRates()
 
   for (const currency of TRACKED_CURRENCIES) {
     let previousRate: number | null = null
@@ -142,12 +145,9 @@ export async function updateAllRates(triggeredBy: string): Promise<UpdateResult[
 
       previousRate = existing?.rate_krw ?? null
 
-      if (fetchError) throw new Error(fetchError)
-      if (!rateMap || !rateDate) throw new Error('환율 데이터 로드 실패')
-
       const newRate = rateMap.get(currency)
       if (newRate == null) {
-        throw new Error(`API 응답에 ${currency} 환율이 없습니다.`)
+        throw new Error(rateErrors.get(currency) ?? `API 응답에 ${currency} 환율이 없습니다.`)
       }
 
       const rounded = Math.round(newRate * 10000) / 10000
