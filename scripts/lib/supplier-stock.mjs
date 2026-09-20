@@ -107,17 +107,23 @@ export async function mallLogin(session, { base, user, pass, label }) {
 }
 
 /**
- * 상용몰 상품 재고 — goods_view.php 라이브 조회.
- *   1) set_goods_price 가 양수면 구매 가능(품절이면 가격영역이 사라진다) — 가장 신뢰도 높은 신호
- *   2) 가격이 없을 때만 품절 문구로 판정. ggsan 네비의 "입고&품절제품" 메뉴 오탐은 제거한다.
+ * 상용몰 상품 재고 — goods_view.php 라이브 조회. 판정 근거는 고도몰5 구매영역 마크업 하나뿐이다.
+ *   품절: <div class="btn_choice_box btn_restock_box"><button class="btn_add_soldout" disabled>구매 불가</button>
+ *   정상: <div class="btn_choice_box"> … <button id="cartBtn" class="btn_add_cart">장바구니</button>
+ *
+ * ⚠ set_goods_price 를 쓰면 안 된다(2026-09-20 전수 실측).
+ *   "품절이면 가격영역이 사라진다"는 전제가 틀렸다 — 고도몰5 는 품절이어도 히든 가격이 그대로 남고
+ *   화면에 정가까지 표시되는 상품도 있다. 그 값으로 조기 리턴하는 바람에 상용몰 품절 감지가
+ *   2026-07-30 이후 0건이었고(ggsan 18건·77바이오 4건이 품절인 채 쿠팡 판매중),
+ *   in_stock 판정이 ensureQuantity 를 불러 품절 상품 수량을 매시간 되채우기까지 했다.
+ *   품절 '문구' 역시 상세설명 배너에 흔해 쓸 수 없다.
  */
 export async function mallCheckStock(session, base, goodsNo) {
   const r = await session.fx(`${base}/goods/goods_view.php?goodsNo=${goodsNo}`)
   if (!r.ok) return 'unknown'
   const html = await r.text()
-  const pm = /name=["']set_goods_price["'][^>]*value=["'](\d+)/.exec(html)
-  if (pm && parseInt(pm[1], 10) > 0) return 'in_stock'
-  const body = html.replace(/입고\s*&[^<]{0,12}품절[^<]{0,8}/g, ' ')
-  if (/재입고\s*알림|품절|매진|일시품절|판매\s*중지/.test(body.slice(0, 40000))) return 'sold_out'
-  return 'unknown'
+  // 품절 마커를 먼저 본다 — 품절 페이지에도 btn_add_cart 가 스크립트/하단바에 남아 있다.
+  if (/btn_restock_box|btn_add_soldout/.test(html)) return 'sold_out'
+  if (/id=["']cartBtn["']|class=["']btn_add_cart["']/.test(html)) return 'in_stock'
+  return 'unknown'  // 삭제·비공개 상품 등 — 확인 불가일 때는 아무 조치도 하지 않는다
 }
