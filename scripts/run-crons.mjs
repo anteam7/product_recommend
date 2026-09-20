@@ -2,8 +2,8 @@
 /**
  * 로컬 cron runner — Vercel Hobby 플랜의 cron 한도 우회용.
  *
- * 현재는 환율/요율(update-rates)과 배송료(refresh-shipping-rates) 갱신만
- * 수행한다. (트렌드 수집/LLM 분류 cron은 비활성화되어 제거됨)
+ * 현재는 환율(update-rates — 이 배포의 HTTP cron)과 배대지 요율(refresh-shipping-rates — 메인 레포의
+ * 수집 배치를 로컬에서 실행, 2026-09-20~) 갱신을 수행한다. (트렌드 수집/LLM 분류 cron은 비활성화되어 제거됨)
  *
  * 사용법:
  *   node --env-file=.env.local scripts/run-crons.mjs              # 전체 실행
@@ -24,8 +24,15 @@ const BASE_URL =
 
 const CRONS = [
   '/api/cron/update-rates',
-  '/api/cron/refresh-shipping-rates',
 ]
+
+// 배대지 요율 수집(refresh-shipping-rates)은 HTTP 호출이 아니라 **메인 레포의 수집 배치**를 돌린다 (2026-09-20 사장님 지시).
+//   예전에는 이 배포(product-recommend-nine)의 /api/cron/refresh-shipping-rates 를 불렀는데, 이 레포의 수집기 사본이 낡아서
+//   메인에서 고친 요율을 매일 03:30 에 되돌렸다 — 해운 요금을 '항공'으로 싣고(10곳), 몰테일 일본·중국에 NJ 행을 다시 넣고,
+//   메인에서 꺼 둔 bidpot 을 계속 받고, 급변 가드도 없다. 수집기는 메인 레포 한 곳에만 둔다.
+//   다른 단계(환율·ops-sweep·소싱·비셀러)의 순서·시각에 영향이 없도록 **맨 마지막**에 돌린다(파일 끝 참고).
+const LOCAL_STEPS = ['refresh-shipping-rates']
+const MAIN_REPO = process.env.JIMSCANNER_MAIN_REPO ?? 'C:/Web/jimscanner/jimpass-agent-platform'
 
 const SECRET = process.env.CRON_SECRET
 if (!SECRET) {
@@ -37,15 +44,18 @@ const args = process.argv.slice(2)
 if (args.includes('--list')) {
   console.log('Registered cron endpoints:')
   for (const p of CRONS) console.log(`  ${p}`)
+  console.log('Local steps (메인 레포 배치):')
+  for (const s of LOCAL_STEPS) console.log(`  ${s}`)
   process.exit(0)
 }
 
 const filter = args[0]
-const targets = filter
-  ? CRONS.filter((p) => p.endsWith(filter) || p === filter || p.includes(filter))
-  : CRONS
+const matches = (name) => name.endsWith(filter) || name === filter || name.includes(filter)
+const targets = filter ? CRONS.filter(matches) : CRONS
+// 이름을 지정해 돌릴 때는 그 단계만 — 지정이 없으면 전부
+const runShippingRates = filter ? LOCAL_STEPS.some(matches) : true
 
-if (targets.length === 0) {
+if (targets.length === 0 && !runShippingRates) {
   console.error(`No cron matched filter: ${filter}`)
   console.error('Run with --list to see available cron paths.')
   process.exit(1)
@@ -179,6 +189,59 @@ try {
   if (stderr) process.stderr.write(stderr)
 } catch (e) {
   console.error('[beseller-refresh] 실행 실패:', e instanceof Error ? e.message : String(e))
+}
+
+// 배대지 요율 수집 — 메인 레포의 배치를 그대로 돌린다(맨 위 LOCAL_STEPS 주석 참고). 맨 마지막이라 앞 단계에 영향이 없다.
+//   --days 0 = 수집기가 있는 배대지 전부. 메인의 수집기·급변 가드·WSL/Windows 실행 분기를 그대로 쓴다.
+//   메인의 04:30 작업(JimScanner Rate Refresh Daily)은 여기서 못 받은 곳만 다시 받는 안전망으로 남는다.
+if (runShippingRates) {
+  console.log(`[${new Date().toISOString()}] 배대지 요율 수집(메인 레포 배치) 시작...`)
+  const startedAt = Date.now()
+  try {
+    const fs = await import('node:fs')
+    const path = await import('node:path')
+    const { spawn } = await import('node:child_process')
+    const script = path.join(MAIN_REPO, 'scripts', 'cron', 'refresh-stale-rates-daily.mjs')
+    if (!fs.existsSync(script)) throw new Error(`메인 레포 배치를 찾지 못했습니다: ${script}`)
+
+    // 이 러너는 personal 레포의 .env.local 을 물고 돈다. 메인 배치의 하위 실행기는 "이미 있는 환경변수는 덮어쓰지 않는다" —
+    // 그대로 넘기면 메인 배치가 personal 쪽 키로 돌 수 있으므로, 이 레포 .env.local 에서 온 키는 빼고 넘긴다(메인이 자기 .env.local 을 읽는다).
+    const childEnv = { ...process.env }
+    try {
+      const text = fs.readFileSync(new URL('../.env.local', import.meta.url), 'utf8')
+      for (const line of text.split(/\r?\n/)) {
+        const i = line.indexOf('=')
+        if (i > 0 && !line.trimStart().startsWith('#')) delete childEnv[line.slice(0, i).trim()]
+      }
+    } catch (e) {
+      // .env.local 을 못 읽으면 그대로 넘긴다 — 메인 배치는 자기 .env.local 로 DB 에 붙는다
+      console.error('[shipping-rates] 이 레포 .env.local 을 읽지 못해 환경변수를 그대로 넘깁니다:', e instanceof Error ? e.message : String(e))
+    }
+
+    const code = await new Promise((resolve, reject) => {
+      const child = spawn(process.execPath, [script, '--days', '0'], { cwd: MAIN_REPO, env: childEnv, stdio: ['ignore', 'inherit', 'inherit'] })
+      const timer = setTimeout(() => {
+        // 배치는 하위 프로세스(npx → tsx → node, 브라우저)를 띄운다 — Windows 에서는 트리째 끝내야 남는 게 없다
+        if (process.platform === 'win32' && child.pid) spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { stdio: 'ignore' })
+        else child.kill('SIGTERM')
+        reject(new Error('45분 안에 끝나지 않아 중단했습니다'))
+      }, 45 * 60_000)
+      child.on('error', (e) => {
+        clearTimeout(timer)
+        reject(e)
+      })
+      child.on('close', (c) => {
+        clearTimeout(timer)
+        resolve(c)
+      })
+    })
+    const tag = code === 0 ? 'OK ' : 'ERR'
+    console.log(`  ${tag} exit=${code} ${String(Date.now() - startedAt).padStart(6)}ms  refresh-shipping-rates (메인 레포 배치)`)
+    if (code !== 0) failCount++
+  } catch (e) {
+    failCount++
+    console.error('[shipping-rates] 실행 실패:', e instanceof Error ? e.message : String(e))
+  }
 }
 
 process.exit(failCount > 0 ? 1 : 0)
