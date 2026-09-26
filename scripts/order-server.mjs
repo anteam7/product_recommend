@@ -54,7 +54,10 @@ function adminCors(req) {
 }
 
 // 자동주문 지원 매입처 (listings.source → 표시명)
-const SUPPORTED_SOURCES = { ggsan: '건강산', upickb2b: '유픽B2B', bio77: '77바이오' }
+// ⚠ 새 매입처를 넣으면 execPurchase의 RUN_FLOWS 분기와 coupang-orders/page.tsx PURCHASE_AUTOMATED_SOURCES도 같이 고칠 것
+const SUPPORTED_SOURCES = { ggsan: '건강산', upickb2b: '유픽B2B', bio77: '77바이오', wellroot: '웰루트' }
+// 예치금 결제 매입처 — 완주 = 예치금 즉시 차감(실결제)이라 결과 상태가 입금대기가 아니라 발주완료(ORDERED)
+const DEPOSIT_PAY_SOURCES = new Set(['wellroot'])
 
 // 주문 → 매입처(source) + goods_no + 수령인 해석
 // id 자동 판별: 쿠팡 order_id 우선 → 없으면 네이버 product_order_id (체계가 달라 충돌 없음)
@@ -505,11 +508,196 @@ async function runFlowBio77(goodsNo, qty, recipient, full = null) {
   return { ok: true, done: true, orderNo, total: grandTotal, virtualAccount: va, msg: `77bio 주문 완료 — 주문번호 ${orderNo ?? '(확인필요)'}${vaNote}` }
 }
 
+// Playwright: 웰루트B2B(Cafe24) 주문서 자동 작성 → 결제 직전 정지 / full 지정 시 예치금 전액결제 완주
+// 필드 구조는 scripts/_wellroot-order-probe.mjs 정찰 결과 기준(2026-09-26). 유픽과 같은 Cafe24 orderform이지만:
+//  - 웰루트는 **예치금으로만 결제 가능**, 예치금으로 결제되지 않은 주문은 자동 취소된다(주문서 안내문).
+//    예치금 전액 적용 후 결제금액이 0원인 상태에서 [결제하기] = 주문 완료. 무통장 주문을 만들면 안 된다.
+//  - #all_use_deposit([사용]) = 보유 예치금 전액 적용(잔액 0이면 0), 잔액 초과 입력 시 "사용가능 예치금보다 많습니다." 경고.
+//  - 배송지는 라디오(#sameaddr1 = 새로운 배송지, 기본 선택), 전화는 select+2칸 분리(rphone1_=일반전화, rphone2_=휴대전화).
+//  - 로그인은 AuthSSL 암호화 — 스킨 스크립트가 로드 직후 입력값을 지워 load 대기 + 값 확인 재입력 필요(wellroot-collect와 동일).
+const WELLROOT_BASE = env.WELLROOT_BASE_URL || 'https://wellrootb2b.com'
+async function runFlowWellroot(goodsNo, qty, recipient, detailUrl, full = null) {
+  const dialogs = []
+  // "동일상품이 장바구니에 N개 있습니다. 함께 구매하시겠습니까?" → 취소(현재 선택 수량만) — 수락하면 잔여 장바구니가 합산됨
+  const { ctx, page } = await openBrowser((d) => { dialogs.push(d.message()); return /함께 구매/.test(d.message()) ? d.dismiss() : d.accept() })
+  if (full) full.ctxRef = ctx
+  const lastDialog = () => (dialogs.length ? ` (사이트 메시지: ${dialogs[dialogs.length - 1].replace(/\s+/g, ' ').slice(0, 80)})` : '')
+
+  // 1) 로그인
+  await page.goto(`${WELLROOT_BASE}/member/login.html`, { waitUntil: 'load', timeout: 45000 })
+  for (let i = 0; i < 4; i++) {
+    await page.waitForTimeout(600)
+    await page.locator('#member_id').fill(env.WELLROOT_USER)
+    await page.locator('#member_passwd').fill(env.WELLROOT_PASS)
+    if ((await page.locator('#member_id').inputValue()) === env.WELLROOT_USER && (await page.locator('#member_passwd').inputValue()) === env.WELLROOT_PASS) break
+  }
+  await Promise.all([
+    page.waitForURL((u) => !/\/member\/login\.html/.test(u.toString()), { timeout: 30000 }).catch(() => {}),
+    page.press('#member_passwd', 'Enter'),
+  ])
+  if (/member\/login/.test(page.url())) return { ok: false, msg: `웰루트 로그인 실패 — 자격증명(WELLROOT_USER/PASS) 확인 필요${lastDialog()}` }
+  // 2) 상품 페이지 + 수량
+  await page.goto(detailUrl || `${WELLROOT_BASE}/product/detail.html?product_no=${goodsNo}`, { waitUntil: 'domcontentloaded', timeout: 30000 })
+  await page.waitForTimeout(1500)
+  if (qty > 1) await page.evaluate((q) => { const el = document.querySelector('input#quantity, input[name="quantity_opt[]"]'); if (el) { el.value = String(q); el.dispatchEvent(new Event('change', { bubbles: true })); el.dispatchEvent(new Event('blur', { bubbles: true })) } }, qty)
+  // 3) [제품구매하기] = product_submit(1, ...) → 주문서
+  await page.evaluate(() => {
+    const b = [...document.querySelectorAll('a, button')].find((x) => /product_submit\(\s*1\s*,/.test(x.getAttribute('onclick') || '') && x.offsetParent !== null)
+      || [...document.querySelectorAll('a, button, input')].find((x) => /^(제품\s*구매하기|구매하기|바로\s*구매|BUY IT NOW)$/i.test((x.innerText || x.value || '').trim()) && x.offsetParent !== null)
+    if (b) { b.scrollIntoView({ block: 'center' }); b.click() }
+  })
+  await page.waitForURL(/\/order\/orderform/, { timeout: 15000 }).catch(() => {})
+  await page.waitForTimeout(2000)
+  const op = ctx.pages().find((p) => /\/order\/orderform/.test(p.url())) || page
+  if (!/\/order\/orderform/.test(op.url())) return { ok: false, msg: `주문서로 이동 실패 — 품절/옵션 필요 여부 확인${lastDialog()}` }
+  // 4) 배송지 = 새로운 배송지 (기본 선택이지만, 아니면 선택 후 Cafe24 클리어 핸들러가 끝날 때까지 0.8초 대기 — 유픽 교훈)
+  const newAddr = op.locator('#sameaddr1')
+  if ((await newAddr.count()) && !(await newAddr.isChecked().catch(() => true))) { await newAddr.click({ force: true }); await op.waitForTimeout(800) }
+  const fillIf = async (sel, v) => { const l = op.locator(sel).first(); if (await l.count()) { await l.evaluate((el) => el.removeAttribute('readonly')); await l.fill(v ?? '').catch(() => {}) } }
+  await fillIf('#rname', recipient.name)
+  await fillIf('#rzipcode1', recipient.zip)
+  await fillIf('#raddr1', recipient.addr1)
+  await fillIf('#raddr2', recipient.addr2)
+  // 전화(select 국번 + 2칸) — 국번은 select 옵션 중 가장 긴 접두사로 매칭(0502 등 안심번호 포함).
+  // 휴대전화칸은 주문자(본인) 번호로 프리필돼 있어, 매칭 안 되면 비워 둔다(수령인 번호가 본인 번호로 나가는 것 방지).
+  await op.evaluate(({ rcp, biz, contact }) => {
+    const fire = (el) => { el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })) }
+    const setVal = (sel, v) => { const el = document.querySelector(sel); if (el) { el.removeAttribute('readonly'); el.value = v; fire(el) } }
+    const setPhone = (prefix, digitsRaw) => {
+      const sel = document.getElementById(`${prefix}1`)
+      const d = String(digitsRaw || '').replace(/\D/g, '')
+      const head = sel && d ? [...sel.options].map((o) => o.value).filter((v) => /^\d+$/.test(v) && d.startsWith(v)).sort((a, b) => b.length - a.length)[0] : null
+      const rest = head ? d.slice(head.length) : ''
+      if (!head || rest.length < 7 || rest.length > 8) {
+        setVal(`#${prefix}2`, ''); setVal(`#${prefix}3`, '')
+        return false
+      }
+      sel.value = head; fire(sel)
+      setVal(`#${prefix}2`, rest.slice(0, rest.length - 4)); setVal(`#${prefix}3`, rest.slice(-4))
+      return true
+    }
+    setPhone('rphone1_', rcp.phone)
+    setPhone('rphone2_', rcp.phone)
+    // 세금계산서 신청(제품 구매시) + 개인사업자 + 사업자 정보 — 셀렉터는 유픽(Cafe24)과 동일
+    const tx = document.querySelector('#tax_request_regist0'); if (tx && !tx.checked) tx.click()
+    const ty = document.querySelector('#tax_request_company_type0'); if (ty && !ty.checked) ty.click()
+    setVal('#tax_request_company_regno', biz.busiNo); setVal('#tax_request_company_name', biz.company); setVal('#tax_request_president_name', biz.ceo)
+    setVal('#tax_request_company_condition', biz.service); setVal('#tax_request_company_line', biz.item)
+    setVal('#tax_request_zipcode', biz.zip); setVal('#tax_request_address1', biz.addr1); setVal('#tax_request_address2', biz.addr2)
+    setVal('#tax_request_name', biz.ceo)
+    if (contact) setPhone('tax_request_phone', contact) // 담당자 연락처(.env.local ORDER_CONTACT_PHONE) — id가 tax_request_phone1/2/3
+  }, { rcp: recipient, biz: BIZ_INFO, contact: env.ORDER_CONTACT_PHONE || '' })
+
+  // 5) 예치금 — 결제 전 금액·잔액을 읽고 [사용](전액 적용). 직전정지 모드에서도 적용까지는 해 둔다(주문 생성 아님).
+  const readPay = () => op.evaluate(() => {
+    const num = (s) => { const m = /([\d,]+)\s*원?/.exec(String(s || '')); return m ? parseInt(m[1].replace(/,/g, ''), 10) : null }
+    const btn = num(document.querySelector('#btn_payment')?.innerText)                          // "11,800원 결제하기" → 남은 결제금액
+    const order = num(document.querySelector('#payment_total_order_sale_price_view')?.innerText) // 예치금 차감 전 주문총액(상품+배송)
+    // 예치금 보유잔액: span.summary "보유 잔액 N원" 중 적립금 영역(#mileage_use_area) 밖의 것
+    const balSpan = [...document.querySelectorAll('.summary')].find((e) => /보유\s*잔액/.test(e.textContent || '') && !e.closest('#mileage_use_area'))
+    let balance = balSpan ? num((balSpan.textContent || '').replace(/^[^\d]*/, '')) : null
+    if (balance == null) { const m = /예치금\s*사용\s*보유\s*잔액\s*([\d,]+)\s*원/.exec(document.body.innerText); balance = m ? parseInt(m[1].replace(/,/g, ''), 10) : null }
+    const used = num(document.querySelector('#input_deposit')?.value)
+    return { btn, order, balance, used }
+  }).catch(() => ({ btn: null, order: null, balance: null, used: null }))
+  const pre = await readPay()
+  // 차감 전 주문총액 = 실제 매입원가(상품+배송). 예치금이 이미 적용된 채 열려도 (남은 결제액 + 적용액)으로 복원.
+  const orderTotal = Math.max(pre.order ?? 0, (pre.btn ?? 0) + (pre.used ?? 0)) || null
+  await op.evaluate(() => document.querySelector('#all_use_deposit')?.click()).catch(() => {})
+  await op.waitForTimeout(1500)
+  let post = await readPay()
+  // [사용]이 전액을 못 채웠고 잔액은 충분하면 금액 직접 입력으로 한 번 더(스킨별 동작 차이 대비)
+  if (post.btn > 0 && orderTotal > 0 && post.balance >= orderTotal) {
+    await op.locator('#input_deposit').fill(String(orderTotal)).catch(() => {})
+    await op.evaluate(() => { const e = document.querySelector('#input_deposit'); e?.dispatchEvent(new Event('change', { bubbles: true })); e?.dispatchEvent(new Event('blur', { bubbles: true })) })
+    await op.waitForTimeout(1500)
+    post = await readPay()
+  }
+  const depositNote = `예치금 잔액 ${pre.balance?.toLocaleString() ?? '?'}원 · 주문액 ${orderTotal?.toLocaleString() ?? '?'}원 · 적용 후 결제금액 ${post.btn?.toLocaleString() ?? '?'}원`
+  await op.bringToFront().catch(() => {})
+  if (!full) {
+    const short = post.btn !== 0 ? ' ⚠ 예치금이 부족해 결제금액이 남아 있습니다 — 충전 후 [사용]을 다시 누르세요(예치금 미결제 주문은 자동 취소됨).' : ''
+    return { ok: true, msg: `주문서 작성 완료 — 열린 웰루트 창에서 결제금액 0원(예치금 전액 적용) 확인 후 [결제하기]를 직접 누르세요. ${depositNote}${short}` }
+  }
+
+  // ── 완주(예치금): 금액 가드 → 잔액 가드 → 결제금액 0원 확인 → 동의 → 결제하기 → 주문번호 파싱 ──
+  // 무통장과 달리 [결제하기] = 예치금 즉시 차감(실결제). 그래서 결제금액이 정확히 0원일 때만 누른다.
+  const g = guardFail('웰루트', orderTotal, full.maxPay) // orderTotal=null(파싱 실패·0원)이면 여기서 중단
+  if (g) return { ok: false, msg: g }
+  if (pre.balance == null) return { ok: false, msg: '예치금 잔액 파싱 실패 — 완주 중단. 열린 웰루트 창에서 직접 확인하세요' }
+  if (pre.balance < orderTotal) return { ok: false, msg: `예치금 부족 — 잔액 ${pre.balance.toLocaleString()}원 < 주문액 ${orderTotal.toLocaleString()}원. 웰루트 예치금을 충전한 뒤 다시 결제진행하세요(예치금으로 결제되지 않은 주문은 자동 취소됨)` }
+  if (post.btn !== 0) return { ok: false, msg: `예치금 적용 후에도 결제금액이 0원이 아님(${depositNote}) — 완주 중단(열린 창에서 확인)${lastDialog()}` }
+  // 결제금액 0원이어도 무통장 입력칸(입금은행·입금자명 '필수')이 남아 있으면 검증에 걸리므로 채워 둔다.
+  // 결제금액 0원이 확인된 뒤라 무통장 입금 의무는 생기지 않는다.
+  await op.evaluate((dep) => {
+    const box = document.querySelector('#payment_input_cash')
+    if (!box || box.offsetParent === null) return
+    const cash = document.querySelector('#addr_paymethod0')
+    if (cash && !cash.checked) { cash.checked = true; cash.click(); cash.dispatchEvent(new Event('change', { bubbles: true })) }
+    const sel = document.querySelector('select#bankaccount')
+    if (sel && (!sel.value || sel.value === '-1')) { const o = [...sel.options].find((x) => x.value && x.value !== '-1'); if (o) { sel.value = o.value; sel.dispatchEvent(new Event('change', { bubbles: true })) } }
+    const pn = document.querySelector('#pname')
+    if (pn && !pn.value) { pn.value = dep.depositorName; pn.dispatchEvent(new Event('input', { bubbles: true })); pn.dispatchEvent(new Event('change', { bubbles: true })) }
+  }, GGSAN_DEPOSIT)
+  // 약관 — 웰루트는 동의 체크박스가 대부분 disabled/숨김(실측). 활성·표시된 [필수]만 체크(숨은 비회원가입 동의 등은 건드리지 않음)
+  await op.evaluate(() => {
+    const shown = (c) => c.offsetParent !== null || document.querySelector(`label[for="${c.id}"]`)?.offsetParent != null
+    const all = document.querySelector('#allAgree')
+    if (all && !all.disabled && !all.checked && shown(all)) all.click()
+    for (const c of document.querySelectorAll('input[type=checkbox]')) {
+      const lab = (document.querySelector(`label[for="${c.id}"]`)?.innerText || c.parentElement?.innerText || '')
+      if (/\[필수\]/.test(lab) && !c.checked && !c.disabled && shown(c)) c.click()
+    }
+  })
+  await op.waitForTimeout(500)
+  // 클릭 직전 재확인 — 그 사이 금액이 바뀌었으면 누르지 않는다
+  const last = await readPay()
+  if (last.btn !== 0) return { ok: false, msg: `결제 직전 재확인에서 결제금액 ${last.btn?.toLocaleString() ?? '?'}원 — 완주 중단(열린 창에서 확인)` }
+  await op.evaluate(() => document.querySelector('#btn_payment')?.click())
+  await op.waitForTimeout(1800)
+  // Cafe24 확인 레이어(같은 결제하기 버튼)가 뜨면 한 번 더
+  await op.evaluate(() => { const b = document.querySelector('#ec-shop_btn_layer_payment'); if (b && b.offsetParent !== null) b.click() }).catch(() => {})
+  const done = await op.waitForURL(/order_result/i, { timeout: 45000 }).then(() => true).catch(() => false)
+  await op.waitForTimeout(1500)
+  const orderNo = await op.evaluate(() => {
+    const q = new URL(location.href).searchParams.get('order_id')
+    if (q) return q
+    const m = /주문\s*번호[^\d]{0,12}(\d{8}-\d{6,9})/.exec(document.body.innerText)
+    return m ? m[1] : null
+  }).catch(() => null)
+  if (!done && !orderNo) return { ok: false, msg: `결제하기 이후 완료 페이지 확인 실패 — 열린 웰루트 창에서 주문 상태를 직접 확인하세요${lastDialog()}` }
+  const balanceAfter = pre.balance - orderTotal
+  return {
+    ok: true, done: true, depositPaid: true, orderNo, total: orderTotal, depositBalanceAfter: balanceAfter,
+    msg: `웰루트 예치금 결제 완료 — 주문번호 ${orderNo ?? '(파싱 실패, 창에서 확인)'} · ${orderTotal.toLocaleString()}원 차감 · 예치금 잔액 약 ${balanceAfter.toLocaleString()}원`,
+  }
+}
+
+// 쿠팡 발주확인(결제완료→상품준비중) 잡 등록 — 이 프로세스의 쿠팡 잡 폴러(3초)가 실행. update 라우트의 ORDERED 전환과 같은 효과.
+async function enqueueCoupangAck(orderId) {
+  const orderKey = String(orderId)
+  const { data: dup } = await sb.from('jimscanner_purchase_jobs').select('id').eq('order_key', orderKey).eq('mode', 'coupang_ack').in('status', ['queued', 'running']).limit(1)
+  if (dup?.length) return { ok: true, jobId: dup[0].id }
+  const { data: job, error } = await sb.from('jimscanner_purchase_jobs').insert({ order_key: orderKey, mode: 'coupang_ack', requested_by: 'order-server' }).select('id').single()
+  return error ? { ok: false, error: error.message } : { ok: true, jobId: job.id }
+}
+
 // ── 결제진행 실행(공용) — /run 핸들러와 원격 큐 폴러가 같이 쓴다 ──
 // fullMode=true: 무통장 완주 + 입금대기·주문번호·매입가 DB 기록. false: 직전 정지.
+const RUN_FLOWS = {
+  ggsan: (r, full) => runFlowGgsan(r.goodsNo, r.order.shipping_count, r.recipient, full),
+  upickb2b: (r, full) => runFlowUpick(r.goodsNo, r.order.shipping_count, r.recipient, r.detailUrl, full),
+  bio77: (r, full) => runFlowBio77(r.goodsNo, r.order.shipping_count, r.recipient, full),
+  wellroot: (r, full) => runFlowWellroot(r.goodsNo, r.order.shipping_count, r.recipient, r.detailUrl, full),
+}
 async function execPurchase(orderKey, fullMode) {
   const r = await resolveOrder(orderKey)
   if (r.error) return { ok: false, msg: r.error }
+  // 흐름이 없는 매입처는 거부 — 예전엔 기본값이 ggsan이라 분기 누락 시 ggsan 주문서로 오발주될 수 있었다
+  const runFlow = RUN_FLOWS[r.source]
+  if (!runFlow) return { ok: false, msg: `자동주문 흐름 미구현 매입처(${r.source})` }
+  // 예치금 결제 매입처는 완주 후 쿠팡 발주확인까지 자동 연결하므로 쿠팡 주문만 허용(웰루트는 쿠팡에만 등록됨)
+  if (DEPOSIT_PAY_SOURCES.has(r.source) && r.kind !== 'coupang') return { ok: false, msg: `${r.sourceLabel} 자동주문은 쿠팡 주문만 지원합니다 — 매입처에서 직접 주문하세요` }
   let full = null
   if (fullMode) {
     // 금액 가드 상한 — 고객결제액·예상공급가 중 큰 쪽 기준(둘 다 없으면 완주 거부)
@@ -520,17 +708,15 @@ async function execPurchase(orderKey, fullMode) {
     if (!maxPay) return { ok: false, msg: '금액 가드 기준 없음(고객 결제액·공급가 미상) — 완주 불가. 직전 정지 모드로 진행 후 직접 결제하세요' }
     full = { maxPay }
   }
-  const out = r.source === 'upickb2b'
-    ? await runFlowUpick(r.goodsNo, r.order.shipping_count, r.recipient, r.detailUrl, full)
-    : r.source === 'bio77'
-      ? await runFlowBio77(r.goodsNo, r.order.shipping_count, r.recipient, full)
-      : await runFlowGgsan(r.goodsNo, r.order.shipping_count, r.recipient, full)
+  const out = await runFlow(r, full)
   out.sourceLabel = r.sourceLabel
   out.ctxRef = full?.ctxRef ?? null   // 원격 잡이 완료 후 브라우저를 닫을 수 있게 노출
-  // 완주 성공 → 주문상태=입금대기 + 매입처 주문번호·매입가 자동 기록
+  // 완주 성공 → 주문상태=입금대기(무통장/가상계좌) 또는 발주완료(예치금 = 이미 결제됨) + 매입처 주문번호·매입가 자동 기록
   if (out.ok && out.done) {
     const now = new Date().toISOString()
-    const upd = { purchase_status: 'AWAITING_DEPOSIT', purchase_ordered_at: now, updated_at: now }
+    const upd = { purchase_status: out.depositPaid ? 'ORDERED' : 'AWAITING_DEPOSIT', purchase_ordered_at: now, updated_at: now }
+    // 기존 메모(주문별 매입처 변경 기록 등)는 보존하고 뒤에 붙인다 (r.order = resolveOrder의 select * 행)
+    if (out.depositPaid) upd.purchase_note = [r.order.purchase_note, `[예치금] ${out.total?.toLocaleString() ?? '?'}원 결제완료 · 잔액 약 ${out.depositBalanceAfter?.toLocaleString() ?? '?'}원`].filter(Boolean).join(' / ')
     if (out.total > 0) upd.purchase_total_cost = out.total
     // purchase_unit_cost를 안 채우면 어드민 PurchaseCostCell이 "운송비 = 합계 - 상품가×수량"으로 역산하면서
     // 상품가가 0 → 총 결제금액 전체가 운송비 칸에 들어가 보이는 문제가 있었다(2026-09-02 사용자 리포트,
@@ -559,6 +745,11 @@ async function execPurchase(orderKey, fullMode) {
       if (out.orderNo) upd.ggsan_order_no = out.orderNo
       const { error } = await sb.from('jimscanner_coupang_orders').update(upd).eq('order_id', r.dbKey)
       if (error) out.msg += ` (⚠ DB 기록 실패: ${error.message} — 관리자에서 수동 입력)`
+      // 예치금 결제 = 발주완료 → 관리자 [입금완료] 클릭과 같은 효과로 쿠팡 발주확인 잡을 바로 등록
+      if (!error && out.depositPaid) {
+        const ack = await enqueueCoupangAck(r.dbKey)
+        out.msg += ack.ok ? ` · 쿠팡 발주확인 잡#${ack.jobId} 등록` : ` (⚠ 쿠팡 발주확인 잡 등록 실패: ${ack.error} — 관리자에서 처리)`
+      }
     }
   }
   return out
@@ -676,16 +867,20 @@ http.createServer(async (req, res) => {
         <tr><td style="padding:6px 8px;color:#666">매입처</td><td style="padding:6px 8px">${esc(r.sourceLabel)} #${esc(r.goodsNo)}</td></tr>
         <tr><td style="padding:6px 8px;color:#666">수령인</td><td style="padding:6px 8px"><b>${esc(r.recipient.name)}</b> · ${esc(r.recipient.zip)}<br>${esc(r.recipient.addr1)} ${esc(r.recipient.addr2)}<br>${esc(r.recipient.phone)}</td></tr>
         </tbody></table>
-        <p style="background:#fef3c7;color:#92400e;padding:10px 12px;border-radius:8px">⚠ 두 방식 모두 <b>출금은 없습니다</b>(무통장입금). <b>완주</b>는 동의·결제하기까지 자동 진행해 주문을 생성하고 주문상태를 <b>💰입금대기</b>로 기록합니다 — 입금(이체)은 직접 하신 뒤 관리자에서 [입금완료]로 바꾸세요.</p>
+        ${DEPOSIT_PAY_SOURCES.has(r.source)
+          ? `<p style="background:#fee2e2;color:#991b1b;padding:10px 12px;border-radius:8px">⚠ ${esc(r.sourceLabel)}는 <b>예치금으로만 결제</b>됩니다. <b>완주</b>는 예치금을 전액 적용해 결제금액이 <b>0원일 때만</b> [결제하기]를 누르며, 이때 <b>예치금이 즉시 차감</b>됩니다(잔액이 모자라면 누르지 않고 중단). 완료되면 주문상태를 <b>발주완료</b>로 기록하고 쿠팡 발주확인(상품준비중)까지 자동 등록합니다.</p>`
+          : `<p style="background:#fef3c7;color:#92400e;padding:10px 12px;border-radius:8px">⚠ 두 방식 모두 <b>출금은 없습니다</b>(무통장입금). <b>완주</b>는 동의·결제하기까지 자동 진행해 주문을 생성하고 주문상태를 <b>💰입금대기</b>로 기록합니다 — 입금(이체)은 직접 하신 뒤 관리자에서 [입금완료]로 바꾸세요.</p>`}
         <p style="display:flex;gap:10px;flex-wrap:wrap">
-        <a href="/run?id=${esc(u.searchParams.get('id'))}&mode=full" style="display:inline-block;background:#059669;color:#fff;padding:12px 24px;border-radius:8px;text-decoration:none;font-weight:600">💳 결제 완주 (무통장 주문완료 + 입금대기 기록)</a>
+        <a href="/run?id=${esc(u.searchParams.get('id'))}&mode=full" style="display:inline-block;background:#059669;color:#fff;padding:12px 24px;border-radius:8px;text-decoration:none;font-weight:600">${DEPOSIT_PAY_SOURCES.has(r.source) ? '💳 결제 완주 (예치금 결제 + 발주완료 기록)' : '💳 결제 완주 (무통장 주문완료 + 입금대기 기록)'}</a>
         <a href="/run?id=${esc(u.searchParams.get('id'))}" style="display:inline-block;background:#2563eb;color:#fff;padding:12px 24px;border-radius:8px;text-decoration:none;font-weight:600">결제 직전까지만 (직접 결제)</a></p>`)
       return
     }
     if (u.pathname === '/run') {
       const out = await execPurchase(u.searchParams.get('id'), u.searchParams.get('mode') === 'full')
       htmlPage(res, out.ok
-        ? (out.done
+        ? (out.done && out.depositPaid
+          ? `<h2>✓ ${esc(out.msg)}</h2><p style="background:#d1fae5;color:#065f46;padding:10px 12px;border-radius:8px">예치금으로 결제가 끝났습니다 — 입금(이체)할 것 없음. 관리자 주문상태가 <b>발주완료</b>로 기록됐고 쿠팡 발주확인이 곧 처리됩니다.</p>`
+          : out.done
           ? `<h2>✓ ${esc(out.msg)}</h2><p style="background:#fef3c7;color:#92400e;padding:10px 12px;border-radius:8px">💰 관리자 주문상태가 <b>입금대기</b>로 기록됐습니다. <b>${esc(GGSAN_DEPOSIT.bankKeyword)} 계좌로 이체</b>한 뒤 관리자에서 <b>[입금완료]</b>를 눌러주세요.</p>`
           : `<h2>✓ ${esc(out.msg)}</h2><p>열린 ${esc(out.sourceLabel ?? '매입처')} 창으로 가서 결제를 마치세요. 이 탭은 닫으셔도 됩니다.</p>`)
         : `<h2>✗ ${esc(out.msg)}</h2><p>다시 시도하거나 매입처에서 직접 주문하세요.</p>`)

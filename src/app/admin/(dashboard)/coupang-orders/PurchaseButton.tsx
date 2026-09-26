@@ -10,8 +10,10 @@ const HELPER = 'http://127.0.0.1:39201'
  * 2) 닿지 않으면(원격 기기 또는 헬퍼 다운) → 원격 큐(purchase-jobs)에 완주 잡 등록:
  *    집 PC의 order-server 폴러가 실행해 무통장 결제 완주 + 💰입금대기·주문번호 자동 기록.
  *    jimorder:// 는 숨은 iframe으로 함께 발사 — 로컬인데 헬퍼만 죽은 경우 자동 기동돼 잡을 집는다.
+ *    웰루트(예치금 결제)는 완주 = 예치금 즉시 차감 → 발주완료 기록이라 확인 문구가 다르다.
  */
-export default function PurchaseButton({ orderId }: { orderId: number }) {
+export default function PurchaseButton({ orderId, source }: { orderId: number; source?: string | null }) {
+  const depositPay = source === 'wellroot'
   const [busy, setBusy] = useState(false)
   const [msg, setMsg] = useState<string | null>(null)
 
@@ -54,7 +56,10 @@ export default function PurchaseButton({ orderId }: { orderId: number }) {
       setBusy(false)
     } catch {
       // 로컬 헬퍼에 못 닿음 → 원격 큐로 완주 실행 (확인 후)
-      if (!window.confirm('로컬 헬퍼에 연결할 수 없습니다.\n원격 실행할까요? 집 PC가 무통장 결제까지 완주하고 💰입금대기로 기록합니다.\n(입금 이체는 직접 하신 뒤 [입금완료]를 눌러주세요)')) { setBusy(false); return }
+      const ask = depositPay
+        ? '로컬 헬퍼에 연결할 수 없습니다.\n원격 실행할까요? 집 PC가 웰루트 예치금으로 결제까지 완주합니다 — 예치금이 즉시 차감되고 발주완료로 기록됩니다.\n(예치금이 부족하면 결제하지 않고 중단)'
+        : '로컬 헬퍼에 연결할 수 없습니다.\n원격 실행할까요? 집 PC가 무통장 결제까지 완주하고 💰입금대기로 기록합니다.\n(입금 이체는 직접 하신 뒤 [입금완료]를 눌러주세요)'
+      if (!window.confirm(ask)) { setBusy(false); return }
       fireProtocol()
       try {
         const r = await fetch('/api/admin/purchase-jobs', {
@@ -77,7 +82,9 @@ export default function PurchaseButton({ orderId }: { orderId: number }) {
         onClick={onClick}
         disabled={busy}
         className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-blue-600 text-white text-[11px] font-semibold hover:bg-blue-700 disabled:opacity-60"
-        title="로컬 헬퍼로 매입처(건강산/유픽B2B) 주문서 자동작성. 이 PC면 완주/직전정지 선택, 원격이면 완주(입금대기 기록). 헬퍼가 꺼져 있으면 자동 기동."
+        title={depositPay
+          ? '로컬 헬퍼로 웰루트 주문서 자동작성 + 예치금 적용. 이 PC면 완주/직전정지 선택, 원격이면 완주(예치금 차감·발주완료 기록). 헬퍼가 꺼져 있으면 자동 기동.'
+          : '로컬 헬퍼로 매입처 주문서 자동작성. 이 PC면 완주/직전정지 선택, 원격이면 완주(입금대기 기록). 헬퍼가 꺼져 있으면 자동 기동.'}
       >
         💳 결제진행{busy ? '…' : ''}
       </button>

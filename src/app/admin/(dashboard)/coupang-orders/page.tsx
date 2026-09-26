@@ -113,7 +113,7 @@ const SUPPLIER_LABELS: Record<string, string> = {
 
 // order-server.mjs의 SUPPORTED_SOURCES와 반드시 동기화 — 여기 없으면 결제진행 버튼 자체가 안 그려짐
 // (2026-09-02: bio77 추가 시 order-server.mjs만 고치고 여기를 안 고쳐서 버튼이 안 보이던 버그 재발 방지 메모)
-const PURCHASE_AUTOMATED_SOURCES = ['ggsan', 'upickb2b', 'bio77']
+const PURCHASE_AUTOMATED_SOURCES = ['ggsan', 'upickb2b', 'bio77', 'wellroot']
 
 // 매입처 상세 URL (listing.source_detail_url 없거나 주문별 오버라이드일 때) — naver-orders/page.tsx 와 동일
 function supplierUrl(source: string | null, goodsNo: string | null): string | null {
@@ -122,7 +122,6 @@ function supplierUrl(source: string | null, goodsNo: string | null): string | nu
   if (source === 'ggsan') return `https://www.ggsan.com/goods/goods_view.php?goodsNo=${g}`
   if (source === 'upickb2b') return `https://upickb2b.com/product/x/${g}/category/1/display/1/`
   if (source === 'bio77') return `https://77bio.co.kr/goods/goods_view.php?goodsNo=${g}`
-  // 웰루트는 결제진행(자동주문) 미지원 — 링크만 제공하고 PURCHASE_AUTOMATED_SOURCES 에는 넣지 않는다(2026-09-16)
   if (source === 'wellroot') return `https://wellrootb2b.com/product/detail.html?product_no=${g}`
   return null
 }
@@ -451,7 +450,7 @@ export default async function CoupangOrdersPage({
                     )}
                     {r.purchase_status === 'PENDING' && r.ggsan_goods_no && PURCHASE_AUTOMATED_SOURCES.includes(r.supplier_source ?? '') && (
                       <div className="mt-1">
-                        <PurchaseButton orderId={r.order_id} />
+                        <PurchaseButton orderId={r.order_id} source={r.supplier_source} />
                         <span className="text-[10px] text-gray-400 ml-1">헬퍼 꺼져 있으면 자동 기동</span>
                       </div>
                     )}
