@@ -1,11 +1,18 @@
 /**
- * 로컬 cron — 매입처(ggsan · 유픽B2B) 송장 자동수집 ↔ 쿠팡 송장등록 동기화
+ * 로컬 cron — 매입처(ggsan · 유픽B2B · 77bio · 웰루트) 송장 자동수집 ↔ 쿠팡 송장등록 동기화
  *
  * 2026-08-20 확장: ① 유픽(Cafe24) 주문상세 추적 추가(scripts/lib/upick-tracking.mjs)
  *                 ② 쿠팡 등록을 Vercel register-invoice 호출 → **로컬 직접 실행**(scripts/lib/coupang-invoice.mjs)으로 전환
  *                    (Vercel IP가 쿠팡 OpenAPI 접근제어에 막혀 라우트 호출은 항상 실패 → pending 고착이 원인)
  *                 ③ pending/failed 고착 건 재시도 스윕(쿠팡이 이미 배송지시 이후면 manual_done 동기화)
  *                 ④ ggsan 택배사 sno 5=한진택배 매핑, 송장번호 숫자 정규화(유픽 CJ '6995-6837-5375')
+ * 2026-09-02 확장: ⑤ 77bio(GodoMall) 주문상세 추적 추가(scripts/lib/bio77-tracking.mjs)
+ *                 ⑥ 매입처 분기를 order_no 자릿수 정규식 추측 → jimscanner_coupang_listings.source
+ *                    (+ supplier_source 오버라이드) 기준 조회로 전환. bio77 주문번호(16자리 숫자)가
+ *                    기존 ggsan 정규식(10~18자리 숫자)과 겹쳐 오분류될 수 있었던 문제를 근본 해결
+ *                    (order-server.mjs resolveOrder()와 동일한 소스 판별 규칙을 여기서도 적용).
+ * 2026-09-27 확장: ⑦ 웰루트(Cafe24, 예치금 결제) 주문상세 추적 추가(scripts/lib/wellroot-tracking.mjs).
+ *                    그전엔 source='wellroot' 주문이 어느 분기에도 안 걸려 조용히 건너뛰어졌다.
  *
  * canon: docs/plan-ggsan-coupang-invoice-sync.md ④(발송 동기화 크론) / ②(상태머신) / ⑤(반자동 토글) / ⑨(안전장치).
  *
@@ -16,6 +23,7 @@
  *   ② ggsan 로그인 (실패 시 그 회차 전체 중단 + runs=error, 쿠팡 호출 안 함 → 데이터 무손상)
  *   ③ 대상 = orders where coupang_invoice_status in (none,pending,acknowledged,failed)
  *            and purchase_status in (ORDERED,SHIPPED) and ggsan_order_no is not null
+ *            → listings.source(+supplier_source 오버라이드)로 ggsan/upickb2b/bio77 분기
  *   ④ 각 대상(최대 100, 5분 deadline, 300ms 간격): order_view 파싱
  *        → 항상 ggsan_order_status + ggsan_last_checked_at 갱신
  *        → 취소/반품/교환 → needs_attention (자동취소 금지)
@@ -36,7 +44,9 @@ import { fileURLToPath } from 'node:url'
 import path from 'node:path'
 import { createClient } from '@supabase/supabase-js'
 import { createCoupangInvoiceOps, normalizeInvoiceNo } from './lib/coupang-invoice.mjs'
-import { withUpickSession, fetchUpickOrder, UPICK_ORDER_NO_RE } from './lib/upick-tracking.mjs'
+import { withUpickSession, fetchUpickOrder } from './lib/upick-tracking.mjs'
+import { withBio77Session, fetchBio77Order } from './lib/bio77-tracking.mjs'
+import { withWellrootSession, fetchWellrootOrder } from './lib/wellroot-tracking.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const env = Object.fromEntries(
@@ -232,17 +242,34 @@ try {
   // ③ 대상 조회
   const { data: rows, error: selErr } = await sb
     .from('jimscanner_coupang_orders')
-    .select('id, order_id, ggsan_order_no, purchase_status, coupang_invoice_status, ggsan_invoice_number, ggsan_carrier_name, purchase_total_cost, receiver_name, purchase_ordered_at, needs_attention, attention_reason')
+    .select('id, order_id, seller_product_id, supplier_source, supplier_goods_no, ggsan_order_no, purchase_status, coupang_invoice_status, ggsan_invoice_number, ggsan_carrier_name, purchase_total_cost, receiver_name, purchase_ordered_at, needs_attention, attention_reason')
     .in('coupang_invoice_status', ['none', 'pending', 'acknowledged', 'failed'])
     .in('purchase_status', ['ORDERED', 'SHIPPED'])
     .not('ggsan_order_no', 'is', null)
     .limit(MAX_TARGETS)
   if (selErr) throw new Error(`select: ${selErr.message}`)
 
-  // ggsan_order_no 컬럼은 매입처 공용 주문번호: ggsan=숫자 10~18자리, 유픽B2B(Cafe24)=YYYYMMDD-NNNNNNN. 형식으로 분기.
-  const targets = ggsanLoginErr ? [] : (rows ?? []).filter((r) => /^\d{10,18}$/.test(String(r.ggsan_order_no)))
-  const upickTargets = (rows ?? []).filter((r) => UPICK_ORDER_NO_RE.test(String(r.ggsan_order_no)))
-  console.log(`  대상: ggsan ${targets.length}건, 유픽 ${upickTargets.length}건`)
+  // 매입처 판별 = order-server.mjs resolveOrder()와 동일 규칙(오버라이드 우선 → listings.source 조인 → 미상이면 ggsan 간주).
+  // ggsan_order_no 컬럼은 매입처 공용 주문번호 저장소일 뿐이라 자릿수만으로는 ggsan(10~18자리 숫자)과
+  // bio77(14~18자리 숫자)을 구분할 수 없다(2026-09-02 발견) — 반드시 실제 source로 분기한다.
+  const sellerProductIds = [...new Set((rows ?? []).filter((r) => !(r.supplier_source && r.supplier_goods_no) && r.seller_product_id != null).map((r) => r.seller_product_id))]
+  const sourceBySellerProductId = new Map()
+  if (sellerProductIds.length) {
+    const { data: listings } = await sb
+      .from('jimscanner_coupang_listings')
+      .select('seller_product_id, source')
+      .in('seller_product_id', sellerProductIds)
+    for (const l of listings ?? []) if (l.source && !sourceBySellerProductId.has(l.seller_product_id)) sourceBySellerProductId.set(l.seller_product_id, l.source)
+  }
+  const resolveSource = (r) => (r.supplier_source && r.supplier_goods_no) ? r.supplier_source : (sourceBySellerProductId.get(r.seller_product_id) || 'ggsan')
+
+  const targets = ggsanLoginErr ? [] : (rows ?? []).filter((r) => resolveSource(r) === 'ggsan')
+  const upickTargets = (rows ?? []).filter((r) => resolveSource(r) === 'upickb2b')
+  const bio77Targets = (rows ?? []).filter((r) => resolveSource(r) === 'bio77')
+  const wellrootTargets = (rows ?? []).filter((r) => resolveSource(r) === 'wellroot')
+  // 위 4곳 외 매입처(도매꾹·비셀러 등)는 자동추적 미지원 — 조용히 빠지지 않게 건수만이라도 남긴다
+  const untracked = (rows ?? []).length - targets.length - upickTargets.length - bio77Targets.length - wellrootTargets.length - (ggsanLoginErr ? (rows ?? []).filter((r) => resolveSource(r) === 'ggsan').length : 0)
+  console.log(`  대상: ggsan ${targets.length}건, 유픽 ${upickTargets.length}건, 77bio ${bio77Targets.length}건, 웰루트 ${wellrootTargets.length}건${untracked > 0 ? `, 자동추적 미지원 ${untracked}건` : ''}`)
 
   for (const row of targets) {
     if (Date.now() > deadlineAt) { console.log('  deadline reached — 남은 대상은 다음 회차'); break }
@@ -393,6 +420,123 @@ try {
     } catch (e) {
       errors++
       console.log(`  upick session error: ${e instanceof Error ? e.message : String(e)} — 유픽 추적 건너뜀`)
+    }
+  }
+
+  // ④-b' 77bio(GodoMall) 추적 — 주문상세에서 주문상태 + 택배사/송장 수집 (Playwright headless, 세션 1회)
+  if (bio77Targets.length > 0 && Date.now() < deadlineAt) {
+    try {
+      await withBio77Session(env, async (page, base) => {
+        for (const row of bio77Targets) {
+          if (Date.now() > deadlineAt) { console.log('  deadline reached — 남은 77bio 대상은 다음 회차'); break }
+          tracked++
+          try {
+            const b = await fetchBio77Order(page, base, row.ggsan_order_no)
+            const update = { ggsan_order_status: b.status, ggsan_last_checked_at: nowIso() }
+            if (!b.found) {
+              errors++
+              console.log(`  bio77#${row.ggsan_order_no} 주문 상세 없음 — skip`)
+              await sb.from('jimscanner_coupang_orders').update(update).eq('id', row.id)
+              continue
+            }
+            if (b.cancelLike) {
+              update.needs_attention = true
+              update.attention_reason = `77bio ${b.status} 감지 — 확인 필요`
+              await sb.from('jimscanner_coupang_orders').update(update).eq('id', row.id)
+              if (!row.needs_attention) attention++
+              continue
+            }
+            const invoiceNo = normalizeInvoiceNo(b.invoiceRaw)
+            let fresh = false
+            if (invoiceNo) {
+              const sameInvoice = row.purchase_status === 'SHIPPED' && row.ggsan_invoice_number === invoiceNo
+              if (!sameInvoice) {
+                update.purchase_status = 'SHIPPED'
+                update.ggsan_invoice_number = invoiceNo
+                update.ggsan_carrier_name = b.carrier   // 링크 텍스트 그대로(CJ택배 등) → CARRIER_MAP 이 코드로 변환
+                update.ggsan_shipped_at = nowIso()
+                update.coupang_invoice_status = 'pending'
+                if (!b.carrier) {
+                  update.needs_attention = true
+                  update.attention_reason = '택배사 미확인(77bio)'
+                  if (!row.needs_attention) attention++
+                }
+                shipped++
+                fresh = true
+                console.log(`  bio77#${row.ggsan_order_no} 발송 감지: ${b.carrier ?? '?'} ${invoiceNo}${b.invoiceRaw !== invoiceNo ? ` (원문 ${b.invoiceRaw})` : ''}`)
+              }
+            }
+            await sb.from('jimscanner_coupang_orders').update(update).eq('id', row.id)
+            if (fresh && autoUpload && b.carrier) await registerLocal(row.id, `order#${row.order_id}`)
+          } catch (e) {
+            if (/session expired|login failed/.test(String(e?.message))) throw e
+            errors++
+            console.log(`  bio77#${row.ggsan_order_no} error: ${e instanceof Error ? e.message : String(e)}`)
+          }
+        }
+      })
+    } catch (e) {
+      errors++
+      console.log(`  bio77 session error: ${e instanceof Error ? e.message : String(e)} — 77bio 추적 건너뜀`)
+    }
+  }
+
+  // ④-b'' 웰루트(Cafe24, 예치금 결제) 추적 — 주문상세에서 주문처리상태 + 택배사/송장 수집 (Playwright headless, 세션 1회)
+  //        예치금 결제라 '입금대기' 단계가 없다(결제진행 완주 = 예치금 차감 = 발주완료). 파서는 Cafe24 공통 송장 링크 기준.
+  if (wellrootTargets.length > 0 && Date.now() < deadlineAt) {
+    try {
+      await withWellrootSession(env, async (page, base) => {
+        for (const row of wellrootTargets) {
+          if (Date.now() > deadlineAt) { console.log('  deadline reached — 남은 웰루트 대상은 다음 회차'); break }
+          tracked++
+          try {
+            const w = await fetchWellrootOrder(page, base, row.ggsan_order_no)
+            const update = { ggsan_order_status: w.status, ggsan_last_checked_at: nowIso() }
+            if (!w.found) {
+              errors++
+              console.log(`  wellroot#${row.ggsan_order_no} 주문 상세 없음 — skip`)
+              await sb.from('jimscanner_coupang_orders').update(update).eq('id', row.id)
+              continue
+            }
+            if (w.cancelLike) {
+              update.needs_attention = true
+              update.attention_reason = `웰루트 ${w.status} 감지 — 확인 필요`
+              await sb.from('jimscanner_coupang_orders').update(update).eq('id', row.id)
+              if (!row.needs_attention) attention++
+              continue
+            }
+            const invoiceNo = normalizeInvoiceNo(w.invoiceRaw)
+            let fresh = false
+            if (invoiceNo) {
+              const sameInvoice = row.purchase_status === 'SHIPPED' && row.ggsan_invoice_number === invoiceNo
+              if (!sameInvoice) {
+                update.purchase_status = 'SHIPPED'
+                update.ggsan_invoice_number = invoiceNo
+                update.ggsan_carrier_name = w.carrier   // 링크 텍스트(CJ대한통운 등) → CARRIER_MAP 이 코드로 변환
+                update.ggsan_shipped_at = nowIso()
+                update.coupang_invoice_status = 'pending'
+                if (!w.carrier) {
+                  update.needs_attention = true
+                  update.attention_reason = '택배사 미확인(웰루트)'
+                  if (!row.needs_attention) attention++
+                }
+                shipped++
+                fresh = true
+                console.log(`  wellroot#${row.ggsan_order_no} 발송 감지: ${w.carrier ?? '?'} ${invoiceNo}${w.invoiceRaw !== invoiceNo ? ` (원문 ${w.invoiceRaw})` : ''}`)
+              }
+            }
+            await sb.from('jimscanner_coupang_orders').update(update).eq('id', row.id)
+            if (fresh && autoUpload && w.carrier) await registerLocal(row.id, `order#${row.order_id}`)
+          } catch (e) {
+            if (/session expired|login failed/.test(String(e?.message))) throw e
+            errors++
+            console.log(`  wellroot#${row.ggsan_order_no} error: ${e instanceof Error ? e.message : String(e)}`)
+          }
+        }
+      })
+    } catch (e) {
+      errors++
+      console.log(`  wellroot session error: ${e instanceof Error ? e.message : String(e)} — 웰루트 추적 건너뜀`)
     }
   }
 

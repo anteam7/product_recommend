@@ -5,6 +5,8 @@
  *
  * 주의: purchase_status / invoice_number / shipped_at / ggsan_(...) / coupang_invoice_(...) 컬럼은 절대 추가 금지 —
  * ggsan-sync 크론 소유(F-1). upsert row에 송장 미러 컬럼을 추가하면 ggsan-sync가 쓴 값을 매시간 덮어써 회귀한다.
+ * (예외 1곳: reconcileUnseen 이 쿠팡 '취소/반품' 확인된 **미발주(PENDING)** 주문만 purchase_status=CANCELLED 로 바꾼다 —
+ *  ggsan-sync 는 PENDING 행을 건드리지 않으므로 충돌 없음. 매입이 진행된 주문은 needs_attention 만 올린다.)
  */
 import crypto from 'node:crypto'
 
@@ -31,6 +33,72 @@ export function createCoupangOrdersSyncOps({ sb, env, log = () => {} }) {
   function fmtKstYmd(d) {
     const kst = new Date(d.getTime() + 9 * 3600 * 1000)
     return kst.toISOString().slice(0, 10) // yyyy-MM-dd
+  }
+  const sleep = (ms) => new Promise((s) => setTimeout(s, ms))
+
+  /**
+   * 취소·반품 반영 + 창 밖 멈춘 주문 갱신 (2026-09-27).
+   * 상태별 목록 조회(ACCEPT~FINAL_DELIVERY)에는 취소·반품된 주문이 안 나와 DB엔 마지막 상태가 영영 남았다
+   * (실측: 쿠팡 취소 13건이 결제완료/상품준비중으로 고착, 사람이 매입상태만 수동 '취소'). 31일 창 밖 주문도 마찬가지.
+   * → 이번 회차 목록에 없던 '진행 중' 주문만 박스 단건 조회(GET ordersheets/{shipmentBoxId}):
+   *    200 = 실제 상태로 갱신 / 400 '취소 또는 반품' = CANCEL(발송 전) 또는 RETURNS(발송 후) 기록 +
+   *    미발주면 매입상태도 취소, 매입이 진행됐으면 needs_attention(매입처 주문 취소·환불은 사람이 — 자동취소 금지).
+   */
+  async function reconcileUnseen(seenBoxIds, { maxBoxes = 60 } = {}) {
+    const OPEN = ['ACCEPT', 'INSTRUCT', 'DEPARTURE', 'DELIVERING']
+    const { data: open, error } = await sb.from('jimscanner_coupang_orders')
+      .select('id, order_id, shipment_box_id, shipping_status, purchase_status, needs_attention, product_name')
+      .in('shipping_status', OPEN).not('shipment_box_id', 'is', null).limit(500)
+    if (error) throw new Error(`reconcile select: ${error.message}`)
+    const byBox = new Map()
+    for (const o of open ?? []) {
+      const k = String(o.shipment_box_id)
+      if (seenBoxIds.has(k)) continue
+      if (!byBox.has(k)) byBox.set(k, [])
+      byBox.get(k).push(o)
+    }
+    let cancelled = 0, refreshed = 0, checked = 0
+    const now = new Date().toISOString()
+    for (const [box, rows] of byBox) {
+      if (checked >= maxBoxes) break
+      checked++
+      let r = await api('GET', `/v2/providers/openapi/apis/api/v4/vendors/${VENDOR_ID}/ordersheets/${box}`)
+      if (r.status === 429) { await sleep(3000); r = await api('GET', `/v2/providers/openapi/apis/api/v4/vendors/${VENDOR_ID}/ordersheets/${box}`) }
+      const msg = typeof r.body === 'object' ? String(r.body?.message ?? '') : String(r.body ?? '')
+      if (r.status === 200) {
+        const d = Array.isArray(r.body?.data) ? r.body.data[0] : r.body?.data
+        const live = d?.status
+        if (live && rows.some((x) => x.shipping_status !== live)) {
+          await sb.from('jimscanner_coupang_orders').update({ shipping_status: live, last_synced_at: now }).eq('shipment_box_id', box)
+          refreshed++
+          log(`  [reconcile] box ${box} ${rows[0].shipping_status} → ${live}`)
+        }
+      } else if (r.status === 400 && /취소|반품/.test(msg)) {
+        for (const o of rows) {
+          const afterShip = ['DEPARTURE', 'DELIVERING', 'FINAL_DELIVERY'].includes(o.shipping_status) || o.purchase_status === 'RECEIVED'
+          const kind = afterShip ? '반품' : '취소'
+          const upd = { shipping_status: afterShip ? 'RETURNS' : 'CANCEL', last_synced_at: now }
+          if (o.purchase_status === 'PENDING') {
+            upd.purchase_status = 'CANCELLED'
+          } else if (o.purchase_status !== 'CANCELLED') {
+            upd.needs_attention = true
+            upd.attention_reason = `쿠팡 주문 ${kind}됨 — 매입처 주문 ${afterShip ? '반품·환불' : '취소·환불'} 확인 필요`
+          }
+          await sb.from('jimscanner_coupang_orders').update(upd).eq('id', o.id)
+          await sb.from('jimscanner_admin_actions').insert({
+            actor: 'local', action: 'coupang_order_cancel_sync', target_type: 'coupang_order', target_id: o.id,
+            summary: `주문#${o.order_id} 쿠팡 ${kind} 반영 — 매입상태 ${o.purchase_status}${upd.purchase_status ? '→CANCELLED' : upd.needs_attention ? ' (확인 필요)' : ''} (${(o.product_name ?? '').slice(0, 24)})`,
+            metadata: upd,
+          }).then(() => {}, () => {})
+          cancelled++
+          log(`  [reconcile] order#${o.order_id} 쿠팡 ${kind} → ${upd.shipping_status}${upd.purchase_status ? ' + 매입 취소' : upd.needs_attention ? ' + 확인 필요' : ''}`)
+        }
+      } else {
+        log(`  [reconcile] box ${box}: HTTP ${r.status} ${msg.slice(0, 80)}`)
+      }
+      await sleep(150)
+    }
+    return { cancelled, refreshed, checked, pending: Math.max(0, byBox.size - checked) }
   }
 
   /**
@@ -76,6 +144,8 @@ export function createCoupangOrdersSyncOps({ sb, env, log = () => {} }) {
       } while (nextToken)
     }
     const total = orderItemsAll.length
+    // 상태별 목록 조회가 하나라도 실패하면 '목록에 없음'이 취소인지 조회 실패인지 구분 못 함 → 이 회차 reconcile 생략
+    const listFailed = errorSamples.length > 0
 
     const sellerProductIds = [...new Set(orderItemsAll.flatMap((o) => (o.orderItems ?? []).map((it) => it.sellerProductId)))].filter(Boolean)
     let listings = []
@@ -132,8 +202,20 @@ export function createCoupangOrdersSyncOps({ sb, env, log = () => {} }) {
       }
     }
 
+    // 취소·반품 반영 + 창 밖 멈춘 주문 갱신 (목록 조회가 온전할 때만)
+    let reconciled = { cancelled: 0, refreshed: 0, checked: 0, pending: 0 }
+    if (!listFailed) {
+      try {
+        reconciled = await reconcileUnseen(new Set(orderItemsAll.map((o) => String(o.shipmentBoxId))))
+      } catch (e) {
+        const m = e instanceof Error ? e.message : String(e)
+        if (errorSamples.length < 5) errorSamples.push(m)
+        log(`  reconcile error: ${m}`)
+      }
+    } else log('  목록 조회 일부 실패 — 취소·반품 반영(reconcile)은 이번 회차 생략')
+
     const durationMs = Date.now() - t0
-    log(`[coupang-orders-sync/${triggeredBy}] total=${total} inserted=${inserted} errors=${errors} (${(durationMs / 1000).toFixed(1)}s)`)
+    log(`[coupang-orders-sync/${triggeredBy}] total=${total} inserted=${inserted} errors=${errors} reconcile(checked=${reconciled.checked} cancelled=${reconciled.cancelled} refreshed=${reconciled.refreshed}${reconciled.pending ? ` pending=${reconciled.pending}` : ''}) (${(durationMs / 1000).toFixed(1)}s)`)
 
     if (runId) {
       try {
@@ -149,7 +231,7 @@ export function createCoupangOrdersSyncOps({ sb, env, log = () => {} }) {
       } catch { /* noop */ }
     }
 
-    return { total, inserted, errors, errorSamples, durationMs }
+    return { total, inserted, errors, errorSamples, durationMs, cancelled: reconciled.cancelled, refreshed: reconciled.refreshed }
   }
 
   return { syncRecentOrders }

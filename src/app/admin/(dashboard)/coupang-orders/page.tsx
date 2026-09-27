@@ -19,6 +19,7 @@ type ShippingStatus =
   | 'FINAL_DELIVERY'
   | 'NONE_TRACKING'
   | 'RETURNS'
+  | 'CANCEL' // 쿠팡 주문취소 — 목록 조회엔 안 나와 local 동기화가 박스 단건 조회로 기록(2026-09-27)
 
 interface OrderRow {
   id: string
@@ -91,6 +92,7 @@ const SHIPPING_STATUS_LABELS: Record<ShippingStatus, { label: string; cls: strin
   FINAL_DELIVERY: { label: '배송완료', cls: 'bg-emerald-100 text-emerald-700' },
   NONE_TRACKING: { label: '추적불가', cls: 'bg-gray-100 text-gray-600' },
   RETURNS: { label: '반품', cls: 'bg-rose-100 text-rose-700' },
+  CANCEL: { label: '주문취소', cls: 'bg-zinc-200 text-zinc-600' },
 }
 
 const SORT_OPTIONS = [
@@ -420,7 +422,8 @@ export default async function CoupangOrdersPage({
               </tr>
             )}
             {rows.map((r) => {
-              const ss = SHIPPING_STATUS_LABELS[r.shipping_status]
+              // 동기화가 쿠팡 실제 상태값을 그대로 쓰므로(reconcile) 표에 없는 값이 와도 페이지가 깨지지 않게
+              const ss = SHIPPING_STATUS_LABELS[r.shipping_status] ?? { label: r.shipping_status || '—', cls: 'bg-gray-100 text-gray-600' }
               return (
                 <tr key={r.id} className="border-t hover:bg-amber-50/30">
                   <td className="px-3 py-2">
