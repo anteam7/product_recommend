@@ -35,6 +35,14 @@ interface OrderRow {
   purchase_unit_cost: number | null
   purchase_total_cost: number | null
   supplier_order_no: string | null
+  // 네이버 발송처리 연동(2026-09-27) — 매입처 송장 자동수집 → 집 PC가 발송처리
+  claim_status?: string | null
+  naver_dispatch_status?: string | null
+  naver_dispatch_error?: string | null
+  supplier_invoice_number?: string | null
+  supplier_order_status?: string | null
+  needs_attention?: boolean | null
+  attention_reason?: string | null
   raw_payload?: { content?: { productOrder?: { shippingAddress?: { zipCode?: string } } } } | null
   // 매입처 바로가기 — 주문별 오버라이드 컬럼(supplier_source/supplier_goods_no, 둘 다 있을 때만) 우선,
   // 없으면 listings 조인 (listings.source: upickb2b | ggsan | manual)
@@ -417,7 +425,6 @@ export default async function NaverOrdersPage({
                   <td className="px-3 py-2 text-center">
                     <PurchaseStatusCell
                       id={r.id}
-                      productOrderId={r.product_order_id}
                       status={r.purchase_status}
                       orderedAt={r.purchase_ordered_at}
                       supplierOrderNo={r.supplier_order_no}
@@ -433,6 +440,15 @@ export default async function NaverOrdersPage({
                       ) : r.place_order_status === 'OK' ? (
                         <span className="text-[10px] text-emerald-600">✓ 발주확인</span>
                       ) : null}
+                      {r.claim_status && (
+                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-rose-100 text-rose-700" title="네이버 클레임(취소·반품·교환) 진행 상태">클레임 {r.claim_status}</span>
+                      )}
+                      {r.supplier_order_status && (
+                        <span className="text-[10px] text-gray-500" title="매입처 주문상세 상태(매시 크론이 확인)">매입처: {r.supplier_order_status}</span>
+                      )}
+                      {r.needs_attention && (
+                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-100 text-amber-800 font-semibold" title={r.attention_reason ?? ''}>⚠ 확인 필요{r.attention_reason ? `: ${r.attention_reason.slice(0, 40)}` : ''}</span>
+                      )}
                     </div>
                   </td>
                   <td className="px-3 py-2 text-xs">
@@ -441,6 +457,9 @@ export default async function NaverOrdersPage({
                       trackingNumber={r.tracking_number}
                       deliveryCompany={r.delivery_company}
                       shippedAt={r.shipped_at}
+                      dispatchStatus={r.naver_dispatch_status}
+                      dispatchError={r.naver_dispatch_error}
+                      supplierInvoice={r.supplier_invoice_number}
                     />
                   </td>
                   <td className="px-3 py-2 text-center text-xs text-gray-500">{fmtDate(r.order_date)}</td>

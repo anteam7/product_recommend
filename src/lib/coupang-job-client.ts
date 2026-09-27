@@ -5,7 +5,8 @@
  * 기기(모바일)·브라우저 권한(크롬 로컬 네트워크 접근)에 따라 막힌다. 그래서 Vercel 은 `jimscanner_purchase_jobs`
  * 에 잡만 넣고, 집 PC 의 order-server 폴러(3초)가 실행한다. 헬퍼가 꺼져 있으면 잡은 큐에 남았다가 켜지면 처리된다.
  */
-export type CoupangJobMode = 'coupang_ack' | 'coupang_invoice' | 'coupang_orders_sync'
+// 네이버 발주확인·발송처리도 같은 큐(집 PC order-server)로 실행한다 — 네이버 API도 IP 허용목록제(2026-09-27)
+export type CoupangJobMode = 'coupang_ack' | 'coupang_invoice' | 'coupang_orders_sync' | 'naver_confirm' | 'naver_dispatch'
 
 export interface JobResult {
   id: number

@@ -3,13 +3,14 @@ import { revalidatePath } from 'next/cache'
 import { createClient, isAdminEmail } from '@/lib/auth/server'
 import { createAdminClient } from '@/lib/auth/admin-supabase'
 import { logAdminAction } from '@/lib/admin-log'
-import { naverApi } from '@/lib/naver/commerce-api'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 
-// 쿠팡 update 라우트 미러 — 발주완료(ORDERED) 전환 시 네이버 발주확인(confirm) 자동 호출.
-// 쿠팡의 acknowledgement(결제완료→상품준비중)와 같은 위치의 best-effort 처리다.
+// 쿠팡 update 라우트 미러 — 발주완료(ORDERED) 전환 시 네이버 발주확인, 송장 입력 시 네이버 발송처리.
+// 네이버 커머스 API는 IP 허용목록제라 Vercel(여기)에서 직접 부르면 GW.IP_NOT_ALLOWED 로 막힌다
+// (2026-09-26 발주확인 5건 전부 실패). 그래서 쿠팡과 똑같이 jimscanner_purchase_jobs 에 잡만 넣고
+// 집 PC order-server 폴러(3초)가 scripts/lib/naver-order-ops.mjs 로 실행한다(2026-09-27).
 
 const PURCHASE_STATUSES = ['PENDING', 'AWAITING_DEPOSIT', 'ORDERED', 'SHIPPED', 'RECEIVED', 'CANCELLED'] as const
 type PurchaseStatus = (typeof PURCHASE_STATUSES)[number]
@@ -34,32 +35,27 @@ interface OrderRow {
   shipped_at: string | null
   place_order_status: string | null
   product_order_status: string | null
+  naver_dispatch_status: string | null
 }
 
-/** 네이버 발주확인 — POST /v1/pay-order/seller/product-orders/confirm */
-async function naverConfirm(productOrderId: string): Promise<{ ok: boolean; detail: string }> {
-  const r = await naverApi('POST', '/v1/pay-order/seller/product-orders/confirm', {
-    productOrderIds: [productOrderId],
-  })
-  const body = r.body as {
-    data?: {
-      successProductOrderIds?: string[]
-      failProductOrderInfos?: Array<{ productOrderId?: string; code?: string; message?: string }>
-    }
-  } | null
-  const success = body?.data?.successProductOrderIds?.map(String).includes(productOrderId) ?? false
-  const fail = body?.data?.failProductOrderInfos?.find((f) => String(f.productOrderId) === productOrderId)
-  // 이미 발주확인된 건 재호출 → 멱등 통과
-  const alreadyDone = /이미.{0,10}(발주|확인)|ALREADY/i.test(fail?.message ?? '')
-  if (r.status === 200 && (success || alreadyDone)) return { ok: true, detail: alreadyDone ? '이미 발주확인됨' : 'OK' }
-  return { ok: false, detail: `HTTP ${r.status} ${fail?.code ?? ''} ${fail?.message ?? JSON.stringify(r.body).slice(0, 150)}` }
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type Admin = any
+/** 집 PC 큐 잡 등록 — 같은 주문·같은 종류가 대기/실행 중이면 그 잡을 재사용 */
+async function enqueueJob(admin: Admin, orderKey: string, mode: 'naver_confirm' | 'naver_dispatch', email: string | undefined) {
+  const { data: dup } = await admin.from('jimscanner_purchase_jobs')
+    .select('id').eq('order_key', orderKey).eq('mode', mode).in('status', ['queued', 'running']).limit(1)
+  if (dup?.length) return { queued: true, job_id: dup[0].id as number }
+  const { data: job, error } = await admin.from('jimscanner_purchase_jobs')
+    .insert({ order_key: orderKey, mode, requested_by: email ?? null }).select('id').single()
+  return error ? { queued: false, reason: `잡 등록 실패: ${error.message}` } : { queued: true, job_id: job.id as number }
 }
 
 /**
  * 네이버 주문↔매입 행의 발주 정보 수정.
  * body: { id, purchase_status?, purchase_unit_cost?, purchase_total_cost?, purchase_note?, supplier_order_no?, delivery_company?, tracking_number? }
- *   - purchase_status: 상태 전이 시 발주/발송 시각 자동 스탬프. ORDERED 전환 시 네이버 발주확인 자동 호출(best-effort)
- *   - tracking_number: 내부 기록만 (네이버 발송처리 API 연동은 후속 — 스마트스토어센터에서 직접 발송처리)
+ *   - purchase_status: 상태 전이 시 발주/발송 시각 자동 스탬프. ORDERED 전환 시 네이버 발주확인 잡 등록
+ *   - tracking_number: 매입처발송(SHIPPED) + naver_dispatch_status='pending' + 네이버 발송처리 잡 등록.
+ *     발송완료(RECEIVED)는 네이버 발송처리가 성공했을 때만(쿠팡과 동일). 매입처 송장은 매시 크론이 자동 수집한다.
  */
 export async function POST(request: NextRequest) {
   const user = await requireAdmin()
@@ -83,7 +79,7 @@ export async function POST(request: NextRequest) {
   const admin = createAdminClient() as any
   const { data: row, error: e1 } = await admin
     .from('jimscanner_naver_orders')
-    .select('id, product_order_id, order_id, product_name, quantity, purchase_status, purchase_unit_cost, purchase_ordered_at, purchase_received_at, shipped_at, place_order_status, product_order_status')
+    .select('id, product_order_id, order_id, product_name, quantity, purchase_status, purchase_unit_cost, purchase_ordered_at, purchase_received_at, shipped_at, place_order_status, product_order_status, naver_dispatch_status')
     .eq('id', id)
     .single()
   if (e1 || !row) return NextResponse.json({ error: '주문을 찾을 수 없음' }, { status: 404 })
@@ -144,9 +140,10 @@ export async function POST(request: NextRequest) {
     }
   }
 
-  // 5) 송장 — 내부 기록만 (네이버 발송처리는 후속: 스마트스토어센터에서 직접)
+  // 5) 송장 — 매입처발송(SHIPPED) + 네이버 발송처리 대기(pending). 발송완료(RECEIVED)는 네이버 발송처리 성공 시에만.
   const hasCompany = body.delivery_company !== undefined
   const hasTracking = body.tracking_number !== undefined
+  let dispatchQueued = false
   if (hasCompany || hasTracking) {
     if (hasCompany) update.delivery_company = String(body.delivery_company).trim().slice(0, 40) || null
     let trackingVal: string | null = null
@@ -154,13 +151,14 @@ export async function POST(request: NextRequest) {
       trackingVal = String(body.tracking_number).replace(/\s/g, '').slice(0, 40) || null
       update.tracking_number = trackingVal
     }
-    if (trackingVal) {
-      if (!order.shipped_at) update.shipped_at = now
-      if (order.purchase_status !== 'CANCELLED' && order.purchase_status !== 'RECEIVED') {
-        update.purchase_status = 'RECEIVED'
-        if (!order.purchase_ordered_at) update.purchase_ordered_at = now
-        if (!order.purchase_received_at) update.purchase_received_at = now
-      }
+    const dispatchDone = ['registered', 'manual_done'].includes(order.naver_dispatch_status ?? 'none')
+    if (trackingVal && order.purchase_status !== 'CANCELLED' && !dispatchDone) {
+      update.purchase_status = 'SHIPPED'
+      update.naver_dispatch_status = 'pending'
+      update.naver_dispatch_error = null
+      update.naver_dispatch_attempts = 0
+      if (!order.purchase_ordered_at) update.purchase_ordered_at = now
+      dispatchQueued = true
     }
     changes.push(`송장 ${trackingVal ?? '(삭제)'}${hasCompany && update.delivery_company ? ` ${update.delivery_company}` : ''}`)
   }
@@ -170,29 +168,25 @@ export async function POST(request: NextRequest) {
   const { error } = await admin.from('jimscanner_naver_orders').update(update).eq('id', id)
   if (error) return NextResponse.json({ error: error.message }, { status: 500 })
 
-  // ── 발주완료(ORDERED) 전환 시: 네이버 발주확인 자동 호출 ──
-  // best-effort. 이미 발주확인(OK)이면 skip. 실패해도 발주완료 저장은 유지(롤백 안 함).
-  let confirm: { done: boolean; skipped?: boolean; reason?: string } | undefined
+  // ── 발주완료(ORDERED) 전환 시: 네이버 발주확인 잡 등록(집 PC 실행). 실패해도 발주완료 저장은 유지.
+  //    잡이 실패하거나 헬퍼가 꺼져 있어도 매시 크론의 발주확인 스윕이 다시 시도한다.
+  let confirm: { done: boolean; queued?: boolean; job_id?: number; skipped?: boolean; reason?: string } | undefined
   if (body.purchase_status === 'ORDERED') {
     if (order.place_order_status === 'OK') {
       confirm = { done: false, skipped: true, reason: '이미 발주확인됨' }
     } else if (order.product_order_status && order.product_order_status !== 'PAYED') {
       confirm = { done: false, skipped: true, reason: `발주확인 불가 상태(${order.product_order_status})` }
     } else {
-      try {
-        const r = await naverConfirm(order.product_order_id)
-        if (r.ok) {
-          // 낙관적 반영 — 다음 orders-sync 가 네이버 실값으로 재확인
-          await admin.from('jimscanner_naver_orders').update({ place_order_status: 'OK', updated_at: new Date().toISOString() }).eq('id', id)
-          confirm = { done: true }
-          changes.push('네이버 발주확인')
-        } else {
-          confirm = { done: false, reason: r.detail }
-        }
-      } catch (e) {
-        confirm = { done: false, reason: e instanceof Error ? e.message : String(e) }
-      }
+      const q = await enqueueJob(admin, order.product_order_id, 'naver_confirm', user.email)
+      confirm = { done: false, ...q }
+      if (q.queued) changes.push(`네이버 발주확인 잡#${q.job_id}`)
     }
+  }
+  // ── 송장 입력 시: 네이버 발송처리 잡 등록(집 PC 실행 — 네이버 실상태 재조회 게이트 후 발송)
+  let dispatch: { queued: boolean; job_id?: number; reason?: string } | undefined
+  if (dispatchQueued) {
+    dispatch = await enqueueJob(admin, order.product_order_id, 'naver_dispatch', user.email)
+    if (dispatch.queued) changes.push(`네이버 발송처리 잡#${dispatch.job_id}`)
   }
 
   await logAdminAction({
@@ -213,6 +207,8 @@ export async function POST(request: NextRequest) {
     delivery_company: update.delivery_company,
     tracking_number: update.tracking_number,
     shipped_at: update.shipped_at,
+    naver_dispatch_status: update.naver_dispatch_status,
     confirm,
+    dispatch,
   })
 }

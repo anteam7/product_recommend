@@ -2,9 +2,10 @@
 
 import { useState } from 'react'
 import { useRouter } from 'next/navigation'
+import { waitForJob } from '@/lib/coupang-job-client'
 
 // 드롭십 흐름(쿠팡과 동일): 미발주 → 입금대기(결제완주·무통장) → 발주완료(입금완료) → 매입처발송 → 발송완료 → 취소
-// 발주완료 선택 시 서버가 네이버 발주확인(confirm)을 자동 호출한다.
+// 발주완료 선택 시 서버가 네이버 발주확인 잡을 집 PC 큐에 등록한다(네이버 API는 IP 허용목록제라 Vercel 직접 호출 불가).
 const STATUS_OPTIONS = [
   { v: 'PENDING', label: '미발주' },
   { v: 'AWAITING_DEPOSIT', label: '💰 입금대기' },
@@ -25,20 +26,16 @@ const STATUS_CLS: Record<string, string> = {
 
 interface Props {
   id: string
-  /** 네이버 상품주문번호 — 발주확인 로컬 헬퍼 폴백용 */
-  productOrderId: string
   status: string
   orderedAt: string | null
   supplierOrderNo?: string | null
 }
 
-const HELPER = 'http://127.0.0.1:39201'
-
 function fmtDate(s: string | null) {
   return s ? s.slice(0, 16).replace('T', ' ') : null
 }
 
-export function PurchaseStatusCell({ id, productOrderId, status, orderedAt, supplierOrderNo }: Props) {
+export function PurchaseStatusCell({ id, status, orderedAt, supplierOrderNo }: Props) {
   const router = useRouter()
   const [saving, setSaving] = useState(false)
   const [err, setErr] = useState<string | null>(null)
@@ -61,22 +58,18 @@ export function PurchaseStatusCell({ id, productOrderId, status, orderedAt, supp
       const j = await res.json()
       setSaving(false)
       if (!res.ok) { setErr(j.error || '실패'); return }
-      // 발주완료 시 네이버 발주확인 결과 안내
+      // 발주완료 시 네이버 발주확인 — 집 PC 큐 잡 결과를 기다려 안내(헬퍼가 꺼져 있으면 큐에 남았다가 처리)
       if (j.confirm) {
-        if (j.confirm.done) setConfirmMsg('✓ 네이버 발주확인 완료')
-        else if (j.confirm.skipped) setConfirmMsg(`발주확인 생략: ${j.confirm.reason}`)
-        else if (/IP_NOT_ALLOWED|허용되지 않은 IP/i.test(j.confirm.reason ?? '')) {
-          // Vercel 서버 IP는 네이버 허용목록 밖 → 로컬 헬퍼(집 PC = 허용 IP)로 폴백
-          setConfirmMsg('로컬 헬퍼로 발주확인 중…')
-          try {
-            const hr = await fetch(`${HELPER}/naver-confirm?id=${productOrderId}`, { method: 'POST' })
-            const hj = await hr.json()
-            setConfirmMsg(hj.ok ? '✓ 네이버 발주확인 완료 (로컬)' : `⚠ 발주확인 실패: ${hj.detail}`)
-          } catch {
-            setConfirmMsg('⚠ 발주확인 실패: 로컬 헬퍼(127.0.0.1:39201)가 꺼져 있습니다 — 이 PC에서 재시도하세요')
-          }
+        if (j.confirm.skipped) setConfirmMsg(`발주확인 생략: ${j.confirm.reason}`)
+        else if (j.confirm.queued && j.confirm.job_id) {
+          setConfirmMsg(`집 PC에서 네이버 발주확인 중… (잡 #${j.confirm.job_id})`)
+          router.refresh()
+          const r = await waitForJob(j.confirm.job_id)
+          setConfirmMsg(r.status === 'done' ? `✓ 네이버 발주확인${r.result_msg && r.result_msg !== 'OK' ? ` — ${r.result_msg}` : ' 완료'}`
+            : r.status === 'error' ? `⚠ 발주확인 실패: ${r.result_msg ?? '원인 미상'} (매시 크론이 재시도)`
+            : `⏳ 발주확인 대기 중(잡 #${j.confirm.job_id}) — 집 PC 헬퍼가 켜지면 처리, 안 되면 매시 크론이 재시도`)
         }
-        else setConfirmMsg(`⚠ 발주확인 실패: ${j.confirm.reason}`)
+        else setConfirmMsg(`⚠ 발주확인 요청 실패: ${j.confirm.reason ?? '원인 미상'} (매시 크론이 재시도)`)
       }
       router.refresh()
     } catch { setSaving(false); setErr('네트워크 오류') }

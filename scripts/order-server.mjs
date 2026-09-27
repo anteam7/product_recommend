@@ -13,9 +13,9 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
 import { createClient } from '@supabase/supabase-js'
-import { naverApi } from './lib/naver-api.mjs'
 import { createCoupangInvoiceOps } from './lib/coupang-invoice.mjs'
 import { createCoupangOrdersSyncOps } from './lib/coupang-orders-sync.mjs'
+import { createNaverOrderOps } from './lib/naver-order-ops.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const env = Object.fromEntries(
@@ -35,6 +35,9 @@ const coupangRegisterInvoiceByOrderId = (orderId) => coupangOps.registerInvoice(
 
 // ── 쿠팡 주문 수집(ordersheets) — 크론(local-cron-orders-sync.mjs)과 공유. [지금 수집] 버튼이 즉시 실행한다. ──
 const coupangOrdersSyncOps = createCoupangOrdersSyncOps({ sb, env, log: console.log })
+
+// ── 네이버 발주확인·발송처리 (scripts/lib/naver-order-ops.mjs 공용 — 네이버 주문 수집 크론과 공유) ──
+const naverOps = createNaverOrderOps({ sb, log: console.log })
 
 // 어드민 브라우저 → 로컬 헬퍼 폴백 호출용 CORS (naver-confirm / coupang-ack / coupang-invoice 공용)
 const ADMIN_ORIGINS = ['https://product-recommend-nine.vercel.app', 'http://localhost:3001', 'http://localhost:3000']
@@ -613,11 +616,31 @@ async function runFlowWellroot(goodsNo, qty, recipient, detailUrl, full = null) 
     await op.waitForTimeout(1500)
     post = await readPay()
   }
+  // 세금계산서 = 신청(제품 구매시) 유지 — 현금영수증과 상호배타(세금계산서 신청 시 현금영수증은 '신청안함'으로 고정, 실측)이고
+  // 사용자 결정(2026-09-27)은 세금계산서. 예치금 적용으로 결제금액이 0원이 된 뒤 스킨이 영수증 영역을 바꿀 수 있어
+  // (잔액 0원이라 미검증) 적용 직후·결제 직전에 다시 맞추고, 영역이 다시 그려져 사업자정보가 비었으면 다시 채운다.
+  const ensureTaxInvoice = () => op.evaluate((biz) => {
+    const tx = document.querySelector('#tax_request_regist0')
+    if (!tx) return { requested: false }
+    if (!tx.checked) tx.click()
+    const reg = document.querySelector('#tax_request_company_regno')
+    if (tx.checked && reg && !reg.value) {
+      const setVal = (sel, v) => { const el = document.querySelector(sel); if (el) { el.removeAttribute('readonly'); el.value = v; el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })) } }
+      const ty = document.querySelector('#tax_request_company_type0'); if (ty && !ty.checked) ty.click()
+      setVal('#tax_request_company_regno', biz.busiNo); setVal('#tax_request_company_name', biz.company); setVal('#tax_request_president_name', biz.ceo)
+      setVal('#tax_request_company_condition', biz.service); setVal('#tax_request_company_line', biz.item)
+      setVal('#tax_request_zipcode', biz.zip); setVal('#tax_request_address1', biz.addr1); setVal('#tax_request_address2', biz.addr2)
+      setVal('#tax_request_name', biz.ceo)
+    }
+    return { requested: tx.checked }
+  }, BIZ_INFO).catch(() => ({ requested: false }))
+  const taxWarn = (t) => (t.requested ? '' : ' ⚠ 세금계산서 [신청(제품 구매시)]이 선택되지 않았습니다 — 창에서 확인하세요.')
+  let tax = await ensureTaxInvoice()
   const depositNote = `예치금 잔액 ${pre.balance?.toLocaleString() ?? '?'}원 · 주문액 ${orderTotal?.toLocaleString() ?? '?'}원 · 적용 후 결제금액 ${post.btn?.toLocaleString() ?? '?'}원`
   await op.bringToFront().catch(() => {})
   if (!full) {
     const short = post.btn !== 0 ? ' ⚠ 예치금이 부족해 결제금액이 남아 있습니다 — 충전 후 [사용]을 다시 누르세요(예치금 미결제 주문은 자동 취소됨).' : ''
-    return { ok: true, msg: `주문서 작성 완료 — 열린 웰루트 창에서 결제금액 0원(예치금 전액 적용) 확인 후 [결제하기]를 직접 누르세요. ${depositNote}${short}` }
+    return { ok: true, msg: `주문서 작성 완료 — 열린 웰루트 창에서 결제금액 0원(예치금 전액 적용) 확인 후 [결제하기]를 직접 누르세요. ${depositNote}${short}${taxWarn(tax)}` }
   }
 
   // ── 완주(예치금): 금액 가드 → 잔액 가드 → 결제금액 0원 확인 → 동의 → 결제하기 → 주문번호 파싱 ──
@@ -650,6 +673,8 @@ async function runFlowWellroot(goodsNo, qty, recipient, detailUrl, full = null) 
     }
   })
   await op.waitForTimeout(500)
+  // 세금계산서 신청 재확인(결제 직전). 못 맞춰도 결제는 막지 않고 결과 메시지로 알린다(사후 발행 요청 가능).
+  tax = await ensureTaxInvoice()
   // 클릭 직전 재확인 — 그 사이 금액이 바뀌었으면 누르지 않는다
   const last = await readPay()
   if (last.btn !== 0) return { ok: false, msg: `결제 직전 재확인에서 결제금액 ${last.btn?.toLocaleString() ?? '?'}원 — 완주 중단(열린 창에서 확인)` }
@@ -669,7 +694,7 @@ async function runFlowWellroot(goodsNo, qty, recipient, detailUrl, full = null) 
   const balanceAfter = pre.balance - orderTotal
   return {
     ok: true, done: true, depositPaid: true, orderNo, total: orderTotal, depositBalanceAfter: balanceAfter,
-    msg: `웰루트 예치금 결제 완료 — 주문번호 ${orderNo ?? '(파싱 실패, 창에서 확인)'} · ${orderTotal.toLocaleString()}원 차감 · 예치금 잔액 약 ${balanceAfter.toLocaleString()}원`,
+    msg: `웰루트 예치금 결제 완료 — 주문번호 ${orderNo ?? '(파싱 실패, 창에서 확인)'} · ${orderTotal.toLocaleString()}원 차감 · 예치금 잔액 약 ${balanceAfter.toLocaleString()}원${tax.requested ? ' · 세금계산서 신청' : ' ⚠ 세금계산서 신청 미선택 상태로 결제됨 — 웰루트에 발행 요청 필요'}`,
   }
 }
 
@@ -777,21 +802,29 @@ setInterval(async () => {
   } catch (e) { console.error('[job-poller]', e instanceof Error ? e.message : e) } finally { jobBusy = false }
 }, 4000)
 
-// ── 쿠팡 쓰기 잡 폴러(coupang_ack / coupang_invoice / coupang_orders_sync) — Vercel 어드민이 등록, 이 PC(쿠팡 허용 IP)가 실행 ──
+// ── 마켓 쓰기 잡 폴러(coupang_ack / coupang_invoice / coupang_orders_sync / naver_confirm / naver_dispatch) ──
+// Vercel 어드민이 등록, 이 PC(쿠팡·네이버 API 허용 IP)가 실행. 네이버도 IP 허용목록제라 Vercel 직접 호출이 막힌다(2026-09-27 이관).
 // 결제진행 폴러(Playwright, 수 분)와 분리해 대기 없이 처리. 직렬(coupangJobBusy). 멱등이라 재실행 안전.
 let coupangJobBusy = false
 setInterval(async () => {
   if (coupangJobBusy) return
   coupangJobBusy = true
   try {
-    const { data: jobs } = await sb.from('jimscanner_purchase_jobs').select('id, order_key, mode').eq('status', 'queued').in('mode', ['coupang_ack', 'coupang_invoice', 'coupang_orders_sync']).order('id', { ascending: true }).limit(5)
+    const { data: jobs } = await sb.from('jimscanner_purchase_jobs').select('id, order_key, mode').eq('status', 'queued').in('mode', ['coupang_ack', 'coupang_invoice', 'coupang_orders_sync', 'naver_confirm', 'naver_dispatch']).order('id', { ascending: true }).limit(5)
     for (const job of jobs ?? []) {
       await sb.from('jimscanner_purchase_jobs').update({ status: 'running', started_at: new Date().toISOString() }).eq('id', job.id)
       let ok, msg
-      if (job.mode === 'coupang_orders_sync') {
+      if (job.mode === 'naver_confirm' || job.mode === 'naver_dispatch') {
+        // 예외가 나도 잡이 running 에 고착되지 않게 여기서 잡는다
+        try {
+          const r = job.mode === 'naver_confirm' ? await naverOps.confirm(job.order_key) : await naverOps.dispatch(job.order_key)
+          ok = r.ok || r.skipped === true
+          msg = r.detail
+        } catch (e) { ok = false; msg = `실행 오류: ${e instanceof Error ? e.message : e}` }
+      } else if (job.mode === 'coupang_orders_sync') {
         const s = await coupangOrdersSyncOps.syncRecentOrders({ triggeredBy: 'remote-queue' })
         ok = s.errors === 0
-        msg = `조회 ${s.total}건 · 갱신 ${s.inserted}건${s.errors ? ` · 오류 ${s.errors}건(${s.errorSamples[0] ?? ''})` : ''}`
+        msg = `조회 ${s.total}건 · 갱신 ${s.inserted}건${s.cancelled ? ` · 취소·반품 반영 ${s.cancelled}건` : ''}${s.refreshed ? ` · 상태 보정 ${s.refreshed}건` : ''}${s.errors ? ` · 오류 ${s.errors}건(${s.errorSamples[0] ?? ''})` : ''}`
       } else {
         const r = job.mode === 'coupang_ack'
           ? await coupangAckByOrderId(job.order_key)
@@ -825,21 +858,10 @@ http.createServer(async (req, res) => {
       if (!allowed || req.method !== 'POST') { res.writeHead(403, cors); res.end(JSON.stringify({ ok: false, detail: '허용되지 않은 origin/method' })); return }
       const id = String(u.searchParams.get('id') || '').trim()
       if (!/^\d{10,20}$/.test(id)) { res.writeHead(400, cors); res.end(JSON.stringify({ ok: false, detail: 'id 형식 오류' })); return }
-      // DB에 존재하는 우리 주문인지 확인(임의 id 발주확인 방지)
-      const { data: ord } = await sb.from('jimscanner_naver_orders').select('id, product_order_id, place_order_status').eq('product_order_id', id).single()
-      if (!ord) { res.writeHead(404, cors); res.end(JSON.stringify({ ok: false, detail: '주문 없음' })); return }
-      if (ord.place_order_status === 'OK') { res.writeHead(200, cors); res.end(JSON.stringify({ ok: true, detail: '이미 발주확인됨' })); return }
-      const r = await naverApi('POST', '/v1/pay-order/seller/product-orders/confirm', { productOrderIds: [id] })
-      const success = r.body?.data?.successProductOrderIds?.map(String)?.includes(id) ?? false
-      const fail = r.body?.data?.failProductOrderInfos?.find((f) => String(f.productOrderId) === id)
-      const alreadyDone = /이미.{0,10}(발주|확인)|ALREADY/i.test(fail?.message ?? '')
-      if (r.status === 200 && (success || alreadyDone)) {
-        await sb.from('jimscanner_naver_orders').update({ place_order_status: 'OK', updated_at: new Date().toISOString() }).eq('id', ord.id)
-        res.writeHead(200, cors); res.end(JSON.stringify({ ok: true, detail: alreadyDone ? '이미 발주확인됨' : 'OK' }))
-      } else {
-        res.writeHead(502, cors)
-        res.end(JSON.stringify({ ok: false, detail: `HTTP ${r.status} ${fail?.code ?? ''} ${fail?.message ?? JSON.stringify(r.body).slice(0, 150)}` }))
-      }
+      // 공용 로직(DB 존재 확인 → 네이버 실상태 재조회 → PAYED·미확인일 때만 호출). UI는 이제 naver_confirm 잡을 쓴다.
+      const r = await naverOps.confirm(id)
+      res.writeHead(r.ok ? 200 : r.status === 404 ? 404 : r.status === 409 ? 409 : 502, cors)
+      res.end(JSON.stringify({ ok: r.ok, detail: r.detail }))
       return
     }
     // 쿠팡 발주확인(acknowledgement: 결제완료 ACCEPT → 상품준비중 INSTRUCT) — Vercel 어드민의 ack가

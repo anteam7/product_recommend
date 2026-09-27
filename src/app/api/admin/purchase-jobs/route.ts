@@ -21,10 +21,12 @@ async function requireAdmin() {
  *   mode coupang_ack          쿠팡 발주확인(결제완료→상품준비중)     ┐ Vercel IP 는 쿠팡 OpenAPI IP 접근제어 밖(403)이라
  *   mode coupang_invoice      쿠팡 송장등록(→배송지시, 발송완료)     ┘ 쿠팡 쓰기는 전부 집 PC 에서만 (2026-08-20)
  *   mode coupang_orders_sync  쿠팡 주문 즉시 수집(크론 전이라도) — order_key는 특정 주문이 아닌 고정 센티널
+ *   mode naver_confirm        네이버 발주확인            ┐ 네이버 커머스 API도 IP 허용목록제라 Vercel 직접 호출 불가(GW.IP_NOT_ALLOWED)
+ *   mode naver_dispatch       네이버 발송처리(송장 전송)  ┘ → 집 PC order-server 가 실행 (2026-09-27), order_key = product_order_id
  * POST { order_key, mode? }  → 잡 등록 (같은 주문·같은 mode 가 대기/실행 중이면 409 + 그 id)
  * GET  ?id=N                 → 잡 상태 조회 (버튼이 폴링)
  */
-const MODES = new Set(['full', 'stage', 'coupang_ack', 'coupang_invoice', 'coupang_orders_sync'])
+const MODES = new Set(['full', 'stage', 'coupang_ack', 'coupang_invoice', 'coupang_orders_sync', 'naver_confirm', 'naver_dispatch'])
 export async function POST(request: NextRequest) {
   const user = await requireAdmin()
   if (!user) return NextResponse.json({ error: '권한 없음' }, { status: 401 })
