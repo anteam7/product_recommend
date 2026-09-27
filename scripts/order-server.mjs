@@ -58,7 +58,9 @@ function adminCors(req) {
 
 // 자동주문 지원 매입처 (listings.source → 표시명)
 // ⚠ 새 매입처를 넣으면 execPurchase의 RUN_FLOWS 분기와 coupang-orders/page.tsx PURCHASE_AUTOMATED_SOURCES도 같이 고칠 것
-const SUPPORTED_SOURCES = { ggsan: '건강산', upickb2b: '유픽B2B', bio77: '77바이오', wellroot: '웰루트' }
+const SUPPORTED_SOURCES = { ggsan: '건강산', upickb2b: '유픽B2B', bio77: '77바이오', wellroot: '웰루트', kwholesale: 'K홀세일' }
+// 무통장 완주 후 이체할 곳 안내(결과 화면) — 매입처마다 입금 계좌 은행이 다르다(계좌번호는 주문서 드롭다운 기준, 소스 미저장)
+const DEPOSIT_BANK_LABEL = { ggsan: '국민은행(건강산)', upickb2b: '국민은행(유픽B2B)', kwholesale: '농협((주)다인내추럴)' }
 // 예치금 결제 매입처 — 완주 = 예치금 즉시 차감(실결제)이라 결과 상태가 입금대기가 아니라 발주완료(ORDERED)
 const DEPOSIT_PAY_SOURCES = new Set(['wellroot'])
 
@@ -707,6 +709,136 @@ async function enqueueCoupangAck(orderId) {
   return error ? { ok: false, error: error.message } : { ok: true, jobId: job.id }
 }
 
+// Playwright: K-홀세일(kwholesale.co.kr, Cafe24 AuthSSL) 주문서 자동 작성 → 결제 직전 정지 / full 지정 시 무통장 완주(입금대기)
+// 주문서 실측(2026-09-27, scripts/_kw-order-probe.mjs — 결제 미실행):
+//   배송지 라디오 #sameaddr0(주문자 동일, **기본 선택**) / #sameaddr1(새로운 배송지) → 반드시 새 배송지로 바꾸고 0.8초 대기(Cafe24 클리어 핸들러)
+//   수령인 #rname #rzipcode1 #raddr1 #raddr2 · 전화 #rphone1_1(select 국번)+#rphone1_2+#rphone1_3
+//   결제수단 addr_paymethod: cash(무통장, 기본)·kakaopay·card·icash(가상계좌)·tcash·toss / 무통장 #bankaccount(유일 계좌) + #pname
+//   예치금·세금계산서·현금영수증 칸 없음 → 무통장 주문 생성 = 입금대기(출금 없음), 이체는 사장님이.
+//   출고는 영업일 PM3시(구공지 2:30)까지 '입금 확인'된 주문만 당일 → 입금이 늦으면 쿠팡 출고기한이 밀린다.
+//   매장전용(대리점회원 전용) 상품은 "대리점회원만 접근권한이 있습니다" 경고 후 첫 화면으로 돌려보낸다(실측) → 감지해 중단.
+const KWHOLESALE_BASE = env.KWHOLESALE_BASE_URL || 'https://kwholesale.co.kr'
+async function runFlowKwholesale(goodsNo, qty, recipient, detailUrl, full = null) {
+  const dialogs = []
+  // "동일상품이 장바구니에 N개 있습니다. 함께 구매하시겠습니까?" → 취소(현재 선택 수량만)
+  const { ctx, page } = await openBrowser((d) => { dialogs.push(d.message()); return /함께 구매/.test(d.message()) ? d.dismiss() : d.accept() })
+  if (full) full.ctxRef = ctx
+  const lastDialog = () => (dialogs.length ? ` (사이트 메시지: ${dialogs[dialogs.length - 1].replace(/\s+/g, ' ').slice(0, 80)})` : '')
+
+  // 1) 로그인 — AuthSSL: load 대기 + 값이 남을 때까지 재입력 + Enter (웰루트와 동일)
+  await page.goto(`${KWHOLESALE_BASE}/member/login.html`, { waitUntil: 'load', timeout: 45000 })
+  for (let i = 0; i < 4; i++) {
+    await page.waitForTimeout(600)
+    await page.locator('#member_id').fill(env.KWHOLESALE_USER)
+    await page.locator('#member_passwd').fill(env.KWHOLESALE_PASS)
+    if ((await page.locator('#member_id').inputValue()) === env.KWHOLESALE_USER && (await page.locator('#member_passwd').inputValue()) === env.KWHOLESALE_PASS) break
+  }
+  await Promise.all([
+    page.waitForURL((u) => !/\/member\/login\.html/.test(u.toString()), { timeout: 30000 }).catch(() => {}),
+    page.press('#member_passwd', 'Enter'),
+  ])
+  if (/member\/login/.test(page.url())) return { ok: false, msg: `K홀세일 로그인 실패 — 자격증명(KWHOLESALE_USER/PASS) 확인 필요${lastDialog()}` }
+  // 2) 상품 페이지 + 수량 (등급 제한 경고가 뜨면 구매 불가 상품)
+  const before = dialogs.length
+  await page.goto(detailUrl || `${KWHOLESALE_BASE}/product/detail.html?product_no=${goodsNo}`, { waitUntil: 'domcontentloaded', timeout: 30000 })
+  await page.waitForTimeout(1500)
+  const denied = dialogs.slice(before).find((m) => /회원만|접근\s*권한|권한이\s*없/.test(m))
+  if (denied) return { ok: false, msg: `K홀세일 구매 불가 상품 — ${denied.replace(/\s+/g, ' ').slice(0, 60)} (매장전용 등, 쿠팡 판매중지 검토)` }
+  if (qty > 1) await page.evaluate((q) => { const el = document.querySelector('input#quantity, input[name="quantity_opt[]"]'); if (el) { el.value = String(q); el.dispatchEvent(new Event('change', { bubbles: true })); el.dispatchEvent(new Event('blur', { bubbles: true })) } }, qty)
+  // 3) BUY IT NOW = product_submit(1, …) → 주문서
+  await page.evaluate(() => {
+    const b = [...document.querySelectorAll('a, button')].find((x) => /product_submit\(\s*1\s*,/.test(x.getAttribute('onclick') || '') && x.offsetParent !== null)
+      || [...document.querySelectorAll('a, button, input')].find((x) => /^(BUY IT NOW|구매하기|바로\s*구매)$/i.test((x.innerText || x.value || '').trim()) && x.offsetParent !== null)
+    if (b) { b.scrollIntoView({ block: 'center' }); b.click() }
+  })
+  await page.waitForURL(/\/order\/orderform/, { timeout: 15000 }).catch(() => {})
+  await page.waitForTimeout(2000)
+  const op = ctx.pages().find((p) => /\/order\/orderform/.test(p.url())) || page
+  if (!/\/order\/orderform/.test(op.url())) return { ok: false, msg: `주문서로 이동 실패 — 품절/수량제한 여부 확인${lastDialog()}` }
+  // 4) 배송지 = 새로운 배송지(기본은 주문자 동일!) → 클리어 핸들러 대기 후 수령인 입력
+  const newAddr = op.locator('#sameaddr1')
+  if ((await newAddr.count()) && !(await newAddr.isChecked().catch(() => true))) { await newAddr.click({ force: true }); await op.waitForTimeout(800) }
+  const fillIf = async (sel, v) => { const l = op.locator(sel).first(); if (await l.count()) { await l.evaluate((el) => el.removeAttribute('readonly')); await l.fill(v ?? '').catch(() => {}) } }
+  await fillIf('#rname', recipient.name)
+  await fillIf('#rzipcode1', recipient.zip)
+  await fillIf('#raddr1', recipient.addr1)
+  await fillIf('#raddr2', recipient.addr2)
+  // 전화: select 국번(옵션 중 최장 접두사, 0502 안심번호 포함) + 2칸. 매칭 실패면 비워 둔다(주문자 번호가 남지 않게)
+  const phoneOk = await op.evaluate((phone) => {
+    const fire = (el) => { el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })) }
+    const setVal = (sel, v) => { const el = document.querySelector(sel); if (el) { el.removeAttribute('readonly'); el.value = v; fire(el) } }
+    const setPhone = (prefix) => {
+      const sel = document.getElementById(`${prefix}1`)
+      if (!sel) return null
+      const d = String(phone || '').replace(/\D/g, '')
+      const head = d ? [...sel.options].map((o) => o.value).filter((v) => /^\d+$/.test(v) && d.startsWith(v)).sort((a, b) => b.length - a.length)[0] : null
+      const rest = head ? d.slice(head.length) : ''
+      if (!head || rest.length < 7 || rest.length > 8) { setVal(`#${prefix}2`, ''); setVal(`#${prefix}3`, ''); return false }
+      sel.value = head; fire(sel)
+      setVal(`#${prefix}2`, rest.slice(0, rest.length - 4)); setVal(`#${prefix}3`, rest.slice(-4))
+      return true
+    }
+    const a = setPhone('rphone1_'); const b = setPhone('rphone2_')
+    return a !== false && b !== false
+  }, recipient.phone)
+  await op.bringToFront().catch(() => {})
+  const phoneWarn = phoneOk ? '' : ' ⚠ 수령인 전화번호 국번이 주문서 선택지에 없어 비워 뒀습니다 — 직접 입력하세요.'
+  if (!full) return { ok: true, msg: `주문서 작성 완료 — 열린 K홀세일 창에서 금액·배송지 확인 후 무통장입금으로 [결제하기]를 직접 누르세요.${phoneWarn}` }
+  if (!phoneOk) return { ok: false, msg: `수령인 전화번호를 주문서에 넣지 못함 — 완주 중단(열린 창에서 직접 진행)${phoneWarn}` }
+
+  // ── 완주(무통장): 무통장 확인 → 입금은행(유일 계좌) + 입금자명 → 필수 동의 → 금액 가드 → 결제하기(+확인 레이어) → 주문번호 ──
+  const isCash = await op.evaluate(() => {
+    const cash = document.querySelector('input[name=addr_paymethod][value=cash]')
+    if (cash && !cash.checked) { cash.checked = true; cash.click(); cash.dispatchEvent(new Event('change', { bubbles: true })) }
+    return cash ? cash.checked : false
+  })
+  if (!isCash) return { ok: false, msg: '무통장입금 결제수단을 찾지 못함 — 완주 중단(열린 창에서 직접 진행)' }
+  await op.waitForTimeout(600)
+  const bankOk = await op.evaluate((depositor) => {
+    const sel = document.querySelector('select#bankaccount')
+    if (sel && (!sel.value || sel.value === '-1')) { const o = [...sel.options].find((x) => x.value && x.value !== '-1'); if (o) { sel.value = o.value; sel.dispatchEvent(new Event('change', { bubbles: true })) } }
+    const pn = document.querySelector('#pname, input[name=pname]')
+    if (pn) { pn.value = depositor; pn.dispatchEvent(new Event('input', { bubbles: true })); pn.dispatchEvent(new Event('change', { bubbles: true })) }
+    return !!(sel && sel.value && sel.value !== '-1' && pn && pn.value)
+  }, BIZ_INFO.ceo)
+  if (!bankOk) return { ok: false, msg: '입금은행/입금자명 입력 실패 — 완주 중단(열린 창에서 직접 진행)' }
+  // 약관 — 활성·표시된 [필수]만(숨은 비회원가입 동의 등은 건드리지 않음, 웰루트와 같은 규칙)
+  await op.evaluate(() => {
+    const shown = (c) => c.offsetParent !== null || document.querySelector(`label[for="${c.id}"]`)?.offsetParent != null
+    const all = document.querySelector('#allAgree')
+    if (all && !all.disabled && !all.checked && shown(all)) all.click()
+    for (const c of document.querySelectorAll('input[type=checkbox]')) {
+      const lab = (document.querySelector(`label[for="${c.id}"]`)?.innerText || c.parentElement?.innerText || '')
+      if (/\[필수\]/.test(lab) && !c.checked && !c.disabled && shown(c)) c.click()
+    }
+  })
+  await op.waitForTimeout(500)
+  const total = await op.evaluate(() => {
+    const m = /([\d,]{3,})\s*원/.exec(document.querySelector('#btn_payment')?.innerText || '')
+    if (m) return parseInt(m[1].replace(/,/g, ''), 10)
+    const m2 = /최종\s*결제\s*금액[^0-9]{0,30}([\d,]{3,})\s*원/.exec(document.body.innerText)
+    return m2 ? parseInt(m2[1].replace(/,/g, ''), 10) : null
+  }).catch(() => null)
+  const g = guardFail('K홀세일', total, full.maxPay)
+  if (g) return { ok: false, msg: g }
+  // 클릭 직전 재확인 — 여전히 무통장이어야 누른다(카드/PG 자동결제 금지)
+  const stillCash = await op.evaluate(() => document.querySelector('input[name=addr_paymethod][value=cash]')?.checked === true)
+  if (!stillCash) return { ok: false, msg: '결제수단이 무통장입금이 아님 — 완주 중단(열린 창에서 직접 진행)' }
+  await op.evaluate(() => document.querySelector('#btn_payment')?.click())
+  await op.waitForTimeout(1800)
+  await op.evaluate(() => { const b = document.querySelector('#ec-shop_btn_layer_payment'); if (b && b.offsetParent !== null) b.click() }).catch(() => {})
+  const done = await op.waitForURL(/order_result/i, { timeout: 45000 }).then(() => true).catch(() => false)
+  await op.waitForTimeout(1500)
+  const orderNo = await op.evaluate(() => {
+    const q = new URL(location.href).searchParams.get('order_id')
+    if (q) return q
+    const m = /주문\s*번호[^\d]{0,12}(\d{8}-\d{6,9})/.exec(document.body.innerText)
+    return m ? m[1] : null
+  }).catch(() => null)
+  if (!done && !orderNo) return { ok: false, msg: `결제하기 이후 완료 페이지 확인 실패 — 열린 K홀세일 창에서 주문 상태를 직접 확인하세요${lastDialog()}` }
+  return { ok: true, done: true, orderNo, total, msg: `무통장 주문 완료 — 주문번호 ${orderNo ?? '(파싱 실패, 창에서 확인)'} · 총액 ${total.toLocaleString()}원 · 입금대기(농협 다인내추럴 계좌로 이체 후 [입금완료])` }
+}
+
 // ── 결제진행 실행(공용) — /run 핸들러와 원격 큐 폴러가 같이 쓴다 ──
 // fullMode=true: 무통장 완주 + 입금대기·주문번호·매입가 DB 기록. false: 직전 정지.
 const RUN_FLOWS = {
@@ -714,6 +846,7 @@ const RUN_FLOWS = {
   upickb2b: (r, full) => runFlowUpick(r.goodsNo, r.order.shipping_count, r.recipient, r.detailUrl, full),
   bio77: (r, full) => runFlowBio77(r.goodsNo, r.order.shipping_count, r.recipient, full),
   wellroot: (r, full) => runFlowWellroot(r.goodsNo, r.order.shipping_count, r.recipient, r.detailUrl, full),
+  kwholesale: (r, full) => runFlowKwholesale(r.goodsNo, r.order.shipping_count, r.recipient, r.detailUrl, full),
 }
 async function execPurchase(orderKey, fullMode) {
   const r = await resolveOrder(orderKey)
@@ -735,6 +868,7 @@ async function execPurchase(orderKey, fullMode) {
   }
   const out = await runFlow(r, full)
   out.sourceLabel = r.sourceLabel
+  out.sourceKey = r.source
   out.ctxRef = full?.ctxRef ?? null   // 원격 잡이 완료 후 브라우저를 닫을 수 있게 노출
   // 완주 성공 → 주문상태=입금대기(무통장/가상계좌) 또는 발주완료(예치금 = 이미 결제됨) + 매입처 주문번호·매입가 자동 기록
   if (out.ok && out.done) {
@@ -903,7 +1037,7 @@ http.createServer(async (req, res) => {
         ? (out.done && out.depositPaid
           ? `<h2>✓ ${esc(out.msg)}</h2><p style="background:#d1fae5;color:#065f46;padding:10px 12px;border-radius:8px">예치금으로 결제가 끝났습니다 — 입금(이체)할 것 없음. 관리자 주문상태가 <b>발주완료</b>로 기록됐고 쿠팡 발주확인이 곧 처리됩니다.</p>`
           : out.done
-          ? `<h2>✓ ${esc(out.msg)}</h2><p style="background:#fef3c7;color:#92400e;padding:10px 12px;border-radius:8px">💰 관리자 주문상태가 <b>입금대기</b>로 기록됐습니다. <b>${esc(GGSAN_DEPOSIT.bankKeyword)} 계좌로 이체</b>한 뒤 관리자에서 <b>[입금완료]</b>를 눌러주세요.</p>`
+          ? `<h2>✓ ${esc(out.msg)}</h2><p style="background:#fef3c7;color:#92400e;padding:10px 12px;border-radius:8px">💰 관리자 주문상태가 <b>입금대기</b>로 기록됐습니다. <b>${esc(DEPOSIT_BANK_LABEL[out.sourceKey] ?? '매입처')} 계좌로 이체</b>한 뒤 관리자에서 <b>[입금완료]</b>를 눌러주세요.</p>`
           : `<h2>✓ ${esc(out.msg)}</h2><p>열린 ${esc(out.sourceLabel ?? '매입처')} 창으로 가서 결제를 마치세요. 이 탭은 닫으셔도 됩니다.</p>`)
         : `<h2>✗ ${esc(out.msg)}</h2><p>다시 시도하거나 매입처에서 직접 주문하세요.</p>`)
       return

@@ -6,9 +6,9 @@
  *
  * 흐름:
  *   0) PENDING_APPROVAL 폴링 → 승인완료시 재고 보충 + status=APPROVED
- *   1) APPROVED/SELLING 상품의 매입처 재고 확인 — 4개 공급처 전부
+ *   1) APPROVED/SELLING 상품의 매입처 재고 확인 — 4개 공급처 전부(+ K홀세일, 2026-09-27)
  *        ggsan · bio77   : goods_view.php 라이브 조회(상용몰 엔진)
- *        upickb2b · wellroot : Cafe24 카테고리 리스트 품절아이콘 스캔
+ *        upickb2b · wellroot · kwholesale : Cafe24 카테고리 리스트 품절아이콘 스캔
  *   2) 신규 품절 → 쿠팡 판매중지(STOPPED) / 재입고 → 판매재개
  *   3) 재고 있는 상품은 쿠팡 판매가능수량을 MIN_QTY 이상으로 유지(주문이 끊기지 않게)
  *   4) 실행 로그를 jimscanner_coupang_stock_sync_runs 에 기록 (관리자 위젯 소스)
@@ -53,6 +53,8 @@ const SUPPLIERS = {
   bio77:    { kind: 'mall',    base: env.BIO77_BASE_URL     || 'https://77bio.co.kr',    user: env.BIO77_USER,     pass: env.BIO77_PASS,     label: '77바이오' },
   upickb2b: { kind: 'cafe24',  base: env.UPICKB2B_BASE_URL  || 'https://upickb2b.com',   user: env.UPICKB2B_USER,  pass: env.UPICKB2B_PASS,  label: '유픽B2B', table: 'jimscanner_upickb2b_products', key: 'product_no', cateCol: 'cate_no' },
   wellroot: { kind: 'cafe24',  base: env.WELLROOT_BASE_URL  || 'https://wellrootb2b.com', user: env.WELLROOT_USER, pass: env.WELLROOT_PASS,  label: '웰루트',  table: 'jimscanner_wellroot_products',  key: 'product_no', cateCol: 'cate_nos' },
+  // K-홀세일(2026-09-27): Cafe24 AuthSSL — 목록 품절아이콘 판정이 수집기(상세 품절박스)와 155/155 일치 실측
+  kwholesale: { kind: 'cafe24', base: env.KWHOLESALE_BASE_URL || 'https://kwholesale.co.kr', user: env.KWHOLESALE_USER, pass: env.KWHOLESALE_PASS, label: 'K홀세일', table: 'jimscanner_kwholesale_products', key: 'product_no', cateCol: 'cate_nos' },
 }
 
 function signCoupang(method, urlPath) {

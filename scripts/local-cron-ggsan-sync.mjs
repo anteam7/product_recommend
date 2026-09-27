@@ -1,5 +1,5 @@
 /**
- * 로컬 cron — 매입처(ggsan · 유픽B2B · 77bio · 웰루트) 송장 자동수집 ↔ 쿠팡 송장등록 동기화
+ * 로컬 cron — 매입처(ggsan · 유픽B2B · 77bio · 웰루트 · K홀세일) 송장 자동수집 ↔ 쿠팡 송장등록 동기화
  *
  * 2026-08-20 확장: ① 유픽(Cafe24) 주문상세 추적 추가(scripts/lib/upick-tracking.mjs)
  *                 ② 쿠팡 등록을 Vercel register-invoice 호출 → **로컬 직접 실행**(scripts/lib/coupang-invoice.mjs)으로 전환
@@ -11,7 +11,8 @@
  *                    (+ supplier_source 오버라이드) 기준 조회로 전환. bio77 주문번호(16자리 숫자)가
  *                    기존 ggsan 정규식(10~18자리 숫자)과 겹쳐 오분류될 수 있었던 문제를 근본 해결
  *                    (order-server.mjs resolveOrder()와 동일한 소스 판별 규칙을 여기서도 적용).
- * 2026-09-27 확장: ⑦ 웰루트(Cafe24, 예치금 결제) 주문상세 추적 추가(scripts/lib/wellroot-tracking.mjs).
+ * 2026-09-27 확장: ⑦ 웰루트(Cafe24, 예치금 결제) 주문상세 추적 추가 → 같은 날 K홀세일 추가하며 AuthSSL Cafe24 공통
+ *                    (scripts/lib/cafe24-tracking.mjs + CAFE24_TRACKED 목록 반복)으로 일반화.
  *                    그전엔 source='wellroot' 주문이 어느 분기에도 안 걸려 조용히 건너뛰어졌다.
  *
  * canon: docs/plan-ggsan-coupang-invoice-sync.md ④(발송 동기화 크론) / ②(상태머신) / ⑤(반자동 토글) / ⑨(안전장치).
@@ -46,7 +47,13 @@ import { createClient } from '@supabase/supabase-js'
 import { createCoupangInvoiceOps, normalizeInvoiceNo } from './lib/coupang-invoice.mjs'
 import { withUpickSession, fetchUpickOrder } from './lib/upick-tracking.mjs'
 import { withBio77Session, fetchBio77Order } from './lib/bio77-tracking.mjs'
-import { withWellrootSession, fetchWellrootOrder } from './lib/wellroot-tracking.mjs'
+import { withCafe24Session, fetchCafe24Order } from './lib/cafe24-tracking.mjs'
+
+// AuthSSL Cafe24 매입처 — 추적 분기는 이 목록을 돈다(새 매입처는 여기 한 줄 추가)
+const CAFE24_TRACKED = [
+  { source: 'wellroot',   label: '웰루트',   defaultBase: 'https://wellrootb2b.com',  envBase: 'WELLROOT_BASE_URL',   envUser: 'WELLROOT_USER',   envPass: 'WELLROOT_PASS' },
+  { source: 'kwholesale', label: 'K홀세일', defaultBase: 'https://kwholesale.co.kr', envBase: 'KWHOLESALE_BASE_URL', envUser: 'KWHOLESALE_USER', envPass: 'KWHOLESALE_PASS' },
+]
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const env = Object.fromEntries(
@@ -266,10 +273,13 @@ try {
   const targets = ggsanLoginErr ? [] : (rows ?? []).filter((r) => resolveSource(r) === 'ggsan')
   const upickTargets = (rows ?? []).filter((r) => resolveSource(r) === 'upickb2b')
   const bio77Targets = (rows ?? []).filter((r) => resolveSource(r) === 'bio77')
-  const wellrootTargets = (rows ?? []).filter((r) => resolveSource(r) === 'wellroot')
+  // Cafe24 AuthSSL 매입처별 대상(자격증명은 .env.local — 이 파일의 env 로 주입)
+  for (const t of CAFE24_TRACKED) { t.base = env[t.envBase] || t.defaultBase; t.user = env[t.envUser]; t.pass = env[t.envPass] }
+  const cafe24Targets = Object.fromEntries(CAFE24_TRACKED.map((t) => [t.source, (rows ?? []).filter((r) => resolveSource(r) === t.source)]))
+  const cafe24Count = Object.values(cafe24Targets).reduce((n, l) => n + l.length, 0)
   // 위 4곳 외 매입처(도매꾹·비셀러 등)는 자동추적 미지원 — 조용히 빠지지 않게 건수만이라도 남긴다
-  const untracked = (rows ?? []).length - targets.length - upickTargets.length - bio77Targets.length - wellrootTargets.length - (ggsanLoginErr ? (rows ?? []).filter((r) => resolveSource(r) === 'ggsan').length : 0)
-  console.log(`  대상: ggsan ${targets.length}건, 유픽 ${upickTargets.length}건, 77bio ${bio77Targets.length}건, 웰루트 ${wellrootTargets.length}건${untracked > 0 ? `, 자동추적 미지원 ${untracked}건` : ''}`)
+  const untracked = (rows ?? []).length - targets.length - upickTargets.length - bio77Targets.length - cafe24Count - (ggsanLoginErr ? (rows ?? []).filter((r) => resolveSource(r) === 'ggsan').length : 0)
+  console.log(`  대상: ggsan ${targets.length}건, 유픽 ${upickTargets.length}건, 77bio ${bio77Targets.length}건, ${CAFE24_TRACKED.map((t) => `${t.label} ${cafe24Targets[t.source].length}건`).join(', ')}${untracked > 0 ? `, 자동추적 미지원 ${untracked}건` : ''}`)
 
   for (const row of targets) {
     if (Date.now() > deadlineAt) { console.log('  deadline reached — 남은 대상은 다음 회차'); break }
@@ -481,26 +491,28 @@ try {
     }
   }
 
-  // ④-b'' 웰루트(Cafe24, 예치금 결제) 추적 — 주문상세에서 주문처리상태 + 택배사/송장 수집 (Playwright headless, 세션 1회)
-  //        예치금 결제라 '입금대기' 단계가 없다(결제진행 완주 = 예치금 차감 = 발주완료). 파서는 Cafe24 공통 송장 링크 기준.
-  if (wellrootTargets.length > 0 && Date.now() < deadlineAt) {
+  // ④-b'' AuthSSL Cafe24 매입처(웰루트·K홀세일) 추적 — 주문상세에서 주문처리상태 + 택배사/송장 수집 (Playwright headless, 매입처별 세션 1회)
+  //        파서는 Cafe24 공통 송장 링크 기준(scripts/lib/cafe24-tracking.mjs). 웰루트=예치금 결제(입금대기 없음), K홀세일=무통장(입금 확인 후 출고).
+  for (const t of CAFE24_TRACKED) {
+    const list = cafe24Targets[t.source]
+    if (!list.length || Date.now() > deadlineAt) continue
     try {
-      await withWellrootSession(env, async (page, base) => {
-        for (const row of wellrootTargets) {
-          if (Date.now() > deadlineAt) { console.log('  deadline reached — 남은 웰루트 대상은 다음 회차'); break }
+      await withCafe24Session({ base: t.base, user: t.user, pass: t.pass, label: t.source }, async (page, base) => {
+        for (const row of list) {
+          if (Date.now() > deadlineAt) { console.log(`  deadline reached — 남은 ${t.label} 대상은 다음 회차`); break }
           tracked++
           try {
-            const w = await fetchWellrootOrder(page, base, row.ggsan_order_no)
+            const w = await fetchCafe24Order(page, base, row.ggsan_order_no, t.source)
             const update = { ggsan_order_status: w.status, ggsan_last_checked_at: nowIso() }
             if (!w.found) {
               errors++
-              console.log(`  wellroot#${row.ggsan_order_no} 주문 상세 없음 — skip`)
+              console.log(`  ${t.source}#${row.ggsan_order_no} 주문 상세 없음 — skip`)
               await sb.from('jimscanner_coupang_orders').update(update).eq('id', row.id)
               continue
             }
             if (w.cancelLike) {
               update.needs_attention = true
-              update.attention_reason = `웰루트 ${w.status} 감지 — 확인 필요`
+              update.attention_reason = `${t.label} ${w.status} 감지 — 확인 필요`
               await sb.from('jimscanner_coupang_orders').update(update).eq('id', row.id)
               if (!row.needs_attention) attention++
               continue
@@ -512,17 +524,17 @@ try {
               if (!sameInvoice) {
                 update.purchase_status = 'SHIPPED'
                 update.ggsan_invoice_number = invoiceNo
-                update.ggsan_carrier_name = w.carrier   // 링크 텍스트(CJ대한통운 등) → CARRIER_MAP 이 코드로 변환
+                update.ggsan_carrier_name = w.carrier   // 링크 텍스트(한진택배·CJ대한통운 등) → CARRIER_MAP 이 코드로 변환
                 update.ggsan_shipped_at = nowIso()
                 update.coupang_invoice_status = 'pending'
                 if (!w.carrier) {
                   update.needs_attention = true
-                  update.attention_reason = '택배사 미확인(웰루트)'
+                  update.attention_reason = `택배사 미확인(${t.label})`
                   if (!row.needs_attention) attention++
                 }
                 shipped++
                 fresh = true
-                console.log(`  wellroot#${row.ggsan_order_no} 발송 감지: ${w.carrier ?? '?'} ${invoiceNo}${w.invoiceRaw !== invoiceNo ? ` (원문 ${w.invoiceRaw})` : ''}`)
+                console.log(`  ${t.source}#${row.ggsan_order_no} 발송 감지: ${w.carrier ?? '?'} ${invoiceNo}${w.invoiceRaw !== invoiceNo ? ` (원문 ${w.invoiceRaw})` : ''}`)
               }
             }
             await sb.from('jimscanner_coupang_orders').update(update).eq('id', row.id)
@@ -530,13 +542,13 @@ try {
           } catch (e) {
             if (/session expired|login failed/.test(String(e?.message))) throw e
             errors++
-            console.log(`  wellroot#${row.ggsan_order_no} error: ${e instanceof Error ? e.message : String(e)}`)
+            console.log(`  ${t.source}#${row.ggsan_order_no} error: ${e instanceof Error ? e.message : String(e)}`)
           }
         }
       })
     } catch (e) {
       errors++
-      console.log(`  wellroot session error: ${e instanceof Error ? e.message : String(e)} — 웰루트 추적 건너뜀`)
+      console.log(`  ${t.source} session error: ${e instanceof Error ? e.message : String(e)} — ${t.label} 추적 건너뜀`)
     }
   }
 

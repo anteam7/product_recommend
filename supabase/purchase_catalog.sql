@@ -1,4 +1,4 @@
--- 매입 대상 상품 카탈로그 — 공급처(매입처) 5곳을 한 화면에서 비교/검색하기 위한 통합 뷰 + 일괄 쿠팡등록 큐
+-- 매입 대상 상품 카탈로그 — 공급처(매입처) 6곳을 한 화면에서 비교/검색하기 위한 통합 뷰 + 일괄 쿠팡등록 큐
 -- 화면: /admin/purchase-catalog   API: /api/admin/purchase-catalog, /api/admin/register-jobs
 -- 적용: PGPASSWORD='...' node scripts/apply-sql.mjs supabase/purchase_catalog.sql
 --
@@ -85,6 +85,28 @@ with base as (
          w.coupang_category_code,
          w.updated_at
   from public.jimscanner_wellroot_products w
+
+  union all
+  -- ── kwholesale (K-홀세일, (주)다인내추럴·웰러스) ───────────────────
+  --   공급가 = 도매가격(사업자회원가), MSP = 무료배송 하한(소비자가 + 3,000 — 수집기가 공지 규칙으로 계산, 할인불가 반영)
+  --   쿠팡 등록기 kwholesale-register.mjs (2026-09-27 첫 5건 등록·승인 확인 → supports_coupang=true, 체크 일괄등록 가능)
+  select 'kwholesale', k.product_no::text, coalesce(k.title_clean, k.title), k.brand_group, k.thumb_url, k.detail_url,
+         k.wholesale_price_krw, k.consumer_price_krw,
+         coalesce(k.shipping_fee_krw, 3000),
+         coalesce(k.shipping_text, '3,000원(5만원 이상 무료)'),
+         k.msp_price_krw, k.tiered_msp,
+         k.status, (k.status = 'active'), true, k.coupang_eligible,
+         nullif(concat_ws(' · ',
+           case when k.is_health_functional   then '건기식' end,
+           case when k.price_locked           then '할인불가' end,
+           case when k.duplicate_of is not null then '중복(#' || k.duplicate_of || ')' end,
+           case when k.needs_review           then '소비자가 확인필요' end,
+           case when k.register_excluded      then '등록제외: ' || coalesce(k.register_excluded_reason, '') end,
+           case when k.consumer_price_manual is not null then '소비자가 수동확정 ' || k.consumer_price_manual end,
+           case when k.excluded_reason is not null and k.duplicate_of is null and not k.needs_review then k.excluded_reason end), ''),
+         k.coupang_category_code,
+         k.updated_at
+  from public.jimscanner_kwholesale_products k
 ),
 calc as (
   -- 수수료율은 등록 카테고리로 정해진다(영양제 7.6% vs 그 외 식품 10.6%) — 고정 상수를 쓰면 마진 순위가 뒤바뀐다.
@@ -131,7 +153,7 @@ left join lateral (
 ) l on true;
 
 comment on view public.jimscanner_purchase_catalog is
-  '매입처 5곳(ggsan/upickb2b/bio77/beseller/wellroot) 상품을 정규화한 통합 카탈로그 + MSP 판매 시 마진 + 쿠팡 등록 현황. /admin/purchase-catalog 전용.';
+  '매입처 6곳(ggsan/upickb2b/bio77/beseller/wellroot/kwholesale) 상품을 정규화한 통합 카탈로그 + MSP 판매 시 마진 + 쿠팡 등록 현황. /admin/purchase-catalog 전용.';
 
 -- 뷰는 소유자 권한으로 동작해 하위 테이블 RLS를 우회하므로 service_role(어드민 API) 외에는 접근 차단
 revoke all on public.jimscanner_purchase_catalog from anon, authenticated;

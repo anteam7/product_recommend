@@ -31,6 +31,7 @@ const RUN_TIMEOUT_MS = +(argOf('timeout') || 30 * 60 * 1000)
 // 매입처 → 등록 스크립트. 여기 없는 매입처는 잡을 FAILED 처리한다(조용히 ggsan으로 새는 사고 방지).
 const SOURCE_SCRIPTS = {
   wellroot: { script: 'wellroot-register.mjs', extra: [] },
+  kwholesale: { script: 'kwholesale-register.mjs', extra: [] },   // 2026-09-27 — 판매가는 수집기 sale_prices(max(MSP, 순마진10%))
   bio77: { script: 'bio77-register.mjs', extra: [] },
   upickb2b: { script: 'upickb2b-register.mjs', extra: ['--request'] },
   ggsan: { script: 'coupang-register-batch-v2.mjs', extra: [] },
