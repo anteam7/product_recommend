@@ -17,6 +17,7 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
 import { createClient } from '@supabase/supabase-js'
+import { parseSpec, buildPurchaseOptions } from './lib/coupang-purchase-options.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const env = Object.fromEntries(readFileSync(path.join(__dirname, '..', '.env.local'), 'utf8').split(/\r?\n/).filter((l) => l && !l.startsWith('#') && l.includes('=')).map((l) => { const i = l.indexOf('='); let v = l.slice(i + 1).trim(); if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) v = v.slice(1, -1); return [l.slice(0, i).trim(), v] }))
@@ -43,18 +44,8 @@ function sign(m, p) { const dt = new Date().toISOString().substring(2, 19).repla
 async function cp(m, p, b) { const { dt, sig } = sign(m, p); const r = await fetch(`${HOST}${p}`, { method: m, headers: { Authorization: `CEA algorithm=HmacSHA256, access-key=${AK}, signed-date=${dt}, signature=${sig}`, 'Content-Type': 'application/json;charset=UTF-8' }, body: b ? JSON.stringify(b) : undefined }); const t = await r.text(); try { return { s: r.status, b: JSON.parse(t) } } catch { return { s: r.status, b: t } } }
 const metaDir = path.join(__dirname, '..', '_tmp_meta_cache'); if (!existsSync(metaDir)) mkdirSync(metaDir, { recursive: true })
 async function getMeta(code) { const p = path.join(metaDir, `${code}_raw.json`); if (existsSync(p)) return JSON.parse(readFileSync(p, 'utf8')); const r = await cp('GET', `/v2/providers/seller_api/apis/api/v1/marketplace/meta/category-related-metas/display-category-codes/${code}`); if (r.s !== 200 || !r.b?.data) throw new Error('meta ' + code + ' ' + r.s); writeFileSync(p, JSON.stringify(r.b.data, null, 2), 'utf8'); return r.b.data }
-function pickUnit(units, prefs) { if (!units || !units.length) return ''; for (const x of prefs) if (units.includes(x)) return x; return units[0] }
 async function downloadable(u) { try { const r = await fetch(u); return r.status === 200 && /image\//.test(r.headers.get('content-type') || '') } catch { return false } }
 
-function parseAttrs(title) {
-  const out = {}; const t = (title || '').replace(/[,()]/g, ' ').replace(/\s+/g, ' ')
-  const mw = t.match(/(\d+(?:\.\d+)?)\s*(mg|g|kg)\b/i); if (mw) { let v = parseFloat(mw[1]); const u = mw[2].toLowerCase(); if (u === 'kg') v *= 1000; else if (u === 'mg') v /= 1000; out.개당중량 = v }
-  const mv = t.match(/(\d+(?:\.\d+)?)\s*(ml|L)\b/i); if (mv) { let v = parseFloat(mv[1]); if (mv[2].toLowerCase() === 'l') v *= 1000; out.개당용량 = v }
-  const bm = [...t.matchAll(/[xX×*]\s*(\d+)\s*(병|정|캡슐|포|개입|회분)/g)]; let bundle = null
-  if (bm.length) { const last = bm[bm.length - 1]; bundle = { value: parseInt(last[1]), unit: last[2] } } else { const m = t.match(/\b(\d+)\s*(정|캡슐|포|병|개입|회분)\b/); if (m) bundle = { value: parseInt(m[1]), unit: m[2] } }
-  if (bundle) out.개당캡슐정 = bundle.value
-  out.수량 = 1; return out
-}
 function pickNoticeCategory(ncs) { if (!ncs || !ncs.length) return null; for (const p of ['가공식품', '건강기능식품']) { const f = ncs.find((n) => n.noticeCategoryName === p); if (f) return f } return ncs[0] }
 function buildNotices(nc, title) {
   if (!nc) return []; const name = nc.noticeCategoryName; const isImport = /직수입|수입/.test(title)
@@ -70,18 +61,6 @@ function buildNotices(nc, title) {
   }
   const mandatory = (nc.noticeCategoryDetailNames ?? []).filter((d) => d.required === 'MANDATORY')
   return mandatory.map((d) => ({ noticeCategoryName: name, noticeCategoryDetailName: d.noticeCategoryDetailName, content: valueFor(d.noticeCategoryDetailName) }))
-}
-function buildItemAttributes(catAttrs, parsed) {
-  const isLiquid = parsed.개당용량 != null && parsed.개당용량 > 0
-  const hasSuryang = catAttrs.some((a) => a.attributeTypeName === '수량'); const fallbackName = hasSuryang ? '수량' : '총 수량'
-  return catAttrs.map((a) => {
-    const nm = a.attributeTypeName
-    if (nm === fallbackName || nm === '수량' || nm === '총 수량') { const u = pickUnit(a.usableUnits, ['박스', '세트', '개', '팩']); return { attributeTypeName: nm, attributeValueName: `1 ${u}`, exposed: 'EXPOSED' } }
-    if (nm === '개당 캡슐/정' && a.required === 'MANDATORY') { const u = pickUnit(a.usableUnits, ['회분', '정']); const v = parsed.개당캡슐정 || 30; return { attributeTypeName: nm, attributeValueName: `${v} ${u}`, exposed: 'NONE' } }
-    if (nm === '개당 중량' && a.required === 'MANDATORY') { const u = pickUnit(a.usableUnits, ['g', 'kg']); const v = parsed.개당중량 != null && parsed.개당중량 > 0 ? parsed.개당중량 : (isLiquid ? 1 : 0); return { attributeTypeName: nm, attributeValueName: `${v} ${u}`, exposed: 'NONE' } }
-    if (nm === '개당 용량' && a.required === 'MANDATORY') { const u = pickUnit(a.usableUnits, ['ml', 'L']); const v = parsed.개당용량 != null && parsed.개당용량 > 0 ? parsed.개당용량 : 0; return { attributeTypeName: nm, attributeValueName: `${v} ${u}`, exposed: 'NONE' } }
-    return { attributeTypeName: nm, attributeValueName: '', exposed: 'NONE' }
-  })
 }
 
 // 가격 산정 (카테고리 예측 불필요 — 배치 사전 필터에도 사용)
@@ -122,9 +101,12 @@ async function buildPayload(row) {
   const noticeNames = (meta.noticeCategories ?? []).map((n) => n.noticeCategoryName)
   if (!(noticeNames.includes('가공식품') || noticeNames.includes('건강기능식품'))) throw new Error(`비식품 카테고리(${noticeNames.join(',')}) — 건강식품만 등록`)
 
-  const parsed = parseAttrs(row.title)
   const notices = buildNotices(pickNoticeCategory(meta.noticeCategories), row.title)
-  const itemAttributes = buildItemAttributes(meta.attributes ?? [], parsed)
+  // 구매옵션(공통 모듈 lib/coupang-purchase-options.mjs) — 상품명 규격. 못 읽으면 지어내지 않고 등록 보류
+  // (옛 공식은 30회분·0ml 를 비노출로 채우고 "1 박스"만 노출 → 단위가격 없음·여러 박스 상품도 "1 박스")
+  const opt = buildPurchaseOptions(meta.attributes ?? [], parseSpec(row.title), 1)
+  if (opt.error) throw new Error(`구매옵션 — ${opt.error}`)
+  const itemAttributes = opt.attributes
 
   // 이미지: 대표=image_thumb, 상세 contents=images(다운로드 가능분, 최대 10)
   const thumb = row.image_thumb
@@ -134,8 +116,7 @@ async function buildPayload(row) {
   const items_images = [{ imageOrder: 0, imageType: 'REPRESENTATION', vendorPath: thumb }]
   const contents = contentImgs.map((u) => ({ contentsType: 'IMAGE_NO_SPACE', contentDetails: [{ content: u, detailType: 'IMAGE' }] }))
 
-  let itemName = '1박스'
-  if (parsed.개당캡슐정) { const ca = (meta.attributes ?? []).find((a) => a.attributeTypeName === '개당 캡슐/정'); const u = ca ? pickUnit(ca.usableUnits, ['정', '회분']) : '정'; itemName = `${parsed.개당캡슐정}${u} 1박스` }
+  const itemName = opt.itemName
   const originalPrice = Math.max(listPrice, Math.ceil(listPrice * 1.2 / 100) * 100)
 
   const payload = {
@@ -212,7 +193,7 @@ for (let i = 0; i < rows.length; i++) {
   try {
     const built = await buildPayload(row)
     if (DRY) {
-      console.log(`${idx} ▷ ${row.product_no} ${(row.title || '').slice(0, 34).padEnd(34)} | cat ${built.displayCategoryCode}(${built.categoryName}) | 회원가 ${built.dome}→판매 ${built.listPrice} (MSP ${built.msp || '-'}, ${built.marginPct}%) | 고시${built.payload.items[0].notices.length} 속성${built.payload.items[0].attributes.length} 대표${built.repOk ? 'O' : 'X'}/상세${built.contentImgCount}`)
+      console.log(`${idx} ▷ ${row.product_no} ${(row.title || '').slice(0, 34).padEnd(34)} | cat ${built.displayCategoryCode}(${built.categoryName}) | 회원가 ${built.dome}→판매 ${built.listPrice} (MSP ${built.msp || '-'}, ${built.marginPct}%) | 고시${built.payload.items[0].notices.length} 속성${built.payload.items[0].attributes.length} 대표${built.repOk ? 'O' : 'X'}/상세${built.contentImgCount} | 옵션 ${built.payload.items[0].itemName}`)
       summary.ok++; await new Promise((r) => setTimeout(r, 300)); continue
     }
     const res = await cp('POST', '/v2/providers/seller_api/apis/api/v1/marketplace/seller-products', built.payload)

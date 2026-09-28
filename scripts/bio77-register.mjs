@@ -14,6 +14,7 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
 import { createClient } from '@supabase/supabase-js'
+import { parseSpec, buildPurchaseOptions } from './lib/coupang-purchase-options.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const env = Object.fromEntries(readFileSync(path.join(__dirname, '..', '.env.local'), 'utf8').split(/\r?\n/).filter(l => l && !l.startsWith('#') && l.includes('=')).map(l => { const i = l.indexOf('='); let v = l.slice(i + 1).trim(); if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) v = v.slice(1, -1); return [l.slice(0, i).trim(), v] }))
@@ -71,11 +72,6 @@ async function getCategoryMeta(displayCategoryCode) {
   return r.body.data
 }
 
-function pickUnit(usableUnits, preferences) {
-  if (!usableUnits || usableUnits.length === 0) return ''
-  for (const p of preferences) if (usableUnits.includes(p)) return p
-  return usableUnits[0]
-}
 function pickNoticeCategory(noticeCategories) {
   if (!noticeCategories || noticeCategories.length === 0) return null
   // ggsan(coupang-register-batch-v2.mjs)과 동일 순서: "건강기능식품" 고시는 실제 MFDS 인증 기능정보/영양정보를
@@ -99,66 +95,6 @@ function buildNotices(noticeCategory, title) {
   }
   const mandatory = (noticeCategory.noticeCategoryDetailNames ?? []).filter(dn => dn.required === 'MANDATORY')
   return mandatory.map(dn => ({ noticeCategoryName: name, noticeCategoryDetailName: dn.noticeCategoryDetailName, content: valueFor(dn.noticeCategoryDetailName) }))
-}
-// coupang-register-batch-v2.mjs(ggsan)와 동일한 검증된 EXPOSED 스킴을 그대로 쓰되,
-// "개당 중량/용량/캡슐" 수치는 XLSM 구매옵션 실측값(options)에서 가져와 title 정규식 추측보다 정확하게 채운다.
-// 주의: 개당 중량/중량 같은 이름 차이 때문에 XLSM 옵션유형명과 메타 attributeTypeName은 다르다 — 직접 문자열 매칭 금지, 반드시 정규식으로 느슨하게 찾을 것.
-function parseOptionNum(options, typeRe) {
-  const opt = (options ?? []).find(o => typeRe.test(String(o?.type || '')))
-  if (!opt) return null
-  const m = /([\d.]+)\s*([a-zA-Z가-힣]+)/.exec(String(opt.value || ''))
-  return m ? { value: parseFloat(m[1]), unit: m[2] } : null
-}
-// 2026-09-01 실측(WebSearch로 확인): 쿠팡이 2026-02-02부터 "필수 구매옵션 입력 의무화" 정책을 시행함.
-// 메타의 isAllowSingleItem이 false인 카테고리는 실제 옵션(변형)을 가진 상품만 등록 가능 — 단일 SKU에
-// exposed:EXPOSED로 더미 값을 채워 넣는 방식(ggsan 구 방식, 73137/58927 등 옛 안정 카테고리도 현재는 false)은
-// 통과하지 못함(회귀 확인). isAllowSingleItem=true인 카테고리만 단일상품으로 등록하고, false는 이번엔 SKIP한다
-// (진짜 옵션조합 등록은 items[] 배열에 여러 variant를 넣는 별도 구현 필요 — 후속 작업, docs/coupang-integration-guide.md §9 참고).
-function buildItemAttributes(categoryAttrs, options) {
-  const hasSuryang = categoryAttrs.some(a => a.attributeTypeName === '수량')
-  const fallbackName = hasSuryang ? '수량' : '총 수량'
-  const capsule = parseOptionNum(options, /캡슐|정|개입/)
-  const weight = parseOptionNum(options, /중량|무게/)
-  const volume = parseOptionNum(options, /용량/)
-  const isLiquid = volume != null
-
-  // 공백 없는 "숫자+단위" 포맷(77bio XLSM 원본 표기와 동일, 예: "200g")으로 테스트 — 2026-09-01
-  const buildValue = (a) => {
-    const name = a.attributeTypeName
-    if (name === fallbackName) return `1${pickUnit(a.usableUnits, ['개', '박스', '세트', '팩'])}`
-    if (name === '개당 캡슐/정') return `${capsule?.value ?? 30}${pickUnit(a.usableUnits, ['정', '회분'])}`
-    if (name === '개당 중량') return `${weight?.value ?? (isLiquid ? 1 : 0)}${pickUnit(a.usableUnits, ['g', 'kg'])}`
-    if (name === '개당 용량') return `${volume?.value ?? 0}${pickUnit(a.usableUnits, ['ml', 'L'])}`
-    return '상세설명 참조'
-  }
-  // groupNumber(캡슐/중량/용량처럼 상호배타)는 실제 상품형태에 맞는 것 하나만 채우고 나머지는 생략
-  const groups = new Map()
-  const rest = []
-  for (const a of categoryAttrs) {
-    const name = a.attributeTypeName
-    if ((name === '수량' || name === '총 수량') && name !== fallbackName) continue // 중복 수량류 생략
-    if (a.groupNumber && a.groupNumber !== 'NONE') {
-      const cur = groups.get(a.groupNumber)
-      const matched = (n) => (n === '개당 캡슐/정' && capsule) || (n === '개당 중량' && weight) || (n === '개당 용량' && volume)
-      if (!cur || (matched(name) && !matched(cur.attributeTypeName))) groups.set(a.groupNumber, a)
-    } else {
-      rest.push(a)
-    }
-  }
-  const selected = [...groups.values(), ...rest]
-  // 2026-09-01 재실측: 전부 NONE(수량 포함)도 "필수 구매 옵션 없음" 오류가 재현됨 — isAllowSingleItem=true
-  // 카테고리에서도 최소한 "수량"만은 EXPOSED로 남겨야 하는 것으로 보임(구 ggsan 방식과 동일하되, 그룹 대표
-  // 속성(개당캡슐/중량/용량)만 NONE으로 낮춘 조합은 아직 미검증 — 이번 테스트).
-  // 수량 + 그룹 대표(개당캡슐/중량/용량 중 하나) 둘 다 EXPOSED(메타 그대로) — 값 포맷만 공백없이 테스트
-  const out = selected.map(a => {
-    const isMandatoryNumeric = a.required === 'MANDATORY' && ['개당 캡슐/정', '개당 중량', '개당 용량'].includes(a.attributeTypeName)
-    const isExposedCandidate = a.attributeTypeName === fallbackName || isMandatoryNumeric
-    const value = isExposedCandidate ? buildValue(a) : ''
-    const exposed = isExposedCandidate ? 'EXPOSED' : 'NONE'
-    return { attributeTypeName: a.attributeTypeName, attributeValueName: value, exposed }
-  })
-  const itemName = out.filter(a => a.exposed === 'EXPOSED').map(a => a.attributeValueName).join(' ') || '1개'
-  return { attributes: out, itemName }
 }
 function extractImgUrls(html) {
   return [...String(html || '').matchAll(/<img[^>]+src=["']([^"']+)["']/gi)].map(m => m[1])
@@ -216,7 +152,12 @@ function buildPayload(row, meta) {
   const saleName = saleTitle(displayTitle, row) // 사은품 문구 포함(is_pill_form=true만) — 노출상품명 전용, 고시정보(notices)엔 쓰지 않음
   const noticeCategory = pickNoticeCategory(meta.noticeCategories)
   const notices = buildNotices(noticeCategory, displayTitle)
-  const { attributes: itemAttributes, itemName } = buildItemAttributes(meta.attributes ?? [], row.options)
+  // 구매옵션(공통 모듈): 노출상품명 규격(알약이면 "(60캡슐)") → 없으면 77바이오 구매옵션 실측값(중량 31.5g 등).
+  // 규격을 못 읽으면 지어내지 않고 등록 보류(옛 공식은 30정·0g 기본값을 넣었다). isAllowSingleItem=false SKIP 은 본문에서 처리
+  const optText = (row.options ?? []).filter(o => !/^수량$/.test(String(o?.type || ''))).map(o => o?.value).filter(Boolean).join(' ')
+  const opt = buildPurchaseOptions(meta.attributes ?? [], parseSpec(displayTitle) ?? parseSpec(optText), 1)
+  if (opt.error) throw new Error(`구매옵션 — ${opt.error}`)
+  const { attributes: itemAttributes, itemName } = opt
 
   const items = [{
     itemName, originalPrice, salePrice,
@@ -293,7 +234,7 @@ for (let i = 0; i < withMargin.length; i++) {
     }
     const built = buildPayload(row, meta)
     if (DRY) {
-      console.log(`${idx} (dry) ${row.goods_no} ${row.title.slice(0, 36).padEnd(36)} | ${built.salePrice.toLocaleString().padStart(7)}원 (${built.marginPct}%) [${row.coupang_category_code}]`)
+      console.log(`${idx} (dry) ${row.goods_no} ${row.title.slice(0, 36).padEnd(36)} | ${built.salePrice.toLocaleString().padStart(7)}원 (${built.marginPct}%) [${row.coupang_category_code}] | 옵션 ${built.payload.items[0].itemName}`)
       continue
     }
     const r = await api('POST', '/v2/providers/seller_api/apis/api/v1/marketplace/seller-products', built.payload)

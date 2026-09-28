@@ -16,6 +16,7 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
 import { createClient } from '@supabase/supabase-js'
+import { parseSpec, buildPurchaseOptions } from './lib/coupang-purchase-options.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const env = Object.fromEntries(
@@ -84,41 +85,6 @@ async function getCategoryMeta(displayCategoryCode) {
   return r.body.data
 }
 
-// 단위 호환 선택
-function pickUnit(usableUnits, preferences) {
-  if (!usableUnits || usableUnits.length === 0) return null
-  for (const p of preferences) if (usableUnits.includes(p)) return p
-  return usableUnits[0]
-}
-
-function parseAttrs(title) {
-  const out = {}
-  const t = title.replace(/[,()]/g, ' ').replace(/\s+/g, ' ')
-  const mw = t.match(/(\d+(?:\.\d+)?)\s*(mg|g|kg)\b/i)
-  if (mw) {
-    let v = parseFloat(mw[1]); let u = mw[2].toLowerCase()
-    if (u === 'kg') v *= 1000; else if (u === 'mg') v /= 1000
-    out.개당중량 = v
-  }
-  const mv = t.match(/(\d+(?:\.\d+)?)\s*(ml|L)\b/i)
-  if (mv) {
-    let v = parseFloat(mv[1])
-    if (mv[2].toLowerCase() === 'l') v *= 1000
-    out.개당용량 = v
-  }
-  const bundleMatches = [...t.matchAll(/[xX×*]\s*(\d+)\s*(병|정|캡슐|포|개입|회분)/g)]
-  let bundle = null
-  if (bundleMatches.length > 0) {
-    const last = bundleMatches[bundleMatches.length - 1]
-    bundle = { value: parseInt(last[1]), unit: last[2] }
-  } else {
-    const m = t.match(/\b(\d+)\s*(정|캡슐|포|병|개입|회분)\b/)
-    if (m) bundle = { value: parseInt(m[1]), unit: m[2] }
-  }
-  if (bundle) out.개당캡슐정 = bundle.value
-  out.수량 = 1
-  return out
-}
 
 // notice 카테고리 선택: 가공식품 > 건강기능식품 > 첫 번째
 function pickNoticeCategory(noticeCategories) {
@@ -154,42 +120,6 @@ function buildNotices(noticeCategory, title) {
   }))
 }
 
-function buildItemAttributes(categoryAttrs, parsedAttrs) {
-  // 모든 MANDATORY 값 채움 (노출제한 방지) — 검증된 룰
-  //   - 수량 1 박스 (EXPOSED)
-  //   - 개당 캡슐/정: 입수량 (있으면) or "30 회분" placeholder
-  //   - 개당 중량: title에서 추출 (없으면 분말 0, 액상 placeholder)
-  //   - 개당 용량: title에서 추출 (없으면 분말 0, 액상 placeholder)
-  const isLiquid = parsedAttrs.개당용량 != null && parsedAttrs.개당용량 > 0
-  const hasSuryang = categoryAttrs.some((a) => a.attributeTypeName === '수량')
-  const fallbackName = hasSuryang ? '수량' : '총 수량'
-
-  return categoryAttrs.map((a) => {
-    const name = a.attributeTypeName
-    if (name === fallbackName || name === '수량' || name === '총 수량') {
-      const unit = pickUnit(a.usableUnits, ['박스', '세트', '개', '팩'])
-      return { attributeTypeName: name, attributeValueName: `1 ${unit}`, exposed: 'EXPOSED' }
-    }
-    if (name === '개당 캡슐/정' && a.required === 'MANDATORY') {
-      const unit = pickUnit(a.usableUnits, ['회분', '정'])
-      const v = parsedAttrs.개당캡슐정 || 30
-      return { attributeTypeName: name, attributeValueName: `${v} ${unit}`, exposed: 'NONE' }
-    }
-    if (name === '개당 중량' && a.required === 'MANDATORY') {
-      const unit = pickUnit(a.usableUnits, ['g', 'kg'])
-      const v = parsedAttrs.개당중량 != null && parsedAttrs.개당중량 > 0
-        ? parsedAttrs.개당중량
-        : (isLiquid ? 1 : 0)
-      return { attributeTypeName: name, attributeValueName: `${v} ${unit}`, exposed: 'NONE' }
-    }
-    if (name === '개당 용량' && a.required === 'MANDATORY') {
-      const unit = pickUnit(a.usableUnits, ['ml', 'L'])
-      const v = parsedAttrs.개당용량 != null && parsedAttrs.개당용량 > 0 ? parsedAttrs.개당용량 : 0
-      return { attributeTypeName: name, attributeValueName: `${v} ${unit}`, exposed: 'NONE' }
-    }
-    return { attributeTypeName: name, attributeValueName: '', exposed: 'NONE' }
-  })
-}
 
 function buildPayload(row, meta) {
   const dome = row.price_krw
@@ -236,19 +166,15 @@ function buildPayload(row, meta) {
     displayCategoryCode = 73137
   }
 
-  const parsed = parseAttrs(row.title)
   const noticeCategory = pickNoticeCategory(meta.noticeCategories)
   const notices = buildNotices(noticeCategory, row.title)
-  const itemAttributes = buildItemAttributes(meta.attributes ?? [], parsed)
+  // 구매옵션(공통 모듈 lib/coupang-purchase-options.mjs) — 상품명 규격. 못 읽으면 지어내지 않고 등록 보류
+  // (옛 공식은 30회분·0ml 를 비노출로 채우고 "1 박스"만 노출 → 단위가격 없음·여러 박스 상품도 "1 박스")
+  const opt = buildPurchaseOptions(meta.attributes ?? [], parseSpec(row.title), 1)
+  if (opt.error) throw new Error(`구매옵션 — ${opt.error}`)
+  const itemAttributes = opt.attributes
 
-  // itemName: 카테고리 메타 호환 단위만 사용 — "60정 1박스" / "30포 1박스" / "1박스"
-  // "개입"/"캡슐" 같은 비호환 단위는 모두 "정" 또는 "회분"으로 정규화
-  let itemName = '1박스'
-  if (parsed.개당캡슐정) {
-    const capsuleAttr = (meta.attributes ?? []).find((a) => a.attributeTypeName === '개당 캡슐/정')
-    const u = capsuleAttr ? pickUnit(capsuleAttr.usableUnits, ['정', '회분']) : '정'
-    itemName = `${parsed.개당캡슐정}${u} 1박스`
-  }
+  const itemName = opt.itemName
 
   // originalPrice ≥ salePrice 보장 (정가-판매가 역전 = 노출제한 원인)
   const originalPrice = Math.max(row.list_price_krw ?? 0, Math.ceil(listPrice * 1.2 / 100) * 100)

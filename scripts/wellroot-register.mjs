@@ -16,6 +16,7 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
 import { createClient } from '@supabase/supabase-js'
+import { parseSpec, buildPurchaseOptions } from './lib/coupang-purchase-options.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const env = Object.fromEntries(readFileSync(path.join(__dirname, '..', '.env.local'), 'utf8').split(/\r?\n/).filter(l => l && !l.startsWith('#') && l.includes('=')).map(l => { const i = l.indexOf('='); let v = l.slice(i + 1).trim(); if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) v = v.slice(1, -1); return [l.slice(0, i).trim(), v] }))
@@ -84,11 +85,6 @@ async function downloadable(u) {
   try { const r = await fetch(u); return r.status === 200 && /image\//.test(r.headers.get('content-type') || '') } catch { return false }
 }
 
-function pickUnit(usableUnits, preferences) {
-  if (!usableUnits || usableUnits.length === 0) return ''
-  for (const p of preferences) if (usableUnits.includes(p)) return p
-  return usableUnits[0]
-}
 function pickNoticeCategory(noticeCategories) {
   if (!noticeCategories || noticeCategories.length === 0) return null
   // "건강기능식품" 고시는 MFDS 인증 기능정보/영양정보를 요구해 placeholder로 거절될 수 있음(2026-09-01 실측)
@@ -113,92 +109,6 @@ function buildNotices(noticeCategory, title) {
   }
   const mandatory = (noticeCategory.noticeCategoryDetailNames ?? []).filter(d => d.required === 'MANDATORY')
   return mandatory.map(d => ({ noticeCategoryName: name, noticeCategoryDetailName: d.noticeCategoryDetailName, content: valueFor(d.noticeCategoryDetailName) }))
-}
-
-// 웰루트 options 는 [["300g","500g"],...] 형태의 셀렉트 라벨 배열이라 bio77 XLSM의 {type,value} 와 다르다.
-// 단일상품 등록에 필요한 수치(개당 중량/용량/캡슐)는 상품명에서 파싱해 bio77 공식이 기대하는 형태로 넘긴다.
-// 단위는 g/ml 로 정규화한다(메타 usableUnits가 g/ml을 선호하므로 1kg→1000g 로 바꿔야 "1g"으로 잘못 표기되지 않는다).
-function optionsFromTitle(title) {
-  const out = []
-  const t = String(title || '').replace(/[,()]/g, ' ').replace(/\s+/g, ' ')
-  const mw = t.match(/(\d+(?:\.\d+)?)\s*(mg|g|kg)\b/i)
-  if (mw) {
-    let v = parseFloat(mw[1]); const u = mw[2].toLowerCase()
-    if (u === 'kg') v *= 1000; else if (u === 'mg') v /= 1000
-    out.push({ type: '개당 중량', value: `${+v.toFixed(2)}g` })
-  }
-  const mv = t.match(/(\d+(?:\.\d+)?)\s*(ml|L)\b/i)
-  if (mv) {
-    let v = parseFloat(mv[1])
-    if (mv[2].toLowerCase() === 'l') v *= 1000
-    out.push({ type: '개당 용량', value: `${+v.toFixed(2)}ml` })
-  }
-  const bm = [...t.matchAll(/[xX×*]\s*(\d+)\s*(정|캡슐|포|병|개입|회분)/g)]
-  // 한글 뒤에서는 \b 가 동작하지 않는다(\w 에 한글이 없어 "90정" 끝에 경계가 생기지 않음) → 후행 부정탐색으로 대체.
-  // 이걸 놓치면 캡슐/정 수량 파싱이 실패해 기본값 30정이 그대로 등록된다(2026-09-17 #317 양배추정 90정 실측).
-  const single = t.match(/(\d+)\s*(정|캡슐|포|병|개입|회분)(?![가-힣])/)
-  const bundle = bm.length ? { v: +bm[bm.length - 1][1], u: bm[bm.length - 1][2] } : (single ? { v: +single[1], u: single[2] } : null)
-  if (bundle) out.push({ type: '개당 캡슐/정', value: `${bundle.v}${bundle.u}` })
-  return out
-}
-function parseOptionNum(options, typeRe) {
-  const opt = (options ?? []).find(o => typeRe.test(String(o?.type || '')))
-  if (!opt) return null
-  const m = /([\d.]+)\s*([a-zA-Z가-힣]+)/.exec(String(opt.value || ''))
-  return m ? { value: parseFloat(m[1]), unit: m[2] } : null
-}
-// ★ bio77-register.mjs:114-159 의 검증된 공식 그대로 (2026-09-01 확정, "숫자+단위 공백 없음")
-//   - isAllowSingleItem=false 카테고리는 호출 전에 SKIP 처리한다
-//   - "수량"(또는 "총 수량") + 그룹 대표 필수속성만 EXPOSED, 나머지는 NONE
-function buildItemAttributes(categoryAttrs, options, qty = 1) {
-  // 수량 축 속성은 카테고리마다 '수량' 또는 '총 수량' 이고, 둘 다 있으면서 '총 수량' 만 MANDATORY 인
-  // 카테고리가 있다(58960 배즙·72797 석류주스). '수량' 이 있다는 이유로 '총 수량' 을 건너뛰면
-  // 필수 속성이 빠져 "필수 구매 옵션 존재하지 않습니다"로 거절된다(2026-09-18 #453 석류정 실측).
-  // → 필수인 쪽을 우선 고른다.
-  const qtyAttrs = categoryAttrs.filter(a => a.attributeTypeName === '수량' || a.attributeTypeName === '총 수량')
-  const fallbackName = (qtyAttrs.find(a => a.required === 'MANDATORY')
-    ?? qtyAttrs.find(a => a.attributeTypeName === '수량')
-    ?? qtyAttrs[0])?.attributeTypeName ?? '수량'
-  const capsule = parseOptionNum(options, /캡슐|정|개입/)
-  const weight = parseOptionNum(options, /중량|무게/)
-  const volume = parseOptionNum(options, /용량/)
-  const isLiquid = volume != null
-
-  const buildValue = (a) => {
-    const name = a.attributeTypeName
-    const u = a.usableUnits ?? []
-    if (name === fallbackName) return `${qty}${pickUnit(u, ['개', '박스', '세트', '팩'])}`
-    // 카테고리마다 필수 속성 이름이 다르다(개당 캡슐/정 · 개당 수량 · 최소 중량 · 최소 용량 …).
-    // 이름을 정규식으로 느슨하게 잡고, 못 잡으면 usableUnits 로 판정한다. 값이 비면 쿠팡이
-    // "필수 구매 옵션 존재하지 않습니다"로 거절한다(2026-09-18 #267 작두콩차 실측).
-    if (/캡슐|정|개입/.test(name) || u.includes('정') || u.includes('개입')) return `${capsule?.value ?? 30}${pickUnit(u, ['정', '회분', '개입'])}`
-    if (/중량|무게/.test(name) || u.includes('g')) return `${weight?.value ?? (isLiquid ? 1 : 0)}${pickUnit(u, ['g', 'kg'])}`
-    if (/용량/.test(name) || u.includes('ml')) return `${volume?.value ?? 0}${pickUnit(u, ['ml', 'L'])}`
-    if (/수량/.test(name)) return `${qty}${pickUnit(u, ['개', '박스', '세트', '팩'])}`
-    return '상세설명 참조'
-  }
-  const groups = new Map()
-  const rest = []
-  for (const a of categoryAttrs) {
-    const name = a.attributeTypeName
-    if ((name === '수량' || name === '총 수량') && name !== fallbackName) continue
-    if (a.groupNumber && a.groupNumber !== 'NONE') {
-      const cur = groups.get(a.groupNumber)
-      const matched = (n) => (n === '개당 캡슐/정' && capsule) || (n === '개당 중량' && weight) || (n === '개당 용량' && volume)
-      if (!cur || (matched(name) && !matched(cur.attributeTypeName))) groups.set(a.groupNumber, a)
-    } else {
-      rest.push(a)
-    }
-  }
-  const selected = [...groups.values(), ...rest]
-  const out = selected.map(a => {
-    const isMandatoryNumeric = a.required === 'MANDATORY' && /중량|무게|용량|캡슐|정|개입|수량/.test(a.attributeTypeName)
-    const isExposedCandidate = a.attributeTypeName === fallbackName || isMandatoryNumeric
-    const value = isExposedCandidate ? buildValue(a) : ''
-    return { attributeTypeName: a.attributeTypeName, attributeValueName: value, exposed: isExposedCandidate ? 'EXPOSED' : 'NONE' }
-  })
-  const itemName = out.filter(a => a.exposed === 'EXPOSED').map(a => a.attributeValueName).join(' ') || `${qty}개`
-  return { attributes: out, itemName }
 }
 
 /**
@@ -315,10 +225,14 @@ async function buildPayload(row, meta, categoryCode, categoryName, qtys = [1]) {
 
   // 변형(items[]) — 수량 축. 쿠팡은 isAllowSingleItem=false 카테고리에서 변형이 2개 이상이어야 등록을 받는다.
   // 각 변형은 구매옵션 값(수량)이 서로 달라야 하고 externalVendorSku 도 달라야 한다.
-  const opts = optionsFromTitle(title)
+  // 구매옵션 = 상품명 규격(공통 모듈 lib/coupang-purchase-options.mjs). 규격을 못 읽으면 지어내지 않고 등록 보류
+  // (옛 공식은 0g·30정 기본값을 넣어 "0g · 1개"가 노출됐다 — 2026-09-27 전수점검 10건)
+  const spec = parseSpec(title)
   const items = qtys.map((n, i) => {
     const p = prices[i]
-    const { attributes, itemName } = buildItemAttributes(meta.attributes ?? [], opts, n)
+    const opt = buildPurchaseOptions(meta.attributes ?? [], spec, n)
+    if (opt.error) throw new Error(`구매옵션 — ${opt.error} (상품명에 규격 필요)`)
+    const { attributes, itemName } = opt
     return {
       itemName,
       originalPrice: Math.ceil(p.listPrice * 1.2 / 100) * 100,
@@ -418,6 +332,7 @@ for (let i = 0; i < targets.length; i++) {
       const variants = built.prices.map(p => `${p.qty}개 ${p.listPrice.toLocaleString()}원(MSP하한 ${p.msp.toLocaleString()}${p.abovePriceFloor ? "↑" : "="}, 마진 ${p.margin.toLocaleString()} ${p.marginPct}%)`).join(" · ")
       console.log(`${idx} (dry) ${String(row.product_no).padStart(4)} ${built.title.slice(0, 26).padEnd(26)} | 공급 ${String(row.supply_price_krw).padStart(6)} [${cat.code}${cat.cached ? "" : "*"}${needBundle ? " 묶음" : ""}] 상세 ${built.contentCount}장`)
       console.log(`        ${variants}`)
+      console.log(`        옵션 ${built.payload.items.map(it => it.itemName).join(' / ')}`)
       continue
     }
 
