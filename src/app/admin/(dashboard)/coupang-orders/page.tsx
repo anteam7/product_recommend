@@ -51,7 +51,13 @@ interface OrderRow {
   paid_amount: number | null
   ordered_at: string
   last_synced_at: string | null
-  raw_payload?: { receiver?: { name?: string; postCode?: string; addr1?: string; addr2?: string; safeNumber?: string; receiverNumber?: string } } | null
+  raw_payload?: {
+    receiver?: { name?: string; postCode?: string; addr1?: string; addr2?: string; safeNumber?: string; receiverNumber?: string }
+    orderItems?: Array<{ vendorItemId?: number | string; externalVendorSkuCode?: string | null }>
+  } | null
+  vendor_item_id?: number | string | null
+  // 묶음 옵션(웰루트·K홀세일 2·3개, 건강산 묶음)의 묶음 수 — 매입 수량 = 주문 수량 × 묶음 수
+  bundle_size?: number
   // 매입처 바로가기용 — 주문별 오버라이드 컬럼(supplier_source/supplier_goods_no, 둘 다 있을 때만) 우선,
   // 없으면 listings.source/source_goods_no 조인 폴백 (ggsan | upickb2b | domeggook | manual). 네이버 주문 페이지와 동일 규칙.
   supplier_source?: string | null
@@ -117,6 +123,17 @@ const SUPPLIER_LABELS: Record<string, string> = {
 // order-server.mjs의 SUPPORTED_SOURCES와 반드시 동기화 — 여기 없으면 결제진행 버튼 자체가 안 그려짐
 // (2026-09-02: bio77 추가 시 order-server.mjs만 고치고 여기를 안 고쳐서 버튼이 안 보이던 버그 재발 방지 메모)
 const PURCHASE_AUTOMATED_SOURCES = ['ggsan', 'upickb2b', 'bio77', 'wellroot', 'kwholesale']
+
+// 묶음 옵션의 묶음 수 — 원본 주문의 업체상품코드 접미사("450-2" → 2, "1000001234-B3" → 3), 앞부분이 매입처 상품번호일 때만.
+// 동기화 지점: scripts/order-server.mjs coupangBundleSize (결제진행 매입 수량 = 주문 수량 × 묶음 수)
+function bundleSizeOf(r: OrderRow, goodsNo: string | null): number {
+  const items = r.raw_payload?.orderItems ?? []
+  const it = items.find((x) => String(x?.vendorItemId) === String(r.vendor_item_id)) ?? (items.length === 1 ? items[0] : undefined)
+  const m = /^(.+?)-B?(\d+)$/.exec(String(it?.externalVendorSkuCode ?? ''))
+  if (!m || !goodsNo || m[1] !== String(goodsNo)) return 1
+  const n = Number(m[2])
+  return n >= 1 && n <= 20 ? n : 1
+}
 
 // 매입처 상세 URL (listing.source_detail_url 없거나 주문별 오버라이드일 때) — naver-orders/page.tsx 와 동일
 function supplierUrl(source: string | null, goodsNo: string | null): string | null {
@@ -202,6 +219,7 @@ async function fetchData(opts: {
     r.supplier_goods_no = goodsNo
     r.ggsan_goods_no = goodsNo
     r.ggsan_url = l?.source_detail_url ?? supplierUrl(l?.source ?? null, goodsNo)
+    r.bundle_size = bundleSizeOf(r, goodsNo)
   }
   // 수령인(배송지) 가공: raw_payload.receiver → 우편번호/전체주소/연락처 (목록 표시 + 결제진행용)
   for (const r of rows) {
@@ -463,7 +481,15 @@ export default async function CoupangOrdersPage({
                         이 값이 행에 안 보이면 어디로 얼마를 보낼지 알 수 없어 [✓입금완료] 처리가 막힌다. */}
                     {r.purchase_note && <DepositInfo note={r.purchase_note} awaiting={r.purchase_status === 'AWAITING_DEPOSIT'} />}
                   </td>
-                  <td className="px-3 py-2 text-center tabular-nums">{r.shipping_count}</td>
+                  <td className="px-3 py-2 text-center tabular-nums">
+                    {r.shipping_count}
+                    {(r.bundle_size ?? 1) > 1 && (
+                      <div className="text-[11px] font-semibold text-amber-700 whitespace-nowrap" title="묶음 옵션 — 매입처에서는 주문 수량 × 묶음 수만큼 산다">
+                        매입 {r.shipping_count * (r.bundle_size ?? 1)}개
+                        <div className="font-normal text-gray-500">{r.bundle_size}개 묶음</div>
+                      </div>
+                    )}
+                  </td>
                   <td className="px-3 py-2 text-right tabular-nums font-semibold">{fmt(r.order_price)}</td>
                   <td className="px-3 py-2 text-right">
                     <PurchaseCostCell

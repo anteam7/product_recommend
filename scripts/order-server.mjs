@@ -84,13 +84,29 @@ async function resolveOrder(orderId) {
   const rc = o.raw_payload?.receiver || {}
   const recipient = { name: rc.name || '', zip: rc.postCode || '', addr1: rc.addr1 || '', addr2: rc.addr2 || '', phone: rc.safeNumber || rc.receiverNumber || '' }
   if (!recipient.name || !recipient.addr1) return { error: '수령인 주소 정보가 부족합니다(raw_payload.receiver)', order: o }
-  const qty = o.shipping_count || 1
+  // 묶음 옵션(웰루트·K홀세일 1·2·3개 변형, 건강산 register-bundle)은 쿠팡 주문 수량이 "N개 묶음 1세트"라
+  // 매입 수량 = 주문 수량 × 묶음 수. 묶음 수는 업체상품코드 접미사("450-2" → 2, "1000001234-B3" → 3)로 읽는다.
+  // (2026-09-28 류신 프리미엄 정 "2개" 옵션 주문이 매입 1개로 잡힌 사고) 주문별 매입처 오버라이드는 사람이 고른 상품이라 배수 미적용.
+  const bundle = override ? 1 : coupangBundleSize(o, goodsNo)
+  const qty = (o.shipping_count || 1) * bundle
   return {
     order: o, source: src, sourceLabel: SUPPORTED_SOURCES[src], goodsNo, detailUrl: L?.[0]?.source_detail_url || null, recipient,
-    kind: 'coupang', dbKey: o.order_id,
+    kind: 'coupang', dbKey: o.order_id, bundle, purchaseQty: qty,
     paidAmount: o.paid_amount ?? o.order_price ?? null,                       // 고객 결제액(금액 가드 기준)
-    domeCost: L?.[0]?.dome_price_krw ? L[0].dome_price_krw * qty : null,      // 예상 공급가 합
+    domeCost: L?.[0]?.dome_price_krw ? L[0].dome_price_krw * qty : null,      // 예상 공급가 합(매입 수량 기준)
   }
+}
+
+// 쿠팡 주문 행의 묶음 수 — raw_payload.orderItems 중 이 행의 vendorItemId 의 업체상품코드 접미사.
+// 접미사 앞부분이 매입처 상품번호와 같을 때만 인정한다(다른 체계의 코드를 배수로 오인하지 않게).
+// 동기화 지점: src/app/admin/(dashboard)/coupang-orders/page.tsx bundleSizeOf
+function coupangBundleSize(o, goodsNo) {
+  const items = Array.isArray(o.raw_payload?.orderItems) ? o.raw_payload.orderItems : []
+  const it = items.find(x => String(x?.vendorItemId) === String(o.vendor_item_id)) ?? (items.length === 1 ? items[0] : null)
+  const m = /^(.+?)-B?(\d+)$/.exec(String(it?.externalVendorSkuCode ?? ''))
+  if (!m || m[1] !== String(goodsNo)) return 1
+  const n = +m[2]
+  return n >= 1 && n <= 20 ? n : 1
 }
 
 // 네이버 주문(product_order_id) 해석 — raw_payload 는 { content: { order, productOrder } } 중첩 구조
@@ -841,12 +857,14 @@ async function runFlowKwholesale(goodsNo, qty, recipient, detailUrl, full = null
 
 // ── 결제진행 실행(공용) — /run 핸들러와 원격 큐 폴러가 같이 쓴다 ──
 // fullMode=true: 무통장 완주 + 입금대기·주문번호·매입가 DB 기록. false: 직전 정지.
+// 수량은 매입 수량(purchaseQty = 주문 수량 × 묶음 수) — 쿠팡 주문 수량(shipping_count)을 그대로 쓰면 묶음 옵션이 덜 사진다
+const buyQty = r => r.purchaseQty ?? r.order.shipping_count ?? 1
 const RUN_FLOWS = {
-  ggsan: (r, full) => runFlowGgsan(r.goodsNo, r.order.shipping_count, r.recipient, full),
-  upickb2b: (r, full) => runFlowUpick(r.goodsNo, r.order.shipping_count, r.recipient, r.detailUrl, full),
-  bio77: (r, full) => runFlowBio77(r.goodsNo, r.order.shipping_count, r.recipient, full),
-  wellroot: (r, full) => runFlowWellroot(r.goodsNo, r.order.shipping_count, r.recipient, r.detailUrl, full),
-  kwholesale: (r, full) => runFlowKwholesale(r.goodsNo, r.order.shipping_count, r.recipient, r.detailUrl, full),
+  ggsan: (r, full) => runFlowGgsan(r.goodsNo, buyQty(r), r.recipient, full),
+  upickb2b: (r, full) => runFlowUpick(r.goodsNo, buyQty(r), r.recipient, r.detailUrl, full),
+  bio77: (r, full) => runFlowBio77(r.goodsNo, buyQty(r), r.recipient, full),
+  wellroot: (r, full) => runFlowWellroot(r.goodsNo, buyQty(r), r.recipient, r.detailUrl, full),
+  kwholesale: (r, full) => runFlowKwholesale(r.goodsNo, buyQty(r), r.recipient, r.detailUrl, full),
 }
 async function execPurchase(orderKey, fullMode) {
   const r = await resolveOrder(orderKey)
@@ -882,6 +900,7 @@ async function execPurchase(orderKey, fullMode) {
     // ggsan/upickb2b/bio77 공통 — execPurchase가 이 셋을 전부 거치므로 여기 한 곳만 고치면 됨).
     // r.domeCost는 resolveOrder(쿠팡)에서만 listings.dome_price_krw × 수량으로 채워짐(네이버/토스는 스키마상 미보유).
     if (r.domeCost > 0) {
+      // 단가는 "쿠팡 주문 1개(묶음이면 묶음 1세트)" 기준 — PurchaseCostCell 이 단가 × 주문 수량으로 상품가를 계산한다
       const qty = r.order.shipping_count || 1
       upd.purchase_unit_cost = Math.round(r.domeCost / qty)
     }
@@ -1019,7 +1038,7 @@ http.createServer(async (req, res) => {
       htmlPage(res, `<h2>🛒 ${esc(r.sourceLabel)} 자동 주문 확인</h2>
         <table style="border-collapse:collapse;width:100%"><tbody>
         <tr><td style="padding:6px 8px;color:#666">상품</td><td style="padding:6px 8px"><b>${esc(r.order.product_name)}</b>${r.order.option_name ? '<br><span style="color:#888;font-size:13px">' + esc(r.order.option_name) + '</span>' : ''}</td></tr>
-        <tr><td style="padding:6px 8px;color:#666">수량</td><td style="padding:6px 8px">${r.order.shipping_count}</td></tr>
+        <tr><td style="padding:6px 8px;color:#666">매입 수량</td><td style="padding:6px 8px"><b>${buyQty(r)}개</b>${(r.bundle ?? 1) > 1 ? ` <span style="color:#888;font-size:13px">(${r.bundle}개 묶음 옵션 × 주문 ${r.order.shipping_count})</span>` : ''}</td></tr>
         <tr><td style="padding:6px 8px;color:#666">매입처</td><td style="padding:6px 8px">${esc(r.sourceLabel)} #${esc(r.goodsNo)}</td></tr>
         <tr><td style="padding:6px 8px;color:#666">수령인</td><td style="padding:6px 8px"><b>${esc(r.recipient.name)}</b> · ${esc(r.recipient.zip)}<br>${esc(r.recipient.addr1)} ${esc(r.recipient.addr2)}<br>${esc(r.recipient.phone)}</td></tr>
         </tbody></table>
