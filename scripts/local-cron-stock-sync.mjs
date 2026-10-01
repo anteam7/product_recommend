@@ -25,6 +25,9 @@ import { fileURLToPath } from 'node:url'
 import path from 'node:path'
 import { createClient } from '@supabase/supabase-js'
 import { makeSession, cafe24Login, cafe24BuildStockMap, mallLogin, mallCheckStock } from './lib/supplier-stock.mjs'
+import { coupangClient, repriceCoupangListing, fetchNaverChannelProducts, syncNaverUpickListing, refreshUpickCatalog, loadUpickProducts } from './lib/upick-price-sync.mjs'
+import { naverApi } from './lib/naver-api.mjs'
+import { logExecution } from './lib/execution-log.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const env = Object.fromEntries(
@@ -46,6 +49,11 @@ const sleep = (ms) => new Promise((s) => setTimeout(s, ms))
 const DRY = process.argv.includes('--dry')
 const MIN_QTY = +(env.COUPANG_MIN_QTY || 10)
 const TARGET_QTY = +(env.COUPANG_TARGET_QTY || 30)
+// 네이버(유픽 등록분) 재고: 등록 시 5개. 이 밑으로 줄면 보충 — 매시 돌기 때문에 작게 잡아도 품절로 끊기지 않는다.
+const NAVER_MIN_QTY = +(env.NAVER_MIN_QTY || 3)
+const NAVER_TARGET_QTY = +(env.NAVER_TARGET_QTY || 10)
+// 가격반영은 유픽 상세를 last_seen_at 기준으로 이 시간 안에 읽은 상품만 믿는다(오래된 값으로 가격을 바꾸지 않게).
+const PRICE_FRESH_HOURS = 72
 
 // 공급처별 사이트
 const SUPPLIERS = {
@@ -127,6 +135,85 @@ async function ensureQuantity(spid, { force = false } = {}) {
   return filled
 }
 
+/**
+ * 5) 유픽 가격 반영 — 2026-08-05~09-30 수집기가 조용히 멈춰 공급가 인상이 판매가에 안 따라간 사고 이후 추가.
+ *   ① 유픽 상세 재조회: 목록 회원가·판매가능플랫폼이 DB 와 다른 상품 즉시 + 오래된 순 rolling(MSP 만 바뀌는 경우 대비)
+ *   ② 쿠팡: DB 매입가·MSP 가 카탈로그와 어긋난 리스팅만 라이브 조회 → MSP·손익분기 미달이면 인상(인하는 안 함)
+ *   ③ 네이버: 유픽 등록분 전체 — 품절/재입고/수량보충 + 인상
+ * 결과는 운영일지(jimscanner_seller_execution_logs, source='upick-price-sync')에 남는다.
+ */
+async function upickPriceStage(session, stockMap, meta, naverUpick) {
+  const t0 = Date.now()
+  const conf = SUPPLIERS.upickb2b
+  const { data: cpRows, error: cpErr } = await sb.from('jimscanner_coupang_listings')
+    .select('id, seller_product_id, source_goods_no, registered_title, status, auto_paused, dome_price_krw, msp_price_krw, reg_name:request_payload->>sellerProductName')
+    .eq('source', 'upickb2b').in('status', ['APPROVED', 'SELLING', 'STOPPED'])
+  if (cpErr) throw new Error(`쿠팡 유픽 리스팅 조회 실패: ${cpErr.message}`)
+  const nos = [...new Set([...cpRows.map((r) => String(r.source_goods_no)), ...naverUpick.map((r) => String(r.source_goods_no))].filter(Boolean))]
+
+  // ① 카탈로그 갱신
+  const cat = DRY ? { refreshed: 0, urgent: 0, changed: [], failed: [] } : await refreshUpickCatalog(session, conf.base, sb, nos, meta)
+  const products = await loadUpickProducts(sb, nos)
+  const freshSince = Date.now() - PRICE_FRESH_HOURS * 3600e3
+  const fresh = (p) => p && p.last_seen_at && Date.parse(p.last_seen_at) >= freshSince
+
+  // ② 쿠팡 — 사람이 내린 판매중지(auto_paused=false)는 제외
+  const api = coupangClient({ host: HOST, accessKey: ACCESS, secretKey: SECRET })
+  const cp = { raised: [], banned: [], review: [], failed: [] }
+  for (const l of cpRows) {
+    if (l.status === 'STOPPED' && !l.auto_paused) continue
+    const p = products.get(String(l.source_goods_no))
+    if (!fresh(p)) continue
+    const mismatch = l.dome_price_krw !== p.member_price_krw || l.msp_price_krw !== (p.min_sell_price_krw || 0) || p.coupang_allowed === false
+    if (!mismatch) continue
+    const name = `${l.source_goods_no} ${(l.registered_title || '').slice(0, 20)}`
+    try {
+      const r = await repriceCoupangListing(api, sb, l, p, { apply: !DRY })
+      if (r.err || r.kind === 'ERROR') cp.failed.push(`${name}: ${r.err || r.why}`)
+      else if (r.kind === 'RAISE') cp.raised.push(`${name} ${r.live}→${r.target}`)
+      else if (r.kind === 'BANNED') cp.banned.push(`${name} ${r.why}`)
+      else if (r.kind === 'REVIEW') cp.review.push(`${name} ${r.why}`)
+    } catch (e) { cp.failed.push(`${name}: ${e instanceof Error ? e.message : e}`) }
+  }
+
+  // ③ 네이버
+  const nv = { raised: [], soldout: [], restock: [], refill: 0, banned: [], review: [], failed: [] }
+  if (naverUpick.length) {
+    const chMap = await fetchNaverChannelProducts(naverApi)
+    for (const nl of naverUpick) {
+      const no = String(nl.source_goods_no)
+      const p = products.get(no)
+      const name = `${no} ${(p?.title || '').slice(0, 20)}`
+      try {
+        const r = await syncNaverUpickListing(naverApi, sb, nl, chMap.get(Number(nl.origin_product_no)), fresh(p) ? p : null, stockMap?.get(no),
+          { apply: !DRY, minQty: NAVER_MIN_QTY, targetQty: NAVER_TARGET_QTY })
+        if (r.err) { nv.failed.push(`${name}: ${r.err}`); continue }
+        if (r.price === 'RAISE') nv.raised.push(`${name} ${r.live}→${r.target}`)
+        else if (r.price === 'BANNED') nv.banned.push(`${name} ${r.why}`)
+        else if (r.price === 'REVIEW') nv.review.push(`${name} ${r.why}`)
+        if (r.stock === 'soldout') nv.soldout.push(name)
+        else if (r.stock === 'restock') nv.restock.push(name)
+        else if (r.stock === 'refill') nv.refill++
+      } catch (e) { nv.failed.push(`${name}: ${e instanceof Error ? e.message : e}`) }
+    }
+  }
+
+  const summary = `유픽 상세 ${cat.refreshed}건 재조회(가격변동감지 ${cat.urgent}·변동 ${cat.changed.length}${cat.failed.length ? `·실패 ${cat.failed.length}` : ''}) · 쿠팡 인상 ${cp.raised.length} · 네이버 인상 ${nv.raised.length}/품절 ${nv.soldout.length}/재입고 ${nv.restock.length}/보충 ${nv.refill}` +
+    ([...cp.banned, ...nv.banned].length ? ` · ⚠판매금지 ${cp.banned.length + nv.banned.length}` : '') +
+    ([...cp.failed, ...nv.failed].length ? ` · 실패 ${cp.failed.length + nv.failed.length}` : '')
+  console.log(`[local-cron-stock] 가격반영${DRY ? '[DRY]' : ''}: ${summary}`)
+  for (const [k, v] of Object.entries({ 쿠팡인상: cp.raised, 쿠팡금지: cp.banned, 쿠팡검토: cp.review, 쿠팡실패: cp.failed, 네이버인상: nv.raised, 네이버품절: nv.soldout, 네이버재입고: nv.restock, 네이버금지: nv.banned, 네이버검토: nv.review, 네이버실패: nv.failed })) {
+    if (v.length) console.log(`  ${k}: ${v.join(' | ')}`)
+  }
+  if (!DRY) {
+    await logExecution(sb, {
+      kind: 'cron', source: 'upick-price-sync', task: '유픽 가격·네이버 재고 반영',
+      status: cp.failed.length + nv.failed.length ? 'fail' : 'ok', summary, durationMs: Date.now() - t0,
+      output: { catalog: { refreshed: cat.refreshed, urgent: cat.urgent, changed: cat.changed, failed: cat.failed }, coupang: cp, naver: nv },
+    })
+  }
+}
+
 // ─── 메인 ───
 const { data: runRow } = await sb.from('jimscanner_coupang_stock_sync_runs').insert({ status: 'running', triggered_by: 'local-cron' }).select('id').single()
 const runId = runRow?.id
@@ -169,9 +256,15 @@ try {
   const sessions = {}      // source -> session
   const stockMaps = {}     // source -> Map(goodsNo -> status)
   const skipped = []       // 로그인·스캔 실패로 추적 못 한 공급처
+  // 네이버 유픽 등록분 — 네이버엔 재고싱크가 따로 없어 유픽 재고맵을 같이 만들어 5)에서 재고·가격을 반영한다(2026-10-01)
+  const { data: naverUpick, error: nvErr } = await sb.from('jimscanner_naver_listings').select('origin_product_no, source_goods_no, sale_price, status_type').eq('source', 'upickb2b')
+  if (nvErr) console.log(`[local-cron-stock] ⚠ 네이버 유픽 리스팅 조회 실패: ${nvErr.message}`)
+  const naverUpickNos = (naverUpick ?? []).map((r) => String(r.source_goods_no)).filter(Boolean)
+  const upickMeta = new Map() // 목록의 회원가·판매가능플랫폼 — 가격 변동 감지용
   for (const [src, conf] of Object.entries(SUPPLIERS)) {
     const srcRows = rows.filter((r) => r.source === src && r.source_goods_no)
-    if (!srcRows.length) continue
+    const extraNos = src === 'upickb2b' ? naverUpickNos : []
+    if (!srcRows.length && !extraNos.length) continue
     if (!conf.user || !conf.pass) { skipped.push(`${conf.label}(자격증명 없음)`); continue }
     try {
       const session = makeSession()
@@ -181,13 +274,14 @@ try {
         console.log(`[local-cron-stock] ${conf.label} 로그인 OK (${srcRows.length}건 라이브 조회)`)
       } else {
         await cafe24Login(session, conf)
-        const nos = [...new Set(srcRows.map((r) => String(r.source_goods_no)))]
+        sessions[src] = session  // 유픽은 5) 가격반영에서 상세 재조회에 다시 쓴다
+        const nos = [...new Set([...srcRows.map((r) => String(r.source_goods_no)), ...extraNos])]
         const { data: catRows } = await sb.from(conf.table).select(conf.cateCol).in(conf.key, nos)
         const cates = [...new Set((catRows ?? []).flatMap((r) => {
           const v = r[conf.cateCol]
           return Array.isArray(v) ? v.map(String) : (v == null ? [] : [String(v)])
         }).filter(Boolean))]
-        const map = await cafe24BuildStockMap(session, conf.base, cates)
+        const map = await cafe24BuildStockMap(session, conf.base, cates, src === 'upickb2b' ? { meta: upickMeta } : {})
         stockMaps[src] = map
         const soldN = [...map.values()].filter((v) => v === 'sold_out').length
         const hit = nos.filter((n) => map.has(n)).length
@@ -235,6 +329,19 @@ try {
       if (!DRY) await sb.from('jimscanner_coupang_listings').update(updates).eq('id', row.id)
       await sleep(200)
     } catch (e) { errors++; if (errors <= 3) console.log(`  row ${row.source_goods_no} error: ${e instanceof Error ? e.message : e}`) }
+  }
+
+  // 5) 유픽 가격 반영(쿠팡·네이버) + 네이버 재고 — 실패해도 재고싱크 결과는 그대로 기록한다
+  if (sessions.upickb2b) {
+    try { await upickPriceStage(sessions.upickb2b, stockMaps.upickb2b, upickMeta, naverUpick ?? []) }
+    catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      console.log(`[local-cron-stock] ⚠ 유픽 가격반영 실패: ${msg}`)
+      await logExecution(sb, { kind: 'cron', source: 'upick-price-sync', task: '유픽 가격·네이버 재고 반영', status: 'fail', error: msg })
+    }
+  } else if (rows.some((r) => r.source === 'upickb2b') || naverUpick?.length) {
+    // 유픽 로그인 실패 — 가격반영도 못 했음을 남긴다(2026-08 수집기처럼 조용히 멈추지 않게)
+    await logExecution(sb, { kind: 'cron', source: 'upick-price-sync', task: '유픽 가격·네이버 재고 반영', status: 'fail', error: `유픽 세션 없음: ${skipped.join(' · ')}` })
   }
 
   await sb.from('jimscanner_coupang_stock_sync_runs').update({ finished_at: new Date().toISOString(), total_checked: total, sold_out_count: soldOut, resumed_count: resumed, error_count: errors, duration_ms: Date.now() - startedAt, status: 'success' }).eq('id', runId)

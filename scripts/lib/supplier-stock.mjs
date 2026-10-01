@@ -60,10 +60,10 @@ export async function cafe24Login(session, { base, user, pass, label }) {
 }
 
 /**
- * Cafe24 카테고리 리스트 스캔 → { product_no: 'in_stock'|'sold_out' }.
+ * Cafe24 카테고리 리스트 스캔 → { product_no: 'in_stock'|'sold_out' }. (옵션 meta: product_no → {price, platforms})
  * 상세페이지는 품절 마커가 템플릿에 상존해 쓸 수 없고, 리스트의 ico_product_soldout 만 신뢰할 수 있다.
  */
-export async function cafe24BuildStockMap(session, base, cates, { maxPages = 30 } = {}) {
+export async function cafe24BuildStockMap(session, base, cates, { maxPages = 30, meta = null } = {}) {
   const map = new Map()
   for (const cate of cates) {
     const seen = new Set()
@@ -77,6 +77,12 @@ export async function cafe24BuildStockMap(session, base, cates, { maxPages = 30 
         if (seen.has(b[1])) continue
         seen.add(b[1]); fresh++
         map.set(b[1], /ico_product_soldout|alt=["']품절["']/i.test(b[2]) ? 'sold_out' : 'in_stock')
+        // meta(Map) 를 넘기면 목록에 보이는 회원가·판매가능플랫폼도 담는다 — 가격 변동 감지용(상세 재조회 대상 선별)
+        if (meta) {
+          const price = b[2].match(/ec-data-price=["'](\d+)["']/)
+          const plat = b[2].match(/판매가능플랫폼<\/span>\s*:<\/strong>\s*<span[^>]*>([^<]+)</)
+          meta.set(b[1], { price: price ? +price[1] : null, platforms: plat ? plat[1].trim() : null })
+        }
       }
       if (!fresh) break
       await sleep(250)
