@@ -1,22 +1,37 @@
 import { createAdminClient } from '@/lib/auth/admin-supabase'
 
+/** 화면(환율 페이지·계산기·홈·내 관심)에 보이는 통화 */
 export type Currency = 'USD' | 'JPY' | 'CNY' | 'EUR'
 export const TRACKED_CURRENCIES: Currency[] = ['USD', 'JPY', 'CNY', 'EUR']
 
+/**
+ * 수집만 하는 통화 — 화면에는 안 보이고 추천 상품 원화 환산에 쓴다(2026-10-04):
+ * 케미스트웨어하우스 AUD · 컬트뷰티·룩판타스틱 GBP · SSENSE CAD. 환율이 없으면 그 몰 상품은 총액을 못 내 공개 보류된다.
+ * ⚠️ 이 파일은 personal 레포(03:30 크론 배포)에 같은 사본이 있다 — 같이 고칠 것.
+ */
+export type CollectedCurrency = Currency | 'AUD' | 'GBP' | 'CAD'
+export const COLLECTED_CURRENCIES: CollectedCurrency[] = [...TRACKED_CURRENCIES, 'AUD', 'GBP', 'CAD']
+
 // 네이버 증권 환율 상세 API(하나은행 고시 매매기준율)의 reutersCode 매핑.
 // JPY는 100엔 단위로 고시되므로 1엔 단위로 환산 저장.
-const NAVER_FX_CODE: Record<Currency, string> = {
+const NAVER_FX_CODE: Record<CollectedCurrency, string> = {
   USD: 'FX_USDKRW',
   JPY: 'FX_JPYKRW',
   CNY: 'FX_CNYKRW',
   EUR: 'FX_EURKRW',
+  AUD: 'FX_AUDKRW',
+  GBP: 'FX_GBPKRW',
+  CAD: 'FX_CADKRW',
 }
 
-const NAVER_UNIT_DIVISOR: Record<Currency, number> = {
+const NAVER_UNIT_DIVISOR: Record<CollectedCurrency, number> = {
   USD: 1,
   JPY: 100,
   CNY: 1,
   EUR: 1,
+  AUD: 1,
+  GBP: 1,
+  CAD: 1,
 }
 
 export type ExchangeRate = {
@@ -60,15 +75,18 @@ function formatIsoDate(d: Date): string {
 const NAVER_FX_DETAIL_URL = 'https://m.stock.naver.com/front-api/marketIndex/productDetail?category=exchange&reutersCode='
 
 // 고시 단위가 바뀌면(JPY 100엔↔1엔) 100배 틀린 값이 전 사이트 비용 계산에 들어가므로 1단위 원화 기준으로 거른다.
-const PLAUSIBLE_KRW: Record<Currency, [number, number]> = {
+const PLAUSIBLE_KRW: Record<CollectedCurrency, [number, number]> = {
   USD: [500, 5000],
   JPY: [2, 50],
   CNY: [50, 1000],
   EUR: [500, 5000],
+  AUD: [300, 3000],
+  GBP: [600, 6000],
+  CAD: [300, 3000],
 }
 
 /** 네이버 증권 환율 상세 응답 → 1단위 원화 매매기준율. 형식·값이 이상하면 throw. */
-export function parseNaverFxDetail(body: unknown, currency: Currency): number {
+export function parseNaverFxDetail(body: unknown, currency: CollectedCurrency): number {
   const detail = body as { isSuccess?: unknown; result?: { reutersCode?: unknown; closePrice?: unknown } } | null
   const result = detail?.isSuccess === true ? detail.result : undefined
   if (!result || result.reutersCode !== NAVER_FX_CODE[currency]) {
@@ -82,11 +100,11 @@ export function parseNaverFxDetail(body: unknown, currency: Currency): number {
   return rate
 }
 
-async function fetchNaverRates(): Promise<{ rates: Map<Currency, number>; errors: Map<Currency, string> }> {
-  const rates = new Map<Currency, number>()
-  const errors = new Map<Currency, string>()
+async function fetchNaverRates(): Promise<{ rates: Map<CollectedCurrency, number>; errors: Map<CollectedCurrency, string> }> {
+  const rates = new Map<CollectedCurrency, number>()
+  const errors = new Map<CollectedCurrency, string>()
   await Promise.all(
-    TRACKED_CURRENCIES.map(async (currency) => {
+    COLLECTED_CURRENCIES.map(async (currency) => {
       try {
         const res = await fetch(`${NAVER_FX_DETAIL_URL}${NAVER_FX_CODE[currency]}`, {
           cache: 'no-store',
@@ -107,13 +125,13 @@ async function fetchNaverRates(): Promise<{ rates: Map<Currency, number>; errors
  * 현재 고시환율 반환. 네이버 증권(하나은행 고시)이 1차 소스. 통화별로 따로 받아 한 통화 실패가 나머지를 막지 않는다.
  * rateDate는 호출 시점의 KST 날짜.
  */
-export async function fetchLatestRates(): Promise<{ rates: Map<Currency, number>; errors: Map<Currency, string>; rateDate: string }> {
+export async function fetchLatestRates(): Promise<{ rates: Map<CollectedCurrency, number>; errors: Map<CollectedCurrency, string>; rateDate: string }> {
   const { rates, errors } = await fetchNaverRates()
   return { rates, errors, rateDate: formatIsoDate(new Date()) }
 }
 
 type UpdateResult = {
-  currency: Currency
+  currency: CollectedCurrency
   status: 'success' | 'error'
   rate_krw: number | null
   previous_rate_krw: number | null
@@ -133,7 +151,7 @@ export async function updateAllRates(triggeredBy: string): Promise<UpdateResult[
   // 통화별 실패는 errors 로 돌아오므로 여기서는 throw 하지 않는다.
   const { rates: rateMap, errors: rateErrors, rateDate } = await fetchLatestRates()
 
-  for (const currency of TRACKED_CURRENCIES) {
+  for (const currency of COLLECTED_CURRENCIES) {
     let previousRate: number | null = null
 
     try {
