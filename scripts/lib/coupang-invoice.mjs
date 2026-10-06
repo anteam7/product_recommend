@@ -32,10 +32,12 @@ export function normalizeInvoiceNo(raw) {
 
 // invoices 응답 파싱 — register-invoice/route.ts parseInvoicesResult 미러
 function parseInvoicesResult(json, text) {
-  const item = json && Array.isArray(json.responseList) ? json.responseList[0] : null
+  // 실측(2026-10-06): {code:200, data:{responseCode:0, responseList:[{succeed, resultCode, ...}]}} — data 아래에 온다
+  const list = json?.data?.responseList ?? json?.responseList
+  const item = Array.isArray(list) ? list[0] : null
   if (item && typeof item.succeed === 'boolean') return { succeed: item.succeed, resultCode: String(item.resultCode ?? ''), message: String(item.resultMessage ?? '') }
   if (/"succeed"\s*:\s*false|failResultMap|"resultCode"\s*:\s*"?FAIL|등록\s*실패/i.test(text)) return { succeed: false, resultCode: 'FAIL', message: text.slice(0, 200) }
-  return { succeed: null, resultCode: String(json?.responseCode ?? ''), message: text.slice(0, 200) }
+  return { succeed: null, resultCode: String(json?.data?.responseCode ?? json?.responseCode ?? ''), message: text.slice(0, 200) }
 }
 const isDuplicateInvoice = (r) => /ALREADY|DUP|EXIST/i.test(r.resultCode) || /이미.{0,4}등록|중복.{0,4}(송장|운송장|등록)|6개월|already.{0,12}(register|exist)|duplicate/i.test(r.message)
 

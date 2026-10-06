@@ -117,10 +117,11 @@ const MAX_ATTEMPTS = 5
 //   { responseCode, responseMessage, responseList:[{ shipmentBoxId, succeed, resultCode, retryRequired, resultMessage }] }
 //   HTTP 200이어도 responseList[].succeed=false 면 부분실패(예 resultCode NOT_FOUND_SHIPMENT_BOX). 첫 라인 기준 판정.
 interface InvoicesResult { succeed: boolean | null; resultCode: string; message: string; retryRequired: boolean }
+// 실측(2026-10-06): 실제 응답은 { code:200, message:'OK', data:{ responseCode, responseList:[…] } } — data 아래를 우선 본다.
+type InvoicesBody = { responseCode?: number; responseList?: Array<{ succeed?: boolean; resultCode?: string; resultMessage?: string; retryRequired?: boolean }> }
 function parseInvoicesResult(body: unknown): InvoicesResult {
-  const b = body && typeof body === 'object'
-    ? (body as { responseCode?: number; responseList?: Array<{ succeed?: boolean; resultCode?: string; resultMessage?: string; retryRequired?: boolean }> })
-    : null
+  const outer = body && typeof body === 'object' ? (body as InvoicesBody & { data?: InvoicesBody }) : null
+  const b: InvoicesBody | null = outer?.data && typeof outer.data === 'object' ? outer.data : outer
   const item = b && Array.isArray(b.responseList) ? b.responseList[0] : null
   if (item && typeof item.succeed === 'boolean') {
     return { succeed: item.succeed, resultCode: String(item.resultCode ?? ''), message: String(item.resultMessage ?? ''), retryRequired: !!item.retryRequired }
