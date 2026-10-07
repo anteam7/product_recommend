@@ -12,7 +12,7 @@ export const dynamic = 'force-dynamic'
 const TABLE = 'jimscanner_register_jobs'
 // 쿠팡 등록 스크립트가 있는 매입처만 허용 — register-agent.mjs SOURCE_SCRIPTS 와 동기화 지점.
 // beseller(네이버 전용)는 여기에 넣지 않는다.
-const SUPPORTED_SOURCES = new Set(['wellroot', 'bio77', 'upickb2b', 'ggsan', 'kwholesale'])
+const SUPPORTED_SOURCES = new Set(['wellroot', 'bio77', 'upickb2b', 'ggsan', 'kwholesale', 'cmtstory'])
 const MAX_ITEMS = 100
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any

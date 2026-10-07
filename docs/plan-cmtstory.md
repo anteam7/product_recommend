@@ -219,8 +219,16 @@ originalPrice = 판매가 (K홀세일과 같은 이유 — 허위할인 소지 �
   도매가 중앙 8,500원이라 단품은 배송비 3,000원이 원가의 1/4 → 하한보다 마진가가 높은 상품이 많고 절대마진이 얇다. **2·3개 묶음이 주력**(배송비 1회 분산, 하한도 묶음 할인 폭보다 마진가가 높음).
 - 수수료: `commissionRate` 가 '콜라겐'·'비타민' 성분명을 영양제(7.6%)로 오인 → 전 상품 뷰티 9.6% 고정(수집기에서 치환).
 
+### P1 등록기 — 코드 완료 · dry-run 검증 · **실등록 전(사용자 "실행" 대기)** (2026-10-07)
+- `scripts/cmtstory-register.mjs`(K홀세일 등록기 복제) + `supabase/cmtstory_register.sql`(listings source CHECK + market 컬럼, 적용됨) + 동기화 지점 6곳(`purchase_catalog.sql` 뷰 UNION(적용)·`purchase-catalog/sources.ts`·`register-agent.mjs`·`register-jobs/route.ts`·`coupang-orders/page.tsx` 라벨/링크·`local-cron-stock-sync.mjs SUPPLIERS`). `npm run build` 통과.
+- 쿠팡 화장품 카테고리 실측(메타): **전부 `isAllowSingleItem=false`** → 1·2·3개 변형 필수(묶음 보완 결정과 일치). 구매옵션은 `개당 중량/용량`(그룹 1) + `수량`, 시트마스크·세트·티슈류는 `개당 수량`·`수량`만 → 등록기 `buildCosmeticOptions` 로 직접 채움(상품명 "10매"→10개입). 고시 '화장품' 11항목 확인. `requiredDocumentNames` 에 **'MANDATORY INGREDIENTS PIC'** 이 있어 성분 서류를 요구하면 상세 첫 이미지로 1회 재시도(실측 전 가설).
+- **이미지 CDN 함정**: `godomall.speedycdn.net` 이 같은 파일에 `multipart/form-data` content-type 을 주는 응답이 흔함(dry 56/170 실패) → 등록기가 바이트를 받아 매직바이트 확인 후 **Supabase `site-assets/coupang/cmtstory/{goods_no}/` 에 무가공 복사(재호스팅)** 해 그 URL 을 쿠팡에 넘긴다(공급사 규정: 사용 허용·변형 금지 → 복사만). 재호스팅 후 공개 URL 200 image/jpeg 확인.
+- dry 결과(후보 175): 통과 **160** · 상품명 제외 5(1+1 표기 3 → 광고성 차단, "탈모증상완화" 2 → 기능성 표현) · 구매옵션 불가 11(중량 없는 상품명 4 · 색상/향 필수 카테고리 7 — 향수·립 등) · 비화장품 카테고리 예측 1(1000000582).
+- 정렬: 2개 묶음 마진 큰 순. `--verdict=OPEN,WIN` 으로 시장성 결과에 따라 등록 대상을 거른다.
+
 ### 남은 것
-1. P0.5 쿠팡 시장성 확인(후보 175 → 판매자 수·위너가) — 사용자 선택.
-2. P1 `cmtstory-register.mjs`(kwholesale-register 복제, 화장품 고시·구매옵션) + listings source CHECK DDL + 카탈로그 뷰/큐/주문관리 동기화.
-3. 재고/품절: `local-cron-stock-sync.mjs SUPPLIERS` 1줄은 첫 등록과 함께(등록 전엔 조회 대상 0).
+1. **P0.5 시장성 스캔** `scripts/cmtstory-market-scan.mjs` — 디버그 크롬(`scripts/launch-chrome-debug.cmd`, CDP 9222) 필요 → OPEN/WIN/LOSE 를 `market_verdict` 에 기록. 사용자가 크롬을 띄우면 실행.
+2. **P1 첫 실등록 5건** — 사용자 "실행" 확인 후 `--limit=5 --verdict=OPEN,WIN`. 결과로 ① 성분 서류 요구 여부 ② 재호스팅 이미지 승인 여부 ③ 구매옵션 노출 확인 → §10 갱신.
+3. 재고/품절: `SUPPLIERS.cmtstory` 추가됨 — 첫 승인 후 `coupang-followup-approvals.mjs --source=cmtstory` 로 재고 투입, 이후 매시 크론이 품절/재입고 처리.
 4. 일일 갱신 크론(run-crons) 통합 + 가격 인상 자동반영.
+5. 상품명 정리 후 등록: 1+1 상품 3건(2개입 표기로 변경 검토) · 탈모증상완화 2건(기능성 심사 여부 확인).

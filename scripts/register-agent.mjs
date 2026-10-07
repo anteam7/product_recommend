@@ -32,6 +32,7 @@ const RUN_TIMEOUT_MS = +(argOf('timeout') || 30 * 60 * 1000)
 const SOURCE_SCRIPTS = {
   wellroot: { script: 'wellroot-register.mjs', extra: [] },
   kwholesale: { script: 'kwholesale-register.mjs', extra: [] },   // 2026-09-27 — 판매가는 수집기 sale_prices(max(MSP, 순마진10%))
+  cmtstory: { script: 'cmtstory-register.mjs', extra: [] },       // 2026-10-07 — 화장품스토리(건강산 화장품 서브몰), 1·2·3개 변형·화장품 고시
   bio77: { script: 'bio77-register.mjs', extra: [] },
   upickb2b: { script: 'upickb2b-register.mjs', extra: ['--request'] },
   ggsan: { script: 'coupang-register-batch-v2.mjs', extra: [] },

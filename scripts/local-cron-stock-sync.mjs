@@ -63,6 +63,8 @@ const SUPPLIERS = {
   wellroot: { kind: 'cafe24',  base: env.WELLROOT_BASE_URL  || 'https://wellrootb2b.com', user: env.WELLROOT_USER, pass: env.WELLROOT_PASS,  label: '웰루트',  table: 'jimscanner_wellroot_products',  key: 'product_no', cateCol: 'cate_nos' },
   // K-홀세일(2026-09-27): Cafe24 AuthSSL — 목록 품절아이콘 판정이 수집기(상세 품절박스)와 155/155 일치 실측
   kwholesale: { kind: 'cafe24', base: env.KWHOLESALE_BASE_URL || 'https://kwholesale.co.kr', user: env.KWHOLESALE_USER, pass: env.KWHOLESALE_PASS, label: 'K홀세일', table: 'jimscanner_kwholesale_products', key: 'product_no', cateCol: 'cate_nos' },
+  // 화장품스토리 = 건강산 화장품 서브몰(고도몰5, 회원 공유) — 건강산 자격증명으로 로그인, 판정은 상용몰 분기(goods_view 라이브) 그대로
+  cmtstory: { kind: 'mall',    base: env.CMTSTORY_BASE_URL || 'https://www.cmtstory.com', user: env.CMTSTORY_USER || env.GGSAN_USER, pass: env.CMTSTORY_PASS || env.GGSAN_PASS, label: '화장품스토리' },
 }
 
 function signCoupang(method, urlPath) {

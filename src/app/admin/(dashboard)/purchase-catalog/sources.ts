@@ -6,6 +6,7 @@ export const SOURCE_META: Record<string, { label: string; cls: string; url: (g: 
   bio77: { label: '77바이오', cls: 'bg-violet-100 text-violet-700', url: (g) => `https://77bio.co.kr/goods/goods_view.php?goodsNo=${g}` },
   wellroot: { label: '웰루트', cls: 'bg-lime-100 text-lime-700', url: (g) => `https://wellrootb2b.com/product/detail.html?product_no=${g}` },
   kwholesale: { label: 'K홀세일', cls: 'bg-rose-100 text-rose-700', url: (g) => `https://kwholesale.co.kr/product/detail.html?product_no=${g}` },
+  cmtstory: { label: '화장품스토리', cls: 'bg-pink-100 text-pink-700', url: (g) => `https://www.cmtstory.com/goods/goods_view.php?goodsNo=${g}` },
   beseller: { label: '비셀러', cls: 'bg-amber-100 text-amber-700', url: () => null },
 }
 export const SOURCES = Object.keys(SOURCE_META)

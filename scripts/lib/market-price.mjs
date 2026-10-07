@@ -123,7 +123,16 @@ export async function openCoupangSession({ endpoint = 'http://127.0.0.1:9222', t
     ])
     await page.waitForTimeout(2200)
   }
-  async function search(kw) {
+  // 사람처럼 결과를 훑는 흉내 — 휠로 2~4번 내려갔다 다시 올라온다(다건 스크리닝에서 검색만 반복하는 패턴을 흐린다). 실패해도 결과엔 영향 없음.
+  async function humanScroll() {
+    try {
+      const n = 2 + Math.floor(Math.random() * 3)
+      for (let k = 0; k < n; k++) { await page.mouse.wheel(0, 300 + Math.random() * 600); await page.waitForTimeout(500 + Math.random() * 900) }
+      await page.waitForTimeout(400 + Math.random() * 800)
+      for (let k = 0; k < n; k++) { await page.mouse.wheel(0, -(300 + Math.random() * 600)); await page.waitForTimeout(400 + Math.random() * 700) }
+    } catch { /* noop */ }
+  }
+  async function search(kw, { scroll = false } = {}) {
     try {
       await doSearchOnce(kw)
       // 재차단(Access Denied) → 메인으로 재워밍업 후 1회 재시도(일시 차단은 이걸로 회복됨)
@@ -134,7 +143,9 @@ export async function openCoupangSession({ endpoint = 'http://127.0.0.1:9222', t
         await doSearchOnce(kw)
         if (/Access Denied/i.test(await page.title())) return null
       }
-      return _coupangResult(await page.evaluate(_extractCoupangPrices))
+      const out = _coupangResult(await page.evaluate(_extractCoupangPrices))
+      if (scroll) await humanScroll()
+      return out
     } catch { return null }
   }
   // 재사용한 사용자 탭은 닫지 않음(우리가 새로 연 탭만 닫음). browser.close는 CDP 연결만 끊음.

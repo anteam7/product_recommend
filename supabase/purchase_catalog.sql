@@ -107,6 +107,27 @@ with base as (
          k.coupang_category_code,
          k.updated_at
   from public.jimscanner_kwholesale_products k
+
+  union all
+  -- ── cmtstory (화장품스토리, (주)건강산 화장품 서브몰 · 고도몰5) ───────────────
+  --   공급가 = 도매가(set_goods_price, VAT 포함), MSP = 상세 절대준수 문구(없으면 null → 판매가는 순마진 10% 기준, 사용자 결정 2026-10-07)
+  --   쿠팡 등록기 cmtstory-register.mjs (2026-10-07) · 시장성 verdict 는 cmtstory-market-scan.mjs
+  select 'cmtstory', c.goods_no::text, coalesce(c.title_clean, c.title), null::text, c.thumb_url, c.detail_url,
+         c.wholesale_price_krw, c.fixed_price_krw,
+         coalesce(c.shipping_fee_krw, 3000),
+         '3,000원(20만원 이상 무료)'::text,
+         c.msp_price_krw, c.tiered_msp,
+         c.status, (c.status = 'active'), true, c.coupang_eligible,
+         nullif(concat_ws(' · ',
+           case when not c.has_msp_text then '절대준수 문구 없음(마진가)' end,
+           case when c.has_option then '옵션상품' end,
+           case when c.expiry_short then '사용기한 임박' end,
+           case when c.market_verdict is not null then '시장 ' || c.market_verdict end,
+           case when c.register_excluded then '등록제외: ' || coalesce(c.register_excluded_reason, '') end,
+           case when c.excluded_reason is not null then c.excluded_reason end), ''),
+         c.coupang_category_code,
+         c.updated_at
+  from public.jimscanner_cmtstory_products c
 ),
 calc as (
   -- 수수료율은 등록 카테고리로 정해진다(영양제 7.6% vs 그 외 식품 10.6%) — 고정 상수를 쓰면 마진 순위가 뒤바뀐다.

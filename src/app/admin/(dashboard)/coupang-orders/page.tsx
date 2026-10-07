@@ -117,6 +117,7 @@ const SUPPLIER_LABELS: Record<string, string> = {
   bio77: '77바이오',
   wellroot: '웰루트',
   kwholesale: 'K홀세일',
+  cmtstory: '화장품스토리',
   manual: '수동',
 }
 
@@ -144,6 +145,7 @@ function supplierUrl(source: string | null, goodsNo: string | null): string | nu
   if (source === 'bio77') return `https://77bio.co.kr/goods/goods_view.php?goodsNo=${g}`
   if (source === 'wellroot') return `https://wellrootb2b.com/product/detail.html?product_no=${g}`
   if (source === 'kwholesale') return `https://kwholesale.co.kr/product/detail.html?product_no=${g}`
+  if (source === 'cmtstory') return `https://www.cmtstory.com/goods/goods_view.php?goodsNo=${g}`
   return null
 }
 
