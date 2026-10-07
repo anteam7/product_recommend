@@ -40,6 +40,8 @@
 | [`docs/plan-beseller-naver-register.md`](./docs/plan-beseller-naver-register.md) | 비셀러 강력그룹→네이버 등록 설계 (옵션묶음·마진 판매가·식품 카테고리/고시) |
 | [`docs/plan-wellroot-collect.md`](./docs/plan-wellroot-collect.md) | 웰루트B2B(Cafe24) 상품 수집 설계 + 쿠팡 등록(wellroot-register.mjs) — 재판매 178/444, MSP 5형태 OCR, 등록대상 141 |
 | [`docs/plan-purchase-catalog.md`](./docs/plan-purchase-catalog.md) | 매입 대상 상품 카탈로그 `/admin/purchase-catalog` — 매입처 5곳 통합 뷰·MSP 마진·쿠팡 등록현황·체크 일괄등록 큐(register-agent) |
+| [`docs/plan-kwholesale.md`](./docs/plan-kwholesale.md) | K-홀세일(Cafe24) 위탁 도매 온보딩 — 수집·쿠팡 등록·결제진행·재고/송장 싱크, 판매가=max(MSP, 순마진 10%) |
+| [`docs/plan-cmtstory.md`](./docs/plan-cmtstory.md) | 화장품스토리(건강산 화장품 서브몰, 고도몰5) 위탁 화장품 → 쿠팡 등록·재고/품절 연동 계획 — 건강산 계정·코드 재사용, 계획 단계 |
 | [`docs/scout-protocol.md`](./docs/scout-protocol.md) | 쿠팡 소싱 스카우트 — 크롬 확장(손)↔로컬 Claude 두뇌 아키텍처·JSON 프로토콜·설치 |
 | [`SEPARATION_NOTES.md`](./SEPARATION_NOTES.md) | 본업 분리(옵션 A) 내역 + 잔재 제거 가이드 |
 | [`README.md`](./README.md) | 레포 개요 / 로컬 실행 |
