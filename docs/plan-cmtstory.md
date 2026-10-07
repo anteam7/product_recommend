@@ -219,7 +219,13 @@ originalPrice = 판매가 (K홀세일과 같은 이유 — 허위할인 소지 �
   도매가 중앙 8,500원이라 단품은 배송비 3,000원이 원가의 1/4 → 하한보다 마진가가 높은 상품이 많고 절대마진이 얇다. **2·3개 묶음이 주력**(배송비 1회 분산, 하한도 묶음 할인 폭보다 마진가가 높음).
 - 수수료: `commissionRate` 가 '콜라겐'·'비타민' 성분명을 영양제(7.6%)로 오인 → 전 상품 뷰티 9.6% 고정(수집기에서 치환).
 
-### P1 등록기 — 코드 완료 · dry-run 검증 · **실등록 전(사용자 "실행" 대기)** (2026-10-07)
+### P1 첫 실등록 5건 — **즉시 승인완료** (2026-10-07, 커밋 c28bca8)
+- 1000000405 앰플(16406734265) · 1000001155 바디워시(16406734346) · 1000001249 3종세트(16406734461) · 1000001248 세럼(16406734537) · 1000001220 마스크 7매입(16406734597) — 전부 3변형, 승인요청 직후 승인완료·vendorItemId 발급. 재고는 `coupang-followup-approvals.mjs --source=cmtstory`.
+- 실측으로 확인된 것: ① **전성분 서류('MANDATORY INGREDIENTS PIC') 요구 없음** — 서류 없이 등록·승인됨(재시도 분기 미발동) ② 재호스팅 이미지 + 한도 초과분 원본 CDN URL(7~9MB GIF) 모두 수용 ③ 구매옵션 `50ml N개` · `N세트` · `7개입 N개` 그대로 노출.
+- 시장성 스캔은 35건에서 쿠팡 Access Denied(첫 32건을 2~3초 간격으로 돌린 탓) → 느린 모드(6~10초·스크롤·15건마다 휴식)로 코드 변경, **남은 140건은 차단 풀린 뒤 재개**. 35건 결과: LOSE 25 · WIN 8 · OPEN 2 — 하한가 리셀러가 실제로 깔려 있어 WIN/OPEN 만 등록.
+- 알려진 구멍: `(300ml / 70pads)` 처럼 영문 매수는 공통 모듈이 1매입으로 읽음(1000001134 보류).
+
+### P1 등록기 — 코드 (2026-10-07)
 - `scripts/cmtstory-register.mjs`(K홀세일 등록기 복제) + `supabase/cmtstory_register.sql`(listings source CHECK + market 컬럼, 적용됨) + 동기화 지점 6곳(`purchase_catalog.sql` 뷰 UNION(적용)·`purchase-catalog/sources.ts`·`register-agent.mjs`·`register-jobs/route.ts`·`coupang-orders/page.tsx` 라벨/링크·`local-cron-stock-sync.mjs SUPPLIERS`). `npm run build` 통과.
 - 쿠팡 화장품 카테고리 실측(메타): **전부 `isAllowSingleItem=false`** → 1·2·3개 변형 필수(묶음 보완 결정과 일치). 구매옵션은 `개당 중량/용량`(그룹 1) + `수량`, 시트마스크·세트·티슈류는 `개당 수량`·`수량`만 → 등록기 `buildCosmeticOptions` 로 직접 채움(상품명 "10매"→10개입). 고시 '화장품' 11항목 확인. `requiredDocumentNames` 에 **'MANDATORY INGREDIENTS PIC'** 이 있어 성분 서류를 요구하면 상세 첫 이미지로 1회 재시도(실측 전 가설).
 - **이미지 CDN 함정**: `godomall.speedycdn.net` 이 같은 파일에 `multipart/form-data` content-type 을 주는 응답이 흔함(dry 56/170 실패) → 등록기가 바이트를 받아 매직바이트 확인 후 **Supabase `site-assets/coupang/cmtstory/{goods_no}/` 에 무가공 복사(재호스팅)** 해 그 URL 을 쿠팡에 넘긴다(공급사 규정: 사용 허용·변형 금지 → 복사만). 재호스팅 후 공개 URL 200 image/jpeg 확인.
