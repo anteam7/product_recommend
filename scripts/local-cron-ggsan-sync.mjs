@@ -1,45 +1,41 @@
 /**
- * 로컬 cron — 매입처(ggsan · 유픽B2B · 77bio · 웰루트 · K홀세일) 송장 자동수집 ↔ 쿠팡 송장등록 동기화
+ * 로컬 cron — 매입처 주문 추적(입금확인 · 송장) ↔ 쿠팡 발주확인 · 송장등록 동기화
+ *   node scripts/local-cron-ggsan-sync.mjs [--dry]      --dry: 갱신 내용만 출력(DB·쿠팡 호출 없음)
  *
- * 2026-08-20 확장: ① 유픽(Cafe24) 주문상세 추적 추가(scripts/lib/upick-tracking.mjs)
- *                 ② 쿠팡 등록을 Vercel register-invoice 호출 → **로컬 직접 실행**(scripts/lib/coupang-invoice.mjs)으로 전환
- *                    (Vercel IP가 쿠팡 OpenAPI 접근제어에 막혀 라우트 호출은 항상 실패 → pending 고착이 원인)
- *                 ③ pending/failed 고착 건 재시도 스윕(쿠팡이 이미 배송지시 이후면 manual_done 동기화)
- *                 ④ ggsan 택배사 sno 5=한진택배 매핑, 송장번호 숫자 정규화(유픽 CJ '6995-6837-5375')
- * 2026-09-02 확장: ⑤ 77bio(GodoMall) 주문상세 추적 추가(scripts/lib/bio77-tracking.mjs)
- *                 ⑥ 매입처 분기를 order_no 자릿수 정규식 추측 → jimscanner_coupang_listings.source
- *                    (+ supplier_source 오버라이드) 기준 조회로 전환. bio77 주문번호(16자리 숫자)가
- *                    기존 ggsan 정규식(10~18자리 숫자)과 겹쳐 오분류될 수 있었던 문제를 근본 해결
- *                    (order-server.mjs resolveOrder()와 동일한 소스 판별 규칙을 여기서도 적용).
- * 2026-09-27 확장: ⑦ 웰루트(Cafe24, 예치금 결제) 주문상세 추적 추가 → 같은 날 K홀세일 추가하며 AuthSSL Cafe24 공통
- *                    (scripts/lib/cafe24-tracking.mjs + CAFE24_TRACKED 목록 반복)으로 일반화.
- *                    그전엔 source='wellroot' 주문이 어느 분기에도 안 걸려 조용히 건너뛰어졌다.
+ * 구조(2026-10-09 리팩터): 매입처마다 루프를 복사하던 구조(건강산·유픽·77bio·Cafe24·고도몰 5벌)를
+ *   **TRACKERS 등록표 + 공통 루프 하나**로 통합. 매입처별로 다른 건 "어떻게 로그인하고 주문상세를 어떻게 읽나"뿐이고
+ *   (scripts/lib/*-tracking.mjs 어댑터가 {found, status, cancelLike, invoiceRaw, carrier, actualPaid} 로 정규화해 돌려준다),
+ *   읽은 뒤의 처리(취소 감지 → 입금확인 → 미결제 지연 → 실결제액 → 송장 감지 → 발송처리 → 쿠팡 등록)는 trackRow() 한 곳.
+ *   매입처 추가 = 같은 플랫폼이면 TRACKERS 한 줄(화장품스토리), 새 플랫폼이면 어댑터 파일 하나 + 한 줄.
+ *
+ * 이력: 2026-08-20 유픽(Cafe24) 추적 + 쿠팡 등록 로컬 직접 실행(Vercel IP 차단) + 재시도 스윕 + 송장 정규화
+ *       2026-09-02 77bio(고도몰) + 매입처 판별을 listings.source(+supplier_source 오버라이드)로(주문번호 자릿수 추측 폐기)
+ *       2026-09-27 웰루트·K홀세일(AuthSSL Cafe24) 공통 어댑터
+ *       2026-10-09 화장품스토리(고도몰, 건강산 계정 공유) + **입금확인 싱크**(무통장 완주 AWAITING_DEPOSIT → 매입처가 입금대기를 벗어나면
+ *                  ORDERED + 쿠팡 발주확인; depositSync 매입처만) + --dry
  *
  * canon: docs/plan-ggsan-coupang-invoice-sync.md ④(발송 동기화 크론) / ②(상태머신) / ⑤(반자동 토글) / ⑨(안전장치).
- *
  * Windows 작업 "Coupang-Ggsan-Sync" 로 매시간 실행 (orders-sync +30분 오프셋, 실패 격리를 위해 별도 작업).
  *
  * 흐름:
  *   ① runs insert(running) + invoice_settings.auto_upload 읽기
- *   ② ggsan 로그인 (실패 시 그 회차 전체 중단 + runs=error, 쿠팡 호출 안 함 → 데이터 무손상)
- *   ③ 대상 = orders where coupang_invoice_status in (none,pending,acknowledged,failed)
- *            and purchase_status in (ORDERED,SHIPPED) and ggsan_order_no is not null
- *            → listings.source(+supplier_source 오버라이드)로 ggsan/upickb2b/bio77 분기
- *   ④ 각 대상(최대 100, 5분 deadline, 300ms 간격): order_view 파싱
- *        → 항상 ggsan_order_status + ggsan_last_checked_at 갱신
+ *   ② 대상 = orders where coupang_invoice_status in (none,pending,acknowledged,failed)
+ *            and purchase_status in (AWAITING_DEPOSIT,ORDERED,SHIPPED) and ggsan_order_no is not null
+ *            → listings.source(+supplier_source 오버라이드)로 매입처 분기(AWAITING_DEPOSIT 은 depositSync 매입처만)
+ *   ③ 매입처별 세션 1회 → 각 대상(최대 100, 5분 deadline, 300ms 간격) trackRow():
+ *        → 항상 ggsan_order_status + ggsan_last_checked_at 갱신(ggsan_* 컬럼은 매입처 공용 저장소)
  *        → 취소/반품/교환 → needs_attention (자동취소 금지)
+ *        → AWAITING_DEPOSIT 이고 매입처 상태가 결제완료/상품준비중… → ORDERED + 쿠팡 발주확인(ACCEPT→INSTRUCT)
  *        → 입금대기 & ordered_at+24h 경과 → needs_attention='미결제 지연'
  *        → 실결제액 있고 purchase_total_cost 비었으면 → ggsan_actual_paid + purchase_total_cost 자동기록
- *        → data-invoice-no 있으면(발송): SHIPPED + 송장 + 택배사 + shipped_at + coupang_invoice_status='pending'
- *           그 후 auto_upload=true 면 쿠팡 송장등록 로컬 실행(scripts/lib/coupang-invoice.mjs — 2026-08-20 전환)
- *           auto_upload=false 면 호출 안 함(pending 유지 — 사람이 UI에서 [확인·등록])
- *   ⑤ ggsan_order_no 없는 ORDERED + 24h 경과도 needs_attention 카운트(사각지대 가시화)
- *   ⑥ runs update(success, 집계)
+ *        → 송장 있으면(발송): SHIPPED + 송장 + 택배사 + shipped_at + coupang_invoice_status='pending'
+ *           그 후 auto_upload=true 면 쿠팡 송장등록 로컬 실행(scripts/lib/coupang-invoice.mjs), false 면 pending 유지(사람이 UI에서 [확인·등록])
+ *   ④ 재시도 스윕(송장은 있는데 쿠팡 등록이 pending/failed 로 고착된 건)
+ *   ⑤ ggsan_order_no 없는 ORDERED + 24h 경과도 needs_attention(사각지대 가시화)
+ *   ⑥ runs update(success/error, 집계)
  *
- * 멱등: 이미 SHIPPED + 동일 송장이면 재처리 skip.
- * 송장등록 단일 진실 소스 = POST /api/admin/coupang-orders/register-invoice (이 크론은 트리거만).
+ * 멱등: 이미 SHIPPED + 동일 송장이면 재처리 skip. 송장등록 단일 진실 소스 = scripts/lib/coupang-invoice.mjs registerInvoice.
  */
-import crypto from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
@@ -48,12 +44,7 @@ import { createCoupangInvoiceOps, normalizeInvoiceNo } from './lib/coupang-invoi
 import { withUpickSession, fetchUpickOrder } from './lib/upick-tracking.mjs'
 import { withBio77Session, fetchBio77Order } from './lib/bio77-tracking.mjs'
 import { withCafe24Session, fetchCafe24Order } from './lib/cafe24-tracking.mjs'
-
-// AuthSSL Cafe24 매입처 — 추적 분기는 이 목록을 돈다(새 매입처는 여기 한 줄 추가)
-const CAFE24_TRACKED = [
-  { source: 'wellroot',   label: '웰루트',   defaultBase: 'https://wellrootb2b.com',  envBase: 'WELLROOT_BASE_URL',   envUser: 'WELLROOT_USER',   envPass: 'WELLROOT_PASS' },
-  { source: 'kwholesale', label: 'K홀세일', defaultBase: 'https://kwholesale.co.kr', envBase: 'KWHOLESALE_BASE_URL', envUser: 'KWHOLESALE_USER', envPass: 'KWHOLESALE_PASS' },
-]
+import { createGgsanSession } from './lib/ggsan-tracking.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const env = Object.fromEntries(
@@ -68,111 +59,48 @@ const env = Object.fromEntries(
     }),
 )
 const sb = createClient(env.NEXT_PUBLIC_SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY)
-
-const GGSAN_BASE = env.GGSAN_BASE_URL || 'https://www.ggsan.com'
-const GGSAN_USER = env.GGSAN_USER
-const GGSAN_PASS = env.GGSAN_PASS
-const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
+const DRY = process.argv.includes('--dry')
 
 const MAX_TARGETS = 100
 const DEADLINE_MS = 5 * 60 * 1000 // 5분 가드
 const STEP_DELAY_MS = 300
 const PAID_WAIT_HOURS = 24 // 입금대기 / 미캡처 ORDERED 지연 임계
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+const nowIso = () => new Date().toISOString()
 
-// ─── 택배사 sno → name 매핑 (canon: CJ대한통운만 확정. 그 외 null → needs_attention) ───
-// 실측: delivery_trace.php?invoiceCompanySno=8 → cjlogistics, =5 → hanjin (2026-08-20 확인). 그 외 null → needs_attention
-const CARRIER_SNO_TO_NAME = { '8': 'CJ대한통운', '5': '한진택배' }
+// 입금확인 신호 — 무통장 완주(AWAITING_DEPOSIT) 뒤 매입처가 입금을 확인하면 상태가 입금대기를 벗어난다(고도몰 상태어 기준)
+const PAID_LIKE = new Set(['결제완료', '상품준비중', '배송준비중', '배송지시', '배송중', '배송완료', '구매확정'])
 
-// ─── ggsan 로그인 + 쿠키 (coupang-stock-sync/route.ts 패턴 포팅) ───
-const cookies = new Map()
-function setCookies(setCookieHeader) {
-  if (!setCookieHeader) return
-  for (const part of setCookieHeader.split(/,(?=[^;]+=)/)) {
-    const [kv] = part.split(';')
-    const [k, v] = kv.trim().split('=')
-    if (k && v !== undefined) cookies.set(k, v)
-  }
+// ─── 매입처 등록표 — with(env, fn): 세션 1회 열고 fn(fetchOrder) 실행. fetchOrder(orderNo) → {found, status, cancelLike, invoiceRaw, carrier, carrierSno?, actualPaid?}
+//     depositSync: 무통장 완주(AWAITING_DEPOSIT) 주문도 추적해 입금확인 → ORDERED + 쿠팡 발주확인(상태어가 PAID_LIKE 어휘인 고도몰만 켠다)
+//     ⚠ 새 매입처: 같은 플랫폼이면 한 줄 추가, 새 플랫폼이면 lib/<x>-tracking.mjs 어댑터 + 한 줄. order-server.mjs RUN_FLOWS · local-cron-stock-sync.mjs SUPPLIERS 와 같은 방식.
+async function withGodomall(envLike, fn) {
+  const s = createGgsanSession(envLike)
+  await s.login()
+  await fn((no) => s.fetchOrder(no))
 }
-const cookieHeader = () => [...cookies.entries()].map(([k, v]) => `${k}=${v}`).join('; ')
+const cafe24 = (source, label, defaultBase, prefix) => ({
+  source, label,
+  with: (e, fn) => withCafe24Session({ base: e[`${prefix}_BASE_URL`] || defaultBase, user: e[`${prefix}_USER`], pass: e[`${prefix}_PASS`], label: source }, (page, base) => fn((no) => fetchCafe24Order(page, base, no, source))),
+})
+const TRACKERS = [
+  { source: 'ggsan', label: '건강산', depositSync: true, with: (e, fn) => withGodomall(e, fn) },
+  // 화장품스토리 = 건강산 화장품 서브몰(같은 고도몰·같은 회원 계정) — 호스트·계정만 바꿔 건강산 세션 재사용, CMTSTORY_* 없으면 GGSAN_* 폴백
+  { source: 'cmtstory', label: '화장품스토리', depositSync: true, with: (e, fn) => withGodomall({ ...e, GGSAN_BASE_URL: e.CMTSTORY_BASE_URL || 'https://www.cmtstory.com', GGSAN_USER: e.CMTSTORY_USER || e.GGSAN_USER, GGSAN_PASS: e.CMTSTORY_PASS || e.GGSAN_PASS }, fn) },
+  { source: 'upickb2b', label: '유픽', with: (e, fn) => withUpickSession(e, (page, base) => fn((no) => fetchUpickOrder(page, base, no))) },
+  { source: 'bio77', label: '77bio', with: (e, fn) => withBio77Session(e, (page, base) => fn((no) => fetchBio77Order(page, base, no))) },
+  cafe24('wellroot', '웰루트', 'https://wellrootb2b.com', 'WELLROOT'),       // 예치금 결제(입금대기 없음)
+  cafe24('kwholesale', 'K홀세일', 'https://kwholesale.co.kr', 'KWHOLESALE'), // 무통장(입금 확인 후 출고) — 상태어가 고도몰과 달라 depositSync 미적용
+]
 
-async function ggsanFetch(url, init = {}) {
-  const res = await fetch(url, {
-    redirect: 'manual',
-    ...init,
-    headers: { 'User-Agent': UA, 'Accept-Language': 'ko-KR,ko;q=0.9', Cookie: cookieHeader(), ...(init.headers || {}) },
-  })
-  setCookies(res.headers.get('set-cookie'))
-  return res
-}
-
-async function ggsanLogin() {
-  cookies.clear()
-  await ggsanFetch(`${GGSAN_BASE}/member/login.php`)
-  const r = await ggsanFetch(`${GGSAN_BASE}/member/login_ps.php`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded', Referer: `${GGSAN_BASE}/member/login.php` },
-    body: new URLSearchParams({ loginId: GGSAN_USER, loginPwd: GGSAN_PASS, saveId: 'y', returnUrl: `${GGSAN_BASE}/main/index.php` }).toString(),
-  })
-  const html = await r.text()
-  // 성공판정: 로그인 성공 시 parent.location 리다이렉트 마커. (coupang-stock-sync 패턴과 동일)
-  if (!/parent\.location\.href='https:\/\/www\.ggsan\.com\/main\/index\.php'/.test(html)) {
-    throw new Error('ggsan login failed')
-  }
-}
-
-// ─── order_view 파싱 (canon: 확정된 셀렉터) ───
-// 샘플: _tmp_ggsan_order_view_shipped.html(배송중+송장), _tmp_ggsan_order_view.html(입금대기)
-// order-name 뒤 첫 <em> = 상태 셀(권위 소스). '결제완료'가 빠져 있어 본문 폴백이 액션버튼
-// (구매확정/취소/반품/교환)을 상태로 오인하던 버그 수정(2026-06-04): 실제 상태어 보강 + 폴백 제한.
-const ORDER_STATUS_KEYWORDS = ['입금대기', '결제완료', '상품준비중', '배송준비중', '배송지시', '배송중', '배송완료', '구매확정', '취소', '반품', '교환']
-// em 부재 시 폴백 — 버튼으로 항상 존재하는 구매확정/취소/반품/교환은 제외(오인 차단), 진행상태어만 본문 스캔.
-const FALLBACK_SAFE_STATUSES = ['입금대기', '결제완료', '상품준비중', '배송준비중', '배송지시', '배송중', '배송완료']
-const CANCEL_LIKE = new Set(['취소', '반품', '교환'])
-
-function parseOrderView(html) {
-  // 송장번호 / 택배사 sno: .js_btn_delivery_trace 요소의 data 속성
-  const invMatch = /data-invoice-no=["']([^"']+)/.exec(html)
-  const snoMatch = /data-invoice-company-sno=["']([^"']+)/.exec(html)
-  const invoiceNo = invMatch ? invMatch[1].trim() : null
-  const carrierSno = snoMatch ? snoMatch[1].trim() : null
-
-  // 주문상태: order-name td 뒤 td 의 <em> 텍스트. 알려진 상태 키워드만 채택(오탐 방지).
-  let orderStatus = null
-  // order-name td 이후 영역으로 범위를 좁혀 메뉴/안내문구 오탐을 줄인다.
-  const afterName = html.includes('order-name') ? html.slice(html.indexOf('order-name')) : html
-  const emMatch = afterName.match(/<em>\s*([^<]+?)\s*<\/em>/)
-  if (emMatch) {
-    const t = emMatch[1].replace(/\s+/g, '')
-    if (ORDER_STATUS_KEYWORDS.includes(t)) orderStatus = t
-  }
-  if (!orderStatus) {
-    // 폴백(em 부재 시): 액션버튼 오인 방지 위해 '안전 상태어'로만 본문 스캔. 구매확정/취소/반품/교환 제외.
-    for (const kw of FALLBACK_SAFE_STATUSES) {
-      if (afterName.includes(kw)) { orderStatus = kw; break }
-    }
-  }
-
-  // 수령인: <td class="order-name"> 이름 </td>
-  const nameMatch = /class=["']order-name["']\s*>\s*([^<]+?)\s*<\/td>/.exec(html)
-  const receiverName = nameMatch ? nameMatch[1].trim() : null
-
-  // 실결제액(best-effort): <strong class="total_pay_money">25,500원</strong>
-  const payMatch = /class=["']total_pay_money["']\s*>\s*([\d,]+)\s*원/.exec(html)
-  const actualPaid = payMatch ? parseInt(payMatch[1].replace(/,/g, ''), 10) : null
-
-  return { invoiceNo, carrierSno, orderStatus, receiverName, actualPaid }
-}
-
-async function fetchOrderView(orderNo) {
-  const r = await ggsanFetch(`${GGSAN_BASE}/mypage/order_view.php?orderNo=${encodeURIComponent(orderNo)}`)
-  if (!r.ok && r.status !== 200) return { html: null, status: r.status }
-  const html = await r.text()
-  return { html, status: r.status }
-}
-
-// ─── 쿠팡 송장등록(로컬 직접 실행, auto_upload=true 일 때만) ───
+// ─── 쿠팡 발주확인·송장등록(로컬 직접 실행, scripts/lib/coupang-invoice.mjs 공용) ───
 const coupangOps = createCoupangInvoiceOps({ sb, env, log: (m) => console.log('  ' + m) })
+const coupangAck = (orderId) => coupangOps.ackByOrderId(orderId).catch((e) => ({ ok: false, detail: e?.message || String(e) }))
+
+// 집계
+let tracked = 0, paidConfirmed = 0, shipped = 0, invoiceOk = 0, duplicate = 0, invoiceErr = 0, attention = 0, errors = 0
+const sessionErrors = []
+
 /** registerInvoice 결과를 집계 카운터에 반영. 반환: 결과 객체 */
 async function registerLocal(id, label) {
   const r = await coupangOps.registerInvoice({ id })
@@ -185,376 +113,175 @@ async function registerLocal(id, label) {
   return r
 }
 
+async function writeOrder(row, update, tag) {
+  if (DRY) { console.log(`  [dry] ${tag} ← ${JSON.stringify(update)}`); return }
+  const { error } = await sb.from('jimscanner_coupang_orders').update(update).eq('id', row.id)
+  if (error) throw new Error(`update: ${error.message}`)
+}
+
+// ─── 공통 처리 — 매입처 무관. 매입처가 다른 건 p(정규화된 주문상세)를 어떻게 얻었느냐뿐 ───
+async function trackRow(t, row, p) {
+  const tag = `${t.source}#${row.ggsan_order_no}`
+  const update = { ggsan_order_status: p.status, ggsan_last_checked_at: nowIso() }
+  let markAttention = false
+  const flag = (reason) => { update.needs_attention = true; update.attention_reason = reason; if (!row.needs_attention) markAttention = true }
+
+  if (!p.found) {
+    errors++
+    console.log(`  ${tag} 주문 상세 없음 — skip`)
+    await writeOrder(row, update, tag)
+    return
+  }
+  // 취소/반품/교환 → 사람 확인(자동취소 금지)
+  if (p.cancelLike) {
+    flag(`${t.label} ${p.status} 감지 — 확인 필요`)
+    await writeOrder(row, update, tag)
+    if (markAttention) attention++
+    return
+  }
+  // 입금확인 싱크 — 무통장 완주 뒤 매입처가 입금을 확인하면 ORDERED(+ 아래에서 쿠팡 발주확인)
+  let paid = false
+  if (t.depositSync && row.purchase_status === 'AWAITING_DEPOSIT' && p.status && PAID_LIKE.has(p.status)) {
+    update.purchase_status = 'ORDERED'
+    paid = true
+    paidConfirmed++
+    console.log(`  ${tag} ${p.status} — 입금확인 → ORDERED`)
+  }
+  // 입금대기 & 발주 후 24h 경과 → 미결제 지연
+  if (p.status === '입금대기') {
+    const orderedTs = row.purchase_ordered_at ? new Date(row.purchase_ordered_at).getTime() : null
+    if (orderedTs != null && Date.now() - orderedTs > PAID_WAIT_HOURS * 3600 * 1000) flag('미결제 지연')
+  }
+  // 실결제액: 수동값(purchase_total_cost) 우선, 비었을 때만 채움
+  if (p.actualPaid != null) {
+    update.ggsan_actual_paid = p.actualPaid
+    if (row.purchase_total_cost == null || row.purchase_total_cost === 0) update.purchase_total_cost = p.actualPaid
+  }
+  // 송장 감지(발송 신호)
+  const invoiceNo = normalizeInvoiceNo(p.invoiceRaw)
+  let fresh = false
+  if (invoiceNo) {
+    const sameInvoice = row.purchase_status === 'SHIPPED' && row.ggsan_invoice_number === invoiceNo   // 멱등
+    if (sameInvoice && !row.ggsan_carrier_name && p.carrier) {
+      // 과거 택배사 미매핑으로 멈춘 건 — 매핑이 생기면 백필 + attention 해제
+      update.ggsan_carrier_name = p.carrier
+      if (/택배사 미(매핑|확인)/.test(row.attention_reason ?? '')) { update.needs_attention = false; update.attention_reason = null }
+    }
+    if (!sameInvoice) {
+      update.purchase_status = 'SHIPPED'
+      update.ggsan_invoice_number = invoiceNo
+      update.ggsan_carrier_name = p.carrier   // 어댑터가 준 택배사명 그대로(CJ대한통운/한진택배…) → 쿠팡 등록 때 CARRIER_MAP 이 코드로 변환
+      update.ggsan_shipped_at = nowIso()
+      update.coupang_invoice_status = 'pending'
+      if (!p.carrier) flag(`택배사 미확인(${t.label}${p.carrierSno != null ? `, sno ${p.carrierSno}` : ''})`)
+      shipped++
+      fresh = true
+      console.log(`  ${tag} 발송 감지: ${p.carrier ?? '?'} ${invoiceNo}${p.invoiceRaw && p.invoiceRaw !== invoiceNo ? ` (원문 ${p.invoiceRaw})` : ''}`)
+    }
+  }
+  await writeOrder(row, update, tag)
+  if (markAttention) attention++
+  if (paid && !DRY) {
+    const ack = await coupangAck(row.order_id)
+    console.log(`  order#${row.order_id} 쿠팡 발주확인 → ${ack.ok ? 'OK' : '실패'}: ${ack.detail}`)
+  }
+  // auto_upload=true 면 쿠팡 송장등록 로컬 실행(택배사 확정된 신규 발송 건만 — 미확인은 hard gate 로 abort 라 무의미)
+  if (fresh && autoUpload && p.carrier && !DRY) await registerLocal(row.id, `order#${row.order_id}`)
+}
+
 // ════════ 메인 ════════
 const t0 = Date.now()
 const deadlineAt = t0 + DEADLINE_MS
-const nowIso = () => new Date().toISOString()
 
 // ① runs insert(running) + auto_upload 읽기
 let runId = null
-try {
-  const { data: rr } = await sb
-    .from('jimscanner_coupang_ggsan_sync_runs')
-    .insert({ status: 'running', triggered_by: 'local-cron' })
-    .select('id')
-    .single()
-  runId = rr?.id
-} catch { /* 테이블 미생성 시 스킵 */ }
-
+if (!DRY) {
+  try {
+    const { data: rr } = await sb.from('jimscanner_coupang_ggsan_sync_runs').insert({ status: 'running', triggered_by: 'local-cron' }).select('id').single()
+    runId = rr?.id
+  } catch { /* 테이블 미생성 시 스킵 */ }
+}
 let autoUpload = false
 try {
-  const { data: settings } = await sb
-    .from('jimscanner_coupang_invoice_settings')
-    .select('auto_upload')
-    .eq('id', 1)
-    .single()
+  const { data: settings } = await sb.from('jimscanner_coupang_invoice_settings').select('auto_upload').eq('id', 1).single()
   autoUpload = !!settings?.auto_upload
 } catch { autoUpload = false }
-
-// 집계
-let tracked = 0, shipped = 0, invoiceOk = 0, duplicate = 0, invoiceErr = 0, attention = 0, errors = 0
 
 async function finish(status, errorMessage = null) {
   if (runId) {
     try {
       await sb.from('jimscanner_coupang_ggsan_sync_runs').update({
-        finished_at: nowIso(),
-        status,
-        tracked_count: tracked,
-        shipped_count: shipped,
-        invoice_ok_count: invoiceOk,
-        duplicate_count: duplicate,
-        invoice_err_count: invoiceErr,
-        attention_count: attention,
-        error_count: errors,
-        duration_ms: Date.now() - t0,
-        error_message: errorMessage,
+        finished_at: nowIso(), status,
+        tracked_count: tracked, shipped_count: shipped, invoice_ok_count: invoiceOk, duplicate_count: duplicate,
+        invoice_err_count: invoiceErr, attention_count: attention, error_count: errors,
+        duration_ms: Date.now() - t0, error_message: errorMessage,
       }).eq('id', runId)
     } catch { /* noop */ }
   }
-  console.log(`[local-cron-ggsan-sync] ${status} auto_upload=${autoUpload} tracked=${tracked} shipped=${shipped} invoice_ok=${invoiceOk} dup=${duplicate} invoice_err=${invoiceErr} attention=${attention} errors=${errors} (${((Date.now() - t0) / 1000).toFixed(1)}s)`)
-}
-
-// ② ggsan 로그인 (실패 시 ggsan 추적만 건너뜀 — 유픽 추적·재시도 스윕은 계속, 회차는 error 로 기록)
-let ggsanLoginErr = null
-try {
-  await ggsanLogin()
-} catch (e) {
-  ggsanLoginErr = `ggsan login: ${e instanceof Error ? e.message : String(e)}`
-  errors++
-  console.log(`  ${ggsanLoginErr} — ggsan 추적 건너뜀`)
+  console.log(`[local-cron-ggsan-sync] ${status}${DRY ? ' [DRY]' : ''} auto_upload=${autoUpload} tracked=${tracked} paid=${paidConfirmed} shipped=${shipped} invoice_ok=${invoiceOk} dup=${duplicate} invoice_err=${invoiceErr} attention=${attention} errors=${errors} (${((Date.now() - t0) / 1000).toFixed(1)}s)`)
 }
 
 try {
-  // ③ 대상 조회
+  // ② 대상 조회
   const { data: rows, error: selErr } = await sb
     .from('jimscanner_coupang_orders')
     .select('id, order_id, seller_product_id, supplier_source, supplier_goods_no, ggsan_order_no, purchase_status, coupang_invoice_status, ggsan_invoice_number, ggsan_carrier_name, purchase_total_cost, receiver_name, purchase_ordered_at, needs_attention, attention_reason')
     .in('coupang_invoice_status', ['none', 'pending', 'acknowledged', 'failed'])
-    .in('purchase_status', ['ORDERED', 'SHIPPED'])
+    .in('purchase_status', ['AWAITING_DEPOSIT', 'ORDERED', 'SHIPPED'])
     .not('ggsan_order_no', 'is', null)
     .limit(MAX_TARGETS)
   if (selErr) throw new Error(`select: ${selErr.message}`)
 
   // 매입처 판별 = order-server.mjs resolveOrder()와 동일 규칙(오버라이드 우선 → listings.source 조인 → 미상이면 ggsan 간주).
-  // ggsan_order_no 컬럼은 매입처 공용 주문번호 저장소일 뿐이라 자릿수만으로는 ggsan(10~18자리 숫자)과
-  // bio77(14~18자리 숫자)을 구분할 수 없다(2026-09-02 발견) — 반드시 실제 source로 분기한다.
+  // ggsan_order_no 는 매입처 공용 주문번호 저장소라 자릿수로는 매입처를 구분할 수 없다(2026-09-02) — 반드시 실제 source 로 분기.
   const sellerProductIds = [...new Set((rows ?? []).filter((r) => !(r.supplier_source && r.supplier_goods_no) && r.seller_product_id != null).map((r) => r.seller_product_id))]
   const sourceBySellerProductId = new Map()
   if (sellerProductIds.length) {
-    const { data: listings } = await sb
-      .from('jimscanner_coupang_listings')
-      .select('seller_product_id, source')
-      .in('seller_product_id', sellerProductIds)
+    const { data: listings } = await sb.from('jimscanner_coupang_listings').select('seller_product_id, source').in('seller_product_id', sellerProductIds)
     for (const l of listings ?? []) if (l.source && !sourceBySellerProductId.has(l.seller_product_id)) sourceBySellerProductId.set(l.seller_product_id, l.source)
   }
   const resolveSource = (r) => (r.supplier_source && r.supplier_goods_no) ? r.supplier_source : (sourceBySellerProductId.get(r.seller_product_id) || 'ggsan')
 
-  const targets = ggsanLoginErr ? [] : (rows ?? []).filter((r) => resolveSource(r) === 'ggsan')
-  const upickTargets = (rows ?? []).filter((r) => resolveSource(r) === 'upickb2b')
-  const bio77Targets = (rows ?? []).filter((r) => resolveSource(r) === 'bio77')
-  // Cafe24 AuthSSL 매입처별 대상(자격증명은 .env.local — 이 파일의 env 로 주입)
-  for (const t of CAFE24_TRACKED) { t.base = env[t.envBase] || t.defaultBase; t.user = env[t.envUser]; t.pass = env[t.envPass] }
-  const cafe24Targets = Object.fromEntries(CAFE24_TRACKED.map((t) => [t.source, (rows ?? []).filter((r) => resolveSource(r) === t.source)]))
-  const cafe24Count = Object.values(cafe24Targets).reduce((n, l) => n + l.length, 0)
-  // 위 4곳 외 매입처(도매꾹·비셀러 등)는 자동추적 미지원 — 조용히 빠지지 않게 건수만이라도 남긴다
-  const untracked = (rows ?? []).length - targets.length - upickTargets.length - bio77Targets.length - cafe24Count - (ggsanLoginErr ? (rows ?? []).filter((r) => resolveSource(r) === 'ggsan').length : 0)
-  console.log(`  대상: ggsan ${targets.length}건, 유픽 ${upickTargets.length}건, 77bio ${bio77Targets.length}건, ${CAFE24_TRACKED.map((t) => `${t.label} ${cafe24Targets[t.source].length}건`).join(', ')}${untracked > 0 ? `, 자동추적 미지원 ${untracked}건` : ''}`)
+  // 매입처별 대상 — AWAITING_DEPOSIT 은 depositSync 매입처만(나머지는 종전대로 ORDERED/SHIPPED)
+  const targets = new Map(TRACKERS.map((t) => [t.source, (rows ?? []).filter((r) => resolveSource(r) === t.source && (t.depositSync || r.purchase_status !== 'AWAITING_DEPOSIT'))]))
+  const covered = [...targets.values()].reduce((n, l) => n + l.length, 0)
+  const awaitingSkipped = (rows ?? []).filter((r) => r.purchase_status === 'AWAITING_DEPOSIT' && !TRACKERS.find((t) => t.source === resolveSource(r))?.depositSync).length
+  // 등록표 밖 매입처(도매꾹·비셀러 등)는 자동추적 미지원 — 조용히 빠지지 않게 건수만이라도 남긴다
+  const untracked = (rows ?? []).length - covered - awaitingSkipped
+  console.log(`  대상: ${TRACKERS.map((t) => `${t.label} ${targets.get(t.source).length}건`).join(', ')}${untracked > 0 ? `, 자동추적 미지원 ${untracked}건` : ''}`)
 
-  for (const row of targets) {
-    if (Date.now() > deadlineAt) { console.log('  deadline reached — 남은 대상은 다음 회차'); break }
-    tracked++
+  // ③ 매입처별 세션 1회 → 공통 처리
+  for (const t of TRACKERS) {
+    const list = targets.get(t.source)
+    if (!list.length) continue
+    if (Date.now() > deadlineAt) { console.log(`  deadline reached — ${t.label} 은 다음 회차`); continue }
     try {
-      const { html, status } = await fetchOrderView(row.ggsan_order_no)
-      if (!html) {
-        errors++
-        console.log(`  order#${row.order_id} order_view HTTP ${status} — skip`)
-        await sleep(STEP_DELAY_MS)
-        continue
-      }
-      const parsed = parseOrderView(html)
-
-      // 항상 갱신: ggsan_order_status + ggsan_last_checked_at
-      const update = {
-        ggsan_order_status: parsed.orderStatus,
-        ggsan_last_checked_at: nowIso(),
-      }
-      let markAttention = false
-
-      // ── 분기: 취소/반품/교환 (자동취소 금지, 사람 확인) ──
-      if (parsed.orderStatus && CANCEL_LIKE.has(parsed.orderStatus)) {
-        update.needs_attention = true
-        update.attention_reason = `ggsan ${parsed.orderStatus} 감지 — 확인 필요`
-        markAttention = !row.needs_attention
-        await sb.from('jimscanner_coupang_orders').update(update).eq('id', row.id)
-        if (markAttention) attention++
-        await sleep(STEP_DELAY_MS)
-        continue
-      }
-
-      // ── 입금대기 & 발주완료(purchase_ordered_at) + 24h 경과 → 미결제 지연 ──
-      if (parsed.orderStatus === '입금대기') {
-        const orderedTs = row.purchase_ordered_at ? new Date(row.purchase_ordered_at).getTime() : null
-        if (orderedTs != null && Date.now() - orderedTs > PAID_WAIT_HOURS * 3600 * 1000) {
-          update.needs_attention = true
-          update.attention_reason = '미결제 지연'
-          markAttention = !row.needs_attention
-        }
-      }
-
-      // ── 실결제액 자동기록: purchase_total_cost 비었을 때만(수동값 우선) ──
-      if (parsed.actualPaid != null && (row.purchase_total_cost == null || row.purchase_total_cost === 0)) {
-        update.ggsan_actual_paid = parsed.actualPaid
-        update.purchase_total_cost = parsed.actualPaid
-      } else if (parsed.actualPaid != null) {
-        update.ggsan_actual_paid = parsed.actualPaid
-      }
-
-      // ── 송장 감지(발송 신호) ──
-      const invoiceNo = normalizeInvoiceNo(parsed.invoiceNo)
-      const hasInvoice = !!invoiceNo
-      if (hasInvoice) {
-        // 멱등: 이미 SHIPPED + 동일 송장이면 송장 관련 재처리 skip(상태/실결제액 갱신은 위에서 이미 반영)
-        const sameInvoice = row.purchase_status === 'SHIPPED' && row.ggsan_invoice_number === invoiceNo
-        // 택배사 sno → name 매핑(8=CJ, 5=한진). 그 외 null → needs_attention
-        const carrierName = parsed.carrierSno != null ? (CARRIER_SNO_TO_NAME[parsed.carrierSno] ?? null) : null
-        if (sameInvoice && !row.ggsan_carrier_name && carrierName) {
-          // 과거 미매핑(sno 5 등)으로 멈춘 건 — 매핑이 생기면 택배사 백필 + 미매핑 attention 해제
-          update.ggsan_carrier_name = carrierName
-          if (/택배사 미매핑/.test(row.attention_reason ?? '')) { update.needs_attention = false; update.attention_reason = null }
-        }
-        if (!sameInvoice) {
-          update.purchase_status = 'SHIPPED'
-          update.ggsan_invoice_number = invoiceNo
-          update.ggsan_carrier_name = carrierName
-          update.ggsan_shipped_at = nowIso()
-          update.coupang_invoice_status = 'pending'
-          if (carrierName == null) {
-            update.needs_attention = true
-            update.attention_reason = `택배사 미매핑(sno ${parsed.carrierSno ?? 'X'})`
-            markAttention = !row.needs_attention
-          }
-          shipped++
-        }
-      }
-
-      await sb.from('jimscanner_coupang_orders').update(update).eq('id', row.id)
-      if (markAttention) attention++
-
-      // ── auto_upload=true 면 쿠팡 송장등록 로컬 실행(반자동 OFF). false면 pending 유지(사람이 UI [확인·등록]) ──
-      // 송장 매핑이 된(택배사 확정) 신규 발송 건만 트리거. 미매핑은 hard gate 로 abort 하므로 무의미.
-      if (hasInvoice && autoUpload && update.coupang_invoice_status === 'pending' && update.ggsan_carrier_name) {
-        await registerLocal(row.id, `order#${row.order_id}`)
-      }
-
-      await sleep(STEP_DELAY_MS)
-    } catch (e) {
-      errors++
-      console.log(`  order#${row.order_id} error: ${e instanceof Error ? e.message : String(e)}`)
-      await sleep(STEP_DELAY_MS)
-    }
-  }
-
-  // ④-b 유픽B2B(Cafe24) 추적 — 주문상세에서 주문처리상태 + 택배사/송장 수집 (Playwright headless, 세션 1회)
-  if (upickTargets.length > 0 && Date.now() < deadlineAt) {
-    try {
-      await withUpickSession(env, async (page, base) => {
-        for (const row of upickTargets) {
-          if (Date.now() > deadlineAt) { console.log('  deadline reached — 남은 유픽 대상은 다음 회차'); break }
-          tracked++
-          try {
-            const u = await fetchUpickOrder(page, base, row.ggsan_order_no)
-            const update = { ggsan_order_status: u.status, ggsan_last_checked_at: nowIso() }
-            if (!u.found) {
-              errors++
-              console.log(`  upick#${row.ggsan_order_no} 주문 상세 없음 — skip`)
-              await sb.from('jimscanner_coupang_orders').update(update).eq('id', row.id)
-              continue
-            }
-            if (u.cancelLike) {
-              update.needs_attention = true
-              update.attention_reason = `유픽 ${u.status} 감지 — 확인 필요`
-              await sb.from('jimscanner_coupang_orders').update(update).eq('id', row.id)
-              if (!row.needs_attention) attention++
-              continue
-            }
-            const invoiceNo = normalizeInvoiceNo(u.invoiceRaw)
-            let fresh = false
-            if (invoiceNo) {
-              const sameInvoice = row.purchase_status === 'SHIPPED' && row.ggsan_invoice_number === invoiceNo
-              if (!sameInvoice) {
-                update.purchase_status = 'SHIPPED'
-                update.ggsan_invoice_number = invoiceNo
-                update.ggsan_carrier_name = u.carrier   // 링크 텍스트 그대로(한진택배/CJ대한통운) → CARRIER_MAP 이 코드로 변환
-                update.ggsan_shipped_at = nowIso()
-                update.coupang_invoice_status = 'pending'
-                if (!u.carrier) {
-                  update.needs_attention = true
-                  update.attention_reason = '택배사 미확인(유픽)'
-                  if (!row.needs_attention) attention++
-                }
-                shipped++
-                fresh = true
-                console.log(`  upick#${row.ggsan_order_no} 발송 감지: ${u.carrier ?? '?'} ${invoiceNo}${u.invoiceRaw !== invoiceNo ? ` (원문 ${u.invoiceRaw})` : ''}`)
-              }
-            }
-            await sb.from('jimscanner_coupang_orders').update(update).eq('id', row.id)
-            if (fresh && autoUpload && u.carrier) await registerLocal(row.id, `order#${row.order_id}`)
-          } catch (e) {
-            if (/session expired|login failed/.test(String(e?.message))) throw e
-            errors++
-            console.log(`  upick#${row.ggsan_order_no} error: ${e instanceof Error ? e.message : String(e)}`)
-          }
-        }
-      })
-    } catch (e) {
-      errors++
-      console.log(`  upick session error: ${e instanceof Error ? e.message : String(e)} — 유픽 추적 건너뜀`)
-    }
-  }
-
-  // ④-b' 77bio(GodoMall) 추적 — 주문상세에서 주문상태 + 택배사/송장 수집 (Playwright headless, 세션 1회)
-  if (bio77Targets.length > 0 && Date.now() < deadlineAt) {
-    try {
-      await withBio77Session(env, async (page, base) => {
-        for (const row of bio77Targets) {
-          if (Date.now() > deadlineAt) { console.log('  deadline reached — 남은 77bio 대상은 다음 회차'); break }
-          tracked++
-          try {
-            const b = await fetchBio77Order(page, base, row.ggsan_order_no)
-            const update = { ggsan_order_status: b.status, ggsan_last_checked_at: nowIso() }
-            if (!b.found) {
-              errors++
-              console.log(`  bio77#${row.ggsan_order_no} 주문 상세 없음 — skip`)
-              await sb.from('jimscanner_coupang_orders').update(update).eq('id', row.id)
-              continue
-            }
-            if (b.cancelLike) {
-              update.needs_attention = true
-              update.attention_reason = `77bio ${b.status} 감지 — 확인 필요`
-              await sb.from('jimscanner_coupang_orders').update(update).eq('id', row.id)
-              if (!row.needs_attention) attention++
-              continue
-            }
-            const invoiceNo = normalizeInvoiceNo(b.invoiceRaw)
-            let fresh = false
-            if (invoiceNo) {
-              const sameInvoice = row.purchase_status === 'SHIPPED' && row.ggsan_invoice_number === invoiceNo
-              if (!sameInvoice) {
-                update.purchase_status = 'SHIPPED'
-                update.ggsan_invoice_number = invoiceNo
-                update.ggsan_carrier_name = b.carrier   // 링크 텍스트 그대로(CJ택배 등) → CARRIER_MAP 이 코드로 변환
-                update.ggsan_shipped_at = nowIso()
-                update.coupang_invoice_status = 'pending'
-                if (!b.carrier) {
-                  update.needs_attention = true
-                  update.attention_reason = '택배사 미확인(77bio)'
-                  if (!row.needs_attention) attention++
-                }
-                shipped++
-                fresh = true
-                console.log(`  bio77#${row.ggsan_order_no} 발송 감지: ${b.carrier ?? '?'} ${invoiceNo}${b.invoiceRaw !== invoiceNo ? ` (원문 ${b.invoiceRaw})` : ''}`)
-              }
-            }
-            await sb.from('jimscanner_coupang_orders').update(update).eq('id', row.id)
-            if (fresh && autoUpload && b.carrier) await registerLocal(row.id, `order#${row.order_id}`)
-          } catch (e) {
-            if (/session expired|login failed/.test(String(e?.message))) throw e
-            errors++
-            console.log(`  bio77#${row.ggsan_order_no} error: ${e instanceof Error ? e.message : String(e)}`)
-          }
-        }
-      })
-    } catch (e) {
-      errors++
-      console.log(`  bio77 session error: ${e instanceof Error ? e.message : String(e)} — 77bio 추적 건너뜀`)
-    }
-  }
-
-  // ④-b'' AuthSSL Cafe24 매입처(웰루트·K홀세일) 추적 — 주문상세에서 주문처리상태 + 택배사/송장 수집 (Playwright headless, 매입처별 세션 1회)
-  //        파서는 Cafe24 공통 송장 링크 기준(scripts/lib/cafe24-tracking.mjs). 웰루트=예치금 결제(입금대기 없음), K홀세일=무통장(입금 확인 후 출고).
-  for (const t of CAFE24_TRACKED) {
-    const list = cafe24Targets[t.source]
-    if (!list.length || Date.now() > deadlineAt) continue
-    try {
-      await withCafe24Session({ base: t.base, user: t.user, pass: t.pass, label: t.source }, async (page, base) => {
+      await t.with(env, async (fetchOrder) => {
         for (const row of list) {
           if (Date.now() > deadlineAt) { console.log(`  deadline reached — 남은 ${t.label} 대상은 다음 회차`); break }
           tracked++
           try {
-            const w = await fetchCafe24Order(page, base, row.ggsan_order_no, t.source)
-            const update = { ggsan_order_status: w.status, ggsan_last_checked_at: nowIso() }
-            if (!w.found) {
-              errors++
-              console.log(`  ${t.source}#${row.ggsan_order_no} 주문 상세 없음 — skip`)
-              await sb.from('jimscanner_coupang_orders').update(update).eq('id', row.id)
-              continue
-            }
-            if (w.cancelLike) {
-              update.needs_attention = true
-              update.attention_reason = `${t.label} ${w.status} 감지 — 확인 필요`
-              await sb.from('jimscanner_coupang_orders').update(update).eq('id', row.id)
-              if (!row.needs_attention) attention++
-              continue
-            }
-            const invoiceNo = normalizeInvoiceNo(w.invoiceRaw)
-            let fresh = false
-            if (invoiceNo) {
-              const sameInvoice = row.purchase_status === 'SHIPPED' && row.ggsan_invoice_number === invoiceNo
-              if (!sameInvoice) {
-                update.purchase_status = 'SHIPPED'
-                update.ggsan_invoice_number = invoiceNo
-                update.ggsan_carrier_name = w.carrier   // 링크 텍스트(한진택배·CJ대한통운 등) → CARRIER_MAP 이 코드로 변환
-                update.ggsan_shipped_at = nowIso()
-                update.coupang_invoice_status = 'pending'
-                if (!w.carrier) {
-                  update.needs_attention = true
-                  update.attention_reason = `택배사 미확인(${t.label})`
-                  if (!row.needs_attention) attention++
-                }
-                shipped++
-                fresh = true
-                console.log(`  ${t.source}#${row.ggsan_order_no} 발송 감지: ${w.carrier ?? '?'} ${invoiceNo}${w.invoiceRaw !== invoiceNo ? ` (원문 ${w.invoiceRaw})` : ''}`)
-              }
-            }
-            await sb.from('jimscanner_coupang_orders').update(update).eq('id', row.id)
-            if (fresh && autoUpload && w.carrier) await registerLocal(row.id, `order#${row.order_id}`)
+            await trackRow(t, row, await fetchOrder(row.ggsan_order_no))
           } catch (e) {
-            if (/session expired|login failed/.test(String(e?.message))) throw e
+            if (/session expired|login failed/.test(String(e?.message))) throw e   // 세션 문제는 매입처째 중단
             errors++
             console.log(`  ${t.source}#${row.ggsan_order_no} error: ${e instanceof Error ? e.message : String(e)}`)
           }
+          await sleep(STEP_DELAY_MS)
         }
       })
     } catch (e) {
+      // 로그인/세션 실패 → 그 매입처만 건너뛰고 회차는 error 로 기록(다른 매입처·스윕은 계속, 쿠팡 호출 없음 → 데이터 무손상)
       errors++
-      console.log(`  ${t.source} session error: ${e instanceof Error ? e.message : String(e)} — ${t.label} 추적 건너뜀`)
+      const msg = `${t.label} session: ${e instanceof Error ? e.message : String(e)}`
+      sessionErrors.push(msg)
+      console.log(`  ${msg} — ${t.label} 추적 건너뜀`)
     }
   }
 
-  // ④-c 재시도 스윕 — 송장은 있는데 쿠팡 등록이 pending/failed 로 고착된 건(과거 Vercel 호출 실패분 포함).
-  //      쿠팡이 이미 배송지시 이후(Wing 수동등록)면 registerInvoice 가 API 호출 없이 manual_done 으로 동기화한다.
-  if (autoUpload && Date.now() < deadlineAt) {
+  // ④ 재시도 스윕 — 송장은 있는데 쿠팡 등록이 pending/failed 로 고착된 건(과거 Vercel 호출 실패분 포함).
+  //    쿠팡이 이미 배송지시 이후(Wing 수동등록)면 registerInvoice 가 API 호출 없이 manual_done 으로 동기화한다.
+  if (autoUpload && !DRY && Date.now() < deadlineAt) {
     try {
       const { data: stuck } = await sb
         .from('jimscanner_coupang_orders')
@@ -585,19 +312,16 @@ try {
       .is('ggsan_order_no', null)
       .lt('purchase_ordered_at', cutoffIso)
     for (const o of (orphans ?? [])) {
-      if (!o.needs_attention) {
-        await sb.from('jimscanner_coupang_orders').update({
-          needs_attention: true,
-          attention_reason: '매입처 주문번호 미입력(추적 불가) — 입력 필요',
-        }).eq('id', o.id)
-        attention++
-      }
+      if (o.needs_attention) continue
+      if (DRY) { console.log(`  [dry] orphan ${o.id} ← 매입처 주문번호 미입력`); continue }
+      await sb.from('jimscanner_coupang_orders').update({ needs_attention: true, attention_reason: '매입처 주문번호 미입력(추적 불가) — 입력 필요' }).eq('id', o.id)
+      attention++
     }
   } catch (e) {
     console.log(`  orphan scan error: ${e instanceof Error ? e.message : String(e)}`)
   }
 
-  await finish(ggsanLoginErr ? 'error' : 'success', ggsanLoginErr)
+  await finish(sessionErrors.length ? 'error' : 'success', sessionErrors.length ? sessionErrors.join(' | ') : null)
   process.exit(0)
 } catch (e) {
   await finish('error', e instanceof Error ? e.message : String(e))
