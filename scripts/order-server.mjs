@@ -181,6 +181,15 @@ const BIZ_INFO = {
 // ggsan 일반결제(무통장입금) 자동선택값 — 입금자명은 사업자 대표명(BIZ_INFO.ceo) 재사용(신규 PII 미도입),
 // 입금은행은 공개 은행명 키워드로 매칭(계좌번호는 주문서 드롭다운에서 선택, 소스 미저장).
 const GGSAN_DEPOSIT = { depositorName: BIZ_INFO.ceo, bankKeyword: '국민은행' }
+// 무통장 완주 때 주문서에서 고른 입금계좌 옵션 텍스트("기업은행 43414890604014 주식회사 건강산" 꼴)를 은행/계좌/예금주로 분해 — 결과 화면·purchase_note 에 노출(77bio 가상계좌와 같은 역할, 사용자 요청 2026-10-09)
+function parseBankOption(text) {
+  const t = String(text || '').replace(/\s+/g, ' ').trim()
+  if (!t) return null
+  const account = /(\d[\d-]{7,})/.exec(t)?.[1] ?? null
+  const bank = /([가-힣A-Za-z]+(?:은행|농협|우체국|새마을금고|신협|수협|축협|증권))/.exec(t)?.[1] ?? t.split(' ')[0]
+  const holder = account ? t.replace(account, '').replace(bank, '').replace(/\s+/g, ' ').trim() || null : null   // "(주)건강산" 괄호 유지
+  return { text: t, bank, account, holder }
+}
 
 // 보이는 Chrome 띄우기 (결제는 사람이 — 브라우저는 닫지 않음)
 // onDialog 미지정 시 모든 대화상자 수락
@@ -294,6 +303,9 @@ async function runFlowGgsan(goodsNo, qty, recipient, full = null, mall = null) {
   // 결제수단이 무통장(gb)으로 선택돼 있을 때만 클릭 (카드/PG 자동결제 금지)
   const isCash = await op.evaluate(() => document.querySelector('input[name=settleKind][value="gb"]')?.checked === true)
   if (!isCash) return { ok: false, msg: '결제수단이 무통장입금이 아님 — 완주 중단(열린 창에서 직접 진행)' }
+  // 입금계좌(주문서 드롭다운에서 고른 옵션) — 결과 화면·purchase_note 에 어디로 보낼지 남긴다. 미선택이면 몰이 주문을 막으니 여기서 중단
+  const bankAccount = parseBankOption(await op.evaluate(() => { const s = document.querySelector('select[name=bankAccount]'); return s ? (s.options[s.selectedIndex]?.text || '') : '' }).catch(() => ''))
+  if (!bankAccount?.account) return { ok: false, msg: `입금은행 미선택(드롭다운에 '${mall?.bankKeyword || GGSAN_DEPOSIT.bankKeyword}' 없음) — 완주 중단(열린 ${label} 창에서 직접 진행)` }
   await op.evaluate(() => { const b = document.querySelector('button.btn_order_buy'); if (b) { b.scrollIntoView({ block: 'center' }); b.click() } })
   const done = await op.waitForURL(/order_end|orderEnd/i, { timeout: 45000 }).then(() => true).catch(() => false)
   await op.waitForTimeout(1500)
@@ -304,7 +316,7 @@ async function runFlowGgsan(goodsNo, qty, recipient, full = null, mall = null) {
     return m ? m[1] : null
   }).catch(() => null)
   if (!done && !orderNo) return { ok: false, msg: `결제하기 이후 완료 페이지 확인 실패 — 열린 ${label} 창에서 주문 상태를 직접 확인하세요` }
-  return { ok: true, done: true, orderNo, total, msg: `무통장 주문 완료 — 주문번호 ${orderNo ?? '(파싱 실패, 창에서 확인)'} · 총액 ${total.toLocaleString()}원 · 입금대기` }
+  return { ok: true, done: true, orderNo, total, bankAccount, msg: `무통장 주문 완료 — 주문번호 ${orderNo ?? '(파싱 실패, 창에서 확인)'} · 총액 ${total.toLocaleString()}원 · 입금대기(${bankAccount.text})` }
 }
 
 // Playwright: upickb2b(Cafe24) 주문서 자동 작성 → 결제 직전 정지 (브라우저 열어둠)
@@ -390,6 +402,7 @@ async function runFlowUpick(goodsNo, qty, recipient, detailUrl, full = null) {
       if (/\[필수\]/.test(lab) && !c.checked) c.click()
     }
   })
+  const bankAccount = parseBankOption(await op.evaluate(() => { const s = document.querySelector('select#bankaccount'); return s ? (s.options[s.selectedIndex]?.text || '') : '' }).catch(() => ''))
   const total = await op.evaluate(() => {
     const b = document.querySelector('#btn_payment')
     const m = /([\d,]{3,})\s*원/.exec(b?.innerText || '')
@@ -412,7 +425,7 @@ async function runFlowUpick(goodsNo, qty, recipient, detailUrl, full = null) {
     return m ? m[1] : null
   }).catch(() => null)
   if (!done && !orderNo) return { ok: false, msg: '결제하기 이후 완료 페이지 확인 실패 — 열린 U-PICK 창에서 주문 상태를 직접 확인하세요' }
-  return { ok: true, done: true, orderNo, total, msg: `무통장 주문 완료 — 주문번호 ${orderNo ?? '(파싱 실패, 창에서 확인)'} · 총액 ${total.toLocaleString()}원 · 입금대기` }
+  return { ok: true, done: true, orderNo, total, bankAccount, msg: `무통장 주문 완료 — 주문번호 ${orderNo ?? '(파싱 실패, 창에서 확인)'} · 총액 ${total.toLocaleString()}원 · 입금대기${bankAccount?.text ? `(${bankAccount.text})` : ''}` }
 }
 
 // Playwright: 77bio 주문서 자동 작성 → 결제 직전 정지 (브라우저 열어둠)
@@ -837,6 +850,7 @@ async function runFlowKwholesale(goodsNo, qty, recipient, detailUrl, full = null
     return !!(sel && sel.value && sel.value !== '-1' && pn && pn.value)
   }, BIZ_INFO.ceo)
   if (!bankOk) return { ok: false, msg: '입금은행/입금자명 입력 실패 — 완주 중단(열린 창에서 직접 진행)' }
+  const bankAccount = parseBankOption(await op.evaluate(() => { const s = document.querySelector('select#bankaccount'); return s ? (s.options[s.selectedIndex]?.text || '') : '' }).catch(() => ''))
   // 약관 — 활성·표시된 [필수]만(숨은 비회원가입 동의 등은 건드리지 않음, 웰루트와 같은 규칙)
   await op.evaluate(() => {
     const shown = (c) => c.offsetParent !== null || document.querySelector(`label[for="${c.id}"]`)?.offsetParent != null
@@ -871,7 +885,7 @@ async function runFlowKwholesale(goodsNo, qty, recipient, detailUrl, full = null
     return m ? m[1] : null
   }).catch(() => null)
   if (!done && !orderNo) return { ok: false, msg: `결제하기 이후 완료 페이지 확인 실패 — 열린 K홀세일 창에서 주문 상태를 직접 확인하세요${lastDialog()}` }
-  return { ok: true, done: true, orderNo, total, msg: `무통장 주문 완료 — 주문번호 ${orderNo ?? '(파싱 실패, 창에서 확인)'} · 총액 ${total.toLocaleString()}원 · 입금대기(농협 다인내추럴 계좌로 이체 후 [입금완료])` }
+  return { ok: true, done: true, orderNo, total, bankAccount, msg: `무통장 주문 완료 — 주문번호 ${orderNo ?? '(파싱 실패, 창에서 확인)'} · 총액 ${total.toLocaleString()}원 · 입금대기(${bankAccount?.text || '농협 다인내추럴 계좌'}로 이체 후 [입금완료])` }
 }
 
 // ── 결제진행 실행(공용) — /run 핸들러와 원격 큐 폴러가 같이 쓴다 ──
@@ -923,6 +937,11 @@ async function execPurchase(orderKey, fullMode) {
       // 단가는 "쿠팡 주문 1개(묶음이면 묶음 1세트)" 기준 — PurchaseCostCell 이 단가 × 주문 수량으로 상품가를 계산한다
       const qty = r.order.shipping_count || 1
       upd.purchase_unit_cost = Math.round(r.domeCost / qty)
+    }
+    // 무통장 완주(건강산·화장품스토리·K홀세일) — 주문서에서 고른 입금계좌를 메모에 남겨 행에서 바로 어디로 얼마를 보낼지 보이게(사용자 요청 2026-10-09)
+    if (!out.depositPaid && out.bankAccount?.account) {
+      const b = out.bankAccount
+      upd.purchase_note = [r.order.purchase_note, `[무통장] ${b.bank ?? ''} ${b.account}${b.holder ? ` (예금주 ${b.holder})` : ''} ${out.total?.toLocaleString() ?? '?'}원 입금`].filter(Boolean).join(' / ')
     }
     // 77bio 가상계좌 완주 시 입금 계좌 정보를 기록해둬야 사람이 어디로 얼마를 보낼지 알 수 있다.
     if (out.virtualAccount?.account) {
@@ -1076,7 +1095,9 @@ http.createServer(async (req, res) => {
         ? (out.done && out.depositPaid
           ? `<h2>✓ ${esc(out.msg)}</h2><p style="background:#d1fae5;color:#065f46;padding:10px 12px;border-radius:8px">예치금으로 결제가 끝났습니다 — 입금(이체)할 것 없음. 관리자 주문상태가 <b>발주완료</b>로 기록됐고 쿠팡 발주확인이 곧 처리됩니다.</p>`
           : out.done
-          ? `<h2>✓ ${esc(out.msg)}</h2><p style="background:#fef3c7;color:#92400e;padding:10px 12px;border-radius:8px">💰 관리자 주문상태가 <b>입금대기</b>로 기록됐습니다. <b>${esc(DEPOSIT_BANK_LABEL[out.sourceKey] ?? '매입처')} 계좌로 이체</b>한 뒤 관리자에서 <b>[입금완료]</b>를 눌러주세요.</p>`
+          ? `<h2>✓ ${esc(out.msg)}</h2><p style="background:#fef3c7;color:#92400e;padding:10px 12px;border-radius:8px">💰 관리자 주문상태가 <b>입금대기</b>로 기록됐습니다. <b>${esc(DEPOSIT_BANK_LABEL[out.sourceKey] ?? '매입처')} 계좌로 이체</b>한 뒤 관리자에서 <b>[입금완료]</b>를 눌러주세요.</p>${out.bankAccount?.account
+            ? `<div style="margin:12px 0;padding:14px 16px;border:2px solid #f59e0b;border-radius:10px;background:#fffbeb"><div style="font-size:13px;color:#92400e;margin-bottom:6px">입금 계좌 (주문서에서 선택된 계좌 · 주문관리 메모에도 기록됨)</div><div style="font-size:22px;font-weight:700;letter-spacing:.5px">${esc(out.bankAccount.bank ?? '')} ${esc(out.bankAccount.account)}</div><div style="font-size:14px;margin-top:4px">예금주 <b>${esc(out.bankAccount.holder ?? '-')}</b> · 입금액 <b>${esc(out.total?.toLocaleString() ?? '?')}원</b> · 입금자명 <b>${esc(BIZ_INFO.ceo)}</b></div></div>`
+            : ''}`
           : `<h2>✓ ${esc(out.msg)}</h2><p>열린 ${esc(out.sourceLabel ?? '매입처')} 창으로 가서 결제를 마치세요. 이 탭은 닫으셔도 됩니다.</p>`)
         : `<h2>✗ ${esc(out.msg)}</h2><p>다시 시도하거나 매입처에서 직접 주문하세요.</p>`)
       return
