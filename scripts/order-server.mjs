@@ -58,9 +58,12 @@ function adminCors(req) {
 
 // 자동주문 지원 매입처 (listings.source → 표시명)
 // ⚠ 새 매입처를 넣으면 execPurchase의 RUN_FLOWS 분기와 coupang-orders/page.tsx PURCHASE_AUTOMATED_SOURCES도 같이 고칠 것
-const SUPPORTED_SOURCES = { ggsan: '건강산', upickb2b: '유픽B2B', bio77: '77바이오', wellroot: '웰루트', kwholesale: 'K홀세일' }
+const SUPPORTED_SOURCES = { ggsan: '건강산', upickb2b: '유픽B2B', bio77: '77바이오', wellroot: '웰루트', kwholesale: 'K홀세일', cmtstory: '화장품스토리' }
 // 무통장 완주 후 이체할 곳 안내(결과 화면) — 매입처마다 입금 계좌 은행이 다르다(계좌번호는 주문서 드롭다운 기준, 소스 미저장)
-const DEPOSIT_BANK_LABEL = { ggsan: '국민은행(건강산)', upickb2b: '국민은행(유픽B2B)', kwholesale: '농협((주)다인내추럴)' }
+const DEPOSIT_BANK_LABEL = { ggsan: '국민은행(건강산)', upickb2b: '국민은행(유픽B2B)', kwholesale: '농협((주)다인내추럴)', cmtstory: '기업은행((주)건강산)' }
+// 화장품스토리 = 건강산의 화장품 서브몰(같은 고도몰5·같은 회원 계정) → 건강산 무통장 흐름을 호스트만 바꿔 재사용(사용자 결정 2026-10-09: 예치금 아님)
+// 입금은행 드롭다운은 기업은행 하나뿐(건강산의 국민은행과 다름, 2026-10-09 주문서 실측) — 은행명 키워드만 저장(계좌번호는 드롭다운에서 선택)
+const CMTSTORY = { base: env.CMTSTORY_BASE_URL || 'https://www.cmtstory.com', user: env.CMTSTORY_USER || env.GGSAN_USER, pass: env.CMTSTORY_PASS || env.GGSAN_PASS, label: '화장품스토리', bankKeyword: '기업은행' }
 // 예치금 결제 매입처 — 완주 = 예치금 즉시 차감(실결제)이라 결과 상태가 입금대기가 아니라 발주완료(ORDERED)
 const DEPOSIT_PAY_SOURCES = new Set(['wellroot'])
 
@@ -198,23 +201,25 @@ function guardFail(kind, total, maxPay) {
   return null
 }
 
-// Playwright: ggsan 주문서 자동 작성 → 결제 직전 정지 (브라우저 열어둠) / full 지정 시 무통장 결제 완주
-async function runFlowGgsan(goodsNo, qty, recipient, full = null) {
+// Playwright: 고도몰5(ggsan·cmtstory) 주문서 자동 작성 → 결제 직전 정지 (브라우저 열어둠) / full 지정 시 무통장 결제 완주
+// mall 생략 = 건강산(기존 동작 그대로). 화장품스토리는 같은 플랫폼·같은 계정이라 host/계정/표시명만 주입(CMTSTORY).
+async function runFlowGgsan(goodsNo, qty, recipient, full = null, mall = null) {
+  const base = mall?.base || BASE, user = mall?.user || env.GGSAN_USER, pass = mall?.pass || env.GGSAN_PASS, label = mall?.label || 'ggsan'
   const { ctx, page } = await openBrowser()
   if (full) full.ctxRef = ctx   // 원격 잡이 완료 후 브라우저를 닫을 수 있게
 
   // 1) 로그인
-  await page.goto(`${BASE}/member/login.php`, { waitUntil: 'domcontentloaded', timeout: 30000 })
-  await page.fill('input[name=loginId]', env.GGSAN_USER)
-  await page.fill('input[name=loginPwd]', env.GGSAN_PASS)
+  await page.goto(`${base}/member/login.php`, { waitUntil: 'domcontentloaded', timeout: 30000 })
+  await page.fill('input[name=loginId]', user)
+  await page.fill('input[name=loginPwd]', pass)
   await Promise.all([
     page.waitForNavigation({ timeout: 15000 }).catch(() => {}),
     page.evaluate(() => { const f = document.querySelector('input[name=loginPwd]')?.form; if (f) (f.requestSubmit ? f.requestSubmit() : f.submit()) }),
   ])
   await page.waitForTimeout(1500)
-  if (!(await page.evaluate(() => /로그아웃|LOGOUT/i.test(document.body.innerText)))) return { ok: false, msg: 'ggsan 로그인 실패 — 자격증명 확인 필요' }
+  if (!(await page.evaluate(() => /로그아웃|LOGOUT/i.test(document.body.innerText)))) return { ok: false, msg: `${label} 로그인 실패 — 자격증명 확인 필요` }
   // 2) 상품 페이지 + 수량
-  await page.goto(`${BASE}/goods/goods_view.php?goodsNo=${goodsNo}`, { waitUntil: 'domcontentloaded', timeout: 30000 })
+  await page.goto(`${base}/goods/goods_view.php?goodsNo=${goodsNo}`, { waitUntil: 'domcontentloaded', timeout: 30000 })
   await page.waitForTimeout(1000)
   if (qty > 1) await page.evaluate((q) => { const el = document.querySelector('input[name^="goodsCnt"]'); if (el) { el.value = String(q); el.dispatchEvent(new Event('change', { bubbles: true })) } }, qty)
   // 3) 바로구매 (보이지 않을 수 있어 JS 클릭)
@@ -248,11 +253,25 @@ async function runFlowGgsan(goodsNo, qty, recipient, full = null) {
       const opt = [...bankSel.options].find((o) => o.value && o.text.includes(dep.bankKeyword))
       if (opt) { bankSel.value = opt.value; bankSel.dispatchEvent(new Event('change', { bubbles: true })) }
     }
-  }, { rcp: recipient, biz: BIZ_INFO, dep: GGSAN_DEPOSIT })
+  }, { rcp: recipient, biz: BIZ_INFO, dep: { ...GGSAN_DEPOSIT, bankKeyword: mall?.bankKeyword || GGSAN_DEPOSIT.bankKeyword } })
   await op.bringToFront().catch(() => {})
   if (!full) {
-    // 브라우저는 닫지 않는다 — 사장님이 금액 확인 후 결제하기
-    return { ok: true, msg: '주문서 작성 완료 — 열린 ggsan 창에서 금액·배송지 확인 후 [결제하기]를 직접 누르세요' }
+    // 브라우저는 닫지 않는다 — 사장님이 금액 확인 후 결제하기. 주문서가 어떻게 채워졌는지(총액·결제수단·입금은행)는 결과에 같이 보여준다(새 몰 검증용)
+    const diag = await op.evaluate(() => {
+      const hid = document.querySelector('input[name=settlePrice]')
+      const bankSel = document.querySelector('select[name=bankAccount]')
+      return {
+        total: hid && /^\d+$/.test(hid.value) ? +hid.value : null,
+        cash: document.querySelector('input[name=settleKind][value="gb"]')?.checked === true,
+        bank: bankSel ? (bankSel.options[bankSel.selectedIndex]?.text || '').trim().slice(0, 40) : '(드롭다운 없음)',
+        bankOptions: bankSel ? [...bankSel.options].map((o) => o.text.trim()).filter((t) => t && !/선택/.test(t)).slice(0, 6) : [],
+        receiver: document.querySelector('[name="receiverName"]')?.value || '',
+        tax: document.querySelector('input[name=receiptFl][value="t"]')?.checked === true,
+      }
+    }).catch(() => null)
+    const bankNote = diag && /선택/.test(diag.bank) ? ` ⚠ 입금은행 미선택 — 드롭다운: ${diag.bankOptions.join(' | ') || '(없음)'}` : ''
+    const d = diag ? ` [총액 ${diag.total?.toLocaleString() ?? '?'}원 · ${diag.cash ? '무통장' : '⚠ 무통장 아님'} · 은행 ${diag.bank}${bankNote} · 수령인 ${diag.receiver} · 세금계산서 ${diag.tax ? '✓' : '✗'}]` : ''
+    return { ok: true, msg: `주문서 작성 완료 — 열린 ${label} 창에서 금액·배송지 확인 후 [결제하기]를 직접 누르세요${d}` }
   }
 
   // ── 완주(무통장): 동의 체크 → 금액 가드 → 결제하기 → 완료페이지 주문번호 파싱 ──
@@ -270,7 +289,7 @@ async function runFlowGgsan(goodsNo, qty, recipient, full = null) {
     }
     return null
   }).catch(() => null)
-  const g = guardFail('ggsan', total, full.maxPay)
+  const g = guardFail(label, total, full.maxPay)
   if (g) return { ok: false, msg: g }
   // 결제수단이 무통장(gb)으로 선택돼 있을 때만 클릭 (카드/PG 자동결제 금지)
   const isCash = await op.evaluate(() => document.querySelector('input[name=settleKind][value="gb"]')?.checked === true)
@@ -284,7 +303,7 @@ async function runFlowGgsan(goodsNo, qty, recipient, full = null) {
     const m = /주문\s*번호[^\d]{0,12}(\d{8,20})/.exec(document.body.innerText)
     return m ? m[1] : null
   }).catch(() => null)
-  if (!done && !orderNo) return { ok: false, msg: '결제하기 이후 완료 페이지 확인 실패 — 열린 ggsan 창에서 주문 상태를 직접 확인하세요' }
+  if (!done && !orderNo) return { ok: false, msg: `결제하기 이후 완료 페이지 확인 실패 — 열린 ${label} 창에서 주문 상태를 직접 확인하세요` }
   return { ok: true, done: true, orderNo, total, msg: `무통장 주문 완료 — 주문번호 ${orderNo ?? '(파싱 실패, 창에서 확인)'} · 총액 ${total.toLocaleString()}원 · 입금대기` }
 }
 
@@ -865,6 +884,7 @@ const RUN_FLOWS = {
   bio77: (r, full) => runFlowBio77(r.goodsNo, buyQty(r), r.recipient, full),
   wellroot: (r, full) => runFlowWellroot(r.goodsNo, buyQty(r), r.recipient, r.detailUrl, full),
   kwholesale: (r, full) => runFlowKwholesale(r.goodsNo, buyQty(r), r.recipient, r.detailUrl, full),
+  cmtstory: (r, full) => runFlowGgsan(r.goodsNo, buyQty(r), r.recipient, full, CMTSTORY),   // 건강산 무통장 흐름 재사용(호스트·계정만 다름)
 }
 async function execPurchase(orderKey, fullMode) {
   const r = await resolveOrder(orderKey)

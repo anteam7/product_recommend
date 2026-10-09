@@ -380,7 +380,7 @@ for (let i = 0; i < targets.length; i++) {
       source_goods_no: row.goods_no, source_detail_url: row.detail_url, registered_title: built.title,
       display_category_code: cat.code, display_category_name: cat.name, brand: null,
       dome_price_krw: row.wholesale_price_krw, source_shipping_fee_krw: built.price.ship, outbound_shipping_fee_krw: 0,
-      msp_price_krw: row.msp_price_krw, list_price_krw: built.price.listPrice,
+      msp_price_krw: row.msp_price_krw ?? 0, list_price_krw: built.price.listPrice,   // 절대준수 문구 없음 = 하한 없음(0) — 컬럼이 not null (2026-10-08 2건 미기록 사고)
       estimated_fee_krw: built.price.fee, estimated_margin_krw: built.price.margin, estimated_margin_pct: built.price.marginPct,
       status: success ? 'TEMPORARY_SAVE' : 'FAILED', displayable: false,
       rejection_reason: success ? null : (r.body?.message ?? String(r.body).slice(0, 500)),

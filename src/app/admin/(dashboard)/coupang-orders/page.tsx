@@ -123,7 +123,7 @@ const SUPPLIER_LABELS: Record<string, string> = {
 
 // order-server.mjs의 SUPPORTED_SOURCES와 반드시 동기화 — 여기 없으면 결제진행 버튼 자체가 안 그려짐
 // (2026-09-02: bio77 추가 시 order-server.mjs만 고치고 여기를 안 고쳐서 버튼이 안 보이던 버그 재발 방지 메모)
-const PURCHASE_AUTOMATED_SOURCES = ['ggsan', 'upickb2b', 'bio77', 'wellroot', 'kwholesale']
+const PURCHASE_AUTOMATED_SOURCES = ['ggsan', 'upickb2b', 'bio77', 'wellroot', 'kwholesale', 'cmtstory']
 
 // 묶음 옵션의 묶음 수 — 원본 주문의 업체상품코드 접미사("450-2" → 2, "1000001234-B3" → 3), 앞부분이 매입처 상품번호일 때만.
 // 동기화 지점: scripts/order-server.mjs coupangBundleSize (결제진행 매입 수량 = 주문 수량 × 묶음 수)
