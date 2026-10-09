@@ -39,6 +39,9 @@ const LIMIT = +(arg('limit') || 0)
 const CONC = Math.max(1, +(arg('concurrency') || 3))
 const CATES = (arg('cats') || DOMESTIC_CATES.join(',')).split(',').map(s => s.trim()).filter(s => /^\d{3,9}$/.test(s))
 const TARGET_NET = +(arg('min-margin') ?? 0.10)
+// 1개 절대마진 하한(사용자 결정 2026-10-09): 10% 비율만으로는 도매 3천원대 상품의 1개 순마진이 800원대 → 변심 반품(공급사 미수용) 1건이 판매 7건을 지움.
+// 1개만 적용(2·3개는 묶음 MSP가 가격을 정하는 경우가 2/3라 그대로). 순마진 m 을 보장하는 가격: p ≥ (원가×(1−1/11) + m) / (1 − 수수료 − 1/11)
+const MIN_ABS_MARGIN = { 1: +(arg('min-abs-margin-1') ?? 2000) }
 const FULL_RUN = !ONLY.size && !LIMIT && CATES.length === DOMESTIC_CATES.length
 const sleep = ms => new Promise(s => setTimeout(s, ms))
 const ceil100 = n => Math.ceil(n / 100) * 100
@@ -53,11 +56,13 @@ function salePriceFor(row, n) {
   const fee = row.coupang_fee_rate
   const msp = row.tiered_msp?.[n] ?? (row.msp_price_krw ? row.msp_price_krw * n : 0)
   const marginPrice = ceil100(0.9091 * cost / (1 - fee - 0.0909 - TARGET_NET))
-  const price = ceil100(Math.max(msp, marginPrice))
+  const floorPrice = MIN_ABS_MARGIN[n] ? ceil100((cost * 0.9091 + MIN_ABS_MARGIN[n]) / (1 - fee - 0.0909)) : 0   // 절대마진 하한가(1개만)
+  const price = ceil100(Math.max(msp, marginPrice, floorPrice))
   const feeKrw = Math.round(price * fee)
   const vat = Math.max(0, Math.round((price - cost) / 11))
   const margin = price - cost - feeKrw - vat
-  return { price, basis: msp >= marginPrice ? 'msp' : 'margin', msp: msp || null, marginPrice, margin, pct: +(margin / price * 100).toFixed(2), ship }
+  const basis = msp >= marginPrice && msp >= floorPrice ? 'msp' : floorPrice > marginPrice ? 'floor' : 'margin'
+  return { price, basis, msp: msp || null, marginPrice, floorPrice: floorPrice || null, margin, pct: +(margin / price * 100).toFixed(2), ship }
 }
 function applySalePrices(row) {
   const p = { 1: salePriceFor(row, 1), 2: salePriceFor(row, 2), 3: salePriceFor(row, 3) }
