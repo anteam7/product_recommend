@@ -7,6 +7,8 @@ import { GgsanTrackingCell } from './GgsanTrackingCell'
 import PurchaseButton from './PurchaseButton'
 import { DepositInfo } from './DepositInfo'
 import SyncOrdersButton from './SyncOrdersButton'
+import { feeRateFor, FEE_RATE, FEE_RATE_BY_SOURCE } from '@/lib/coupang/fee'
+import { netVat } from '@/lib/margin'
 
 export const dynamic = 'force-dynamic'
 
@@ -151,9 +153,7 @@ function supplierUrl(source: string | null, goodsNo: string | null): string | nu
 
 const PAGE_SIZE = 50
 
-// 실수익 = 매출 − 매입원가 − 수수료 − 부가세 (price.ts FEE_RATE와 동일 유지)
-const FEE_RATE = 0.106
-const VAT_DIVISOR = 11
+// 실수익 = 매출 − 매입원가 − 수수료(매입처별 요율, fee.ts) − 부가세((매출−매입원가)÷11, margin.ts)
 const PERIOD_OPTIONS = [
   { v: 7, label: '7일' },
   { v: 30, label: '30일' },
@@ -250,24 +250,37 @@ async function fetchMeta() {
   return { total: total ?? 0, byPurchase, attentionCount: attentionCount ?? 0 }
 }
 
-/** 지정 기간 실수익 합산 (취소 제외). 실수익 = 매출 − 매입원가 − 수수료(10.6%) − 부가세(÷11) */
+/**
+ * 지정 기간 실수익 합산 (취소 제외). 실수익 = 매출 − 매입원가 − 수수료(매입처별 요율) − 부가세((매출−매입원가)÷11).
+ * 수수료 요율은 주문별 매입처 오버라이드(supplier_source+goods_no) → 리스팅 source 순으로 정한다(목록과 동일 규칙).
+ */
 async function fetchSummary(days: number) {
   const sb = createAdminClient() as unknown as {
     from: (t: string) => ReturnType<ReturnType<typeof createAdminClient>['from']>
   }
-  let q = sb.from('jimscanner_coupang_orders').select('order_price, purchase_total_cost, purchase_status')
+  let q = sb.from('jimscanner_coupang_orders').select('order_price, purchase_total_cost, purchase_status, seller_product_id, supplier_source, supplier_goods_no')
   const cutoff = periodCutoff(days)
   if (cutoff) q = q.gte('ordered_at', cutoff)
   const { data } = await q
-  const rows = (data ?? []) as unknown as Array<{ order_price: number | null; purchase_total_cost: number | null; purchase_status: string }>
+  const rows = (data ?? []) as unknown as Array<{
+    order_price: number | null; purchase_total_cost: number | null; purchase_status: string
+    seller_product_id: number | null; supplier_source: string | null; supplier_goods_no: string | null
+  }>
+  const spids = [...new Set(rows.map((r) => r.seller_product_id).filter(Boolean))] as number[]
+  const sourceBySpid = new Map<number, string | null>()
+  if (spids.length > 0) {
+    const { data: listings } = await sb.from('jimscanner_coupang_listings').select('seller_product_id, source').in('seller_product_id', spids)
+    for (const l of (listings ?? []) as unknown as Array<{ seller_product_id: number; source: string | null }>) sourceBySpid.set(l.seller_product_id, l.source)
+  }
   let count = 0, revenue = 0, cost = 0, fee = 0, vat = 0, costMissing = 0
   for (const r of rows) {
     if (r.purchase_status === 'CANCELLED') continue
     count++
     const rev = r.order_price ?? 0
+    const source = (r.supplier_source && r.supplier_goods_no) ? r.supplier_source : (r.seller_product_id ? sourceBySpid.get(r.seller_product_id) ?? null : null)
     revenue += rev
-    fee += Math.round(rev * FEE_RATE)
-    vat += Math.round(rev / VAT_DIVISOR)
+    fee += Math.round(rev * feeRateFor(source))
+    vat += netVat(rev, r.purchase_total_cost)
     if (r.purchase_total_cost != null) cost += r.purchase_total_cost
     else costMissing++
   }
@@ -351,9 +364,9 @@ export default async function CoupangOrdersPage({
         <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
           <Kpi label="총 매출" value={`${summary.revenue.toLocaleString()}원`} />
           <Kpi label="총 매입원가" value={`${summary.cost.toLocaleString()}원`} />
-          <Kpi label="수수료" value={`${summary.fee.toLocaleString()}원`} sub="판매수수료 10.6%" />
-          <Kpi label="총 실수익 (부가세 포함)" value={`${(summary.net + summary.vat).toLocaleString()}원`} sub={`부가세 차감 전 (부가세 ${summary.vat.toLocaleString()})`} />
-          <Kpi label="총 실수익 (부가세 제외)" value={`${summary.net.toLocaleString()}원`} sub={`부가세 −${summary.vat.toLocaleString()} 차감`} highlight positive={summary.net >= 0} />
+          <Kpi label="수수료" value={`${summary.fee.toLocaleString()}원`} sub={`기본 ${(FEE_RATE * 100).toFixed(1)}% · 화장품스토리 ${(FEE_RATE_BY_SOURCE.cmtstory * 100).toFixed(1)}%`} />
+          <Kpi label="총 실수익 (부가세 포함)" value={`${(summary.net + summary.vat).toLocaleString()}원`} sub={`납부 부가세 차감 전 (부가세 ${summary.vat.toLocaleString()})`} />
+          <Kpi label="총 실수익 (부가세 제외)" value={`${summary.net.toLocaleString()}원`} sub={`납부 부가세 = (매출−매입원가)÷11 → −${summary.vat.toLocaleString()}`} highlight positive={summary.net >= 0} />
         </div>
         {summary.costMissing > 0 && (
           <p className="text-[11px] text-amber-600">
@@ -500,6 +513,7 @@ export default async function CoupangOrdersPage({
                       totalCost={r.purchase_total_cost}
                       shippingCount={r.shipping_count}
                       orderPrice={r.order_price}
+                      feeRate={feeRateFor(r.supplier_source)}
                     />
                   </td>
                   <td className="px-3 py-2 text-center">

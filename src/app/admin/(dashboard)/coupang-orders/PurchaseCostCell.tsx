@@ -4,8 +4,8 @@ import { useState } from 'react'
 import { useRouter } from 'next/navigation'
 
 // 마진 공식 — src/lib/coupang/price.ts 와 동일하게 유지 (client는 node:crypto 의존 때문에 import 불가)
-const FEE_RATE = 0.106  // 쿠팡 판매수수료 — 기타 영양제(73137) 10.6% (결제비 포함). price.ts FEE_RATE와 동일 유지
-const VAT_DIVISOR = 11  // 부가세 = 판매가 / 11
+import { FEE_RATE } from '@/lib/coupang/fee'
+import { netProfit } from '@/lib/margin'
 
 interface Props {
   id: string
@@ -15,14 +15,16 @@ interface Props {
   shippingCount: number | null
   /** 이 주문 라인의 실제 매출(고객 결제액) — 실수익 계산용 */
   orderPrice: number | null
+  /** 쿠팡 판매수수료 요율 — 매입처별(fee.ts feeRateFor). 생략 시 기본 10.6% */
+  feeRate?: number
 }
 
 /**
  * 매입 원가 인라인 입력(상품가+운송비) + 실수익 실시간 계산.
  * 운송비는 DB 별도 컬럼 없이 purchase_total_cost 에 녹여 저장(운송비 = 합계 − 상품가×수량).
- * 실수익 = 주문금액 − 매입원가(상품가×수량+운송비) − 쿠팡수수료 − 부가세
+ * 실수익 = 주문금액 − 매입원가(상품가×수량+운송비) − 쿠팡수수료(매입처별 요율) − 납부부가세((주문금액−매입원가)÷11)
  */
-export function PurchaseCostCell({ id, unitCost, totalCost, shippingCount, orderPrice }: Props) {
+export function PurchaseCostCell({ id, unitCost, totalCost, shippingCount, orderPrice, feeRate = FEE_RATE }: Props) {
   const router = useRouter()
   const qty = shippingCount ?? 1
   // 운송비 초기값 = 합계 − 상품가×수량 (파생). 상품가를 모르면(unitCost=null) 합계 전체를 운송비로
@@ -38,10 +40,7 @@ export function PurchaseCostCell({ id, unitCost, totalCost, shippingCount, order
   const cost = unitNum * qty + shipNum
 
   const revenue = orderPrice ?? 0
-  const fee = Math.round(revenue * FEE_RATE)
-  const vat = Math.round(revenue / VAT_DIVISOR)
-  const net = revenue - cost - fee - vat
-  const netPct = revenue > 0 ? (net / revenue) * 100 : 0
+  const { fee, vat, net, netPct } = netProfit(revenue, cost, Math.round(revenue * feeRate))
   const hasCost = unitNum > 0
 
   // 상품가 또는 운송비 변경 시 → 상품가 + 합계(=상품가×수량+운송비) 함께 저장
@@ -98,7 +97,7 @@ export function PurchaseCostCell({ id, unitCost, totalCost, shippingCount, order
         {hasCost ? (
           <>
             <div className="text-[10px] text-gray-400 tabular-nums">
-              주문 {revenue.toLocaleString()} − 수수료 {fee.toLocaleString()} − 부가세 {vat.toLocaleString()}
+              주문 {revenue.toLocaleString()} − 매입 {cost.toLocaleString()} − 수수료 {fee.toLocaleString()}({(feeRate * 100).toFixed(1)}%) − 부가세 {vat.toLocaleString()}
             </div>
             <div className={`text-[11px] font-semibold tabular-nums ${net >= 0 ? 'text-emerald-700' : 'text-rose-600'}`}>
               실수익 {net.toLocaleString()}원 ({netPct.toFixed(1)}%)

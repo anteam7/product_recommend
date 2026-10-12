@@ -1,4 +1,6 @@
 import crypto from 'node:crypto'
+import { SHIP, FEE_RATE } from './fee'
+import { netVat } from '../margin'
 
 /**
  * 쿠팡 Open API 서버 전용 클라이언트 (HMAC-SHA256).
@@ -74,16 +76,16 @@ export async function changeProductPrice(sellerProductId: number, price: number)
 }
 
 // ─── 마진 계산 (모든 가격 경로의 단일 출처) ───
-// FEE_RATE는 register/reprice/match 스크립트와 반드시 동일해야 함 (현재 0.13 = 카테고리 수수료 + 결제 수수료 근사).
-// 스크립트는 .mjs라 이 상수를 import할 수 없으므로, 값 변경 시 scripts/coupang-{register-*,reprice-ship3000,match-manual}.mjs도 같이 맞출 것.
-export const SHIP = 3000          // 위탁 dropship: 고객 출고 배송 1회분
-export const FEE_RATE = 0.106     // 쿠팡 판매수수료 — 기타 영양제(73137) 카테고리 10.6% (결제비 포함). 카테고리 다르면 조정
-export const VAT_DIVISOR = 11     // 부가세 = 판매가 / 11
+// 상수는 fee.ts(수수료·배송, 클라이언트 안전) / margin.ts(부가세·실수익) 에 있고 여기서 재export.
+// 스크립트는 .mjs라 import할 수 없으므로, 값 변경 시 scripts/coupang-{register-*,reprice-ship3000,match-manual}.mjs도 같이 맞출 것.
+// 부가세(2026-10-13): 결제액÷11 → (결제액 − 매입원가)÷11 (매입세액 공제). 수수료는 매입처별(feeRateFor).
+export { SHIP, FEE_RATE, FEE_RATE_BY_SOURCE, feeRateFor } from './fee'
+export { VAT_DIVISOR } from '../margin'
 
-export function computeMargin(listPrice: number, dome: number, shipping: number = SHIP) {
+export function computeMargin(listPrice: number, dome: number, shipping: number = SHIP, feeRate: number = FEE_RATE) {
   const realCost = dome + shipping
-  const fee = Math.round(listPrice * FEE_RATE)
-  const vat = Math.round(listPrice / VAT_DIVISOR)
+  const fee = Math.round(listPrice * feeRate)
+  const vat = netVat(listPrice, realCost)
   const margin = listPrice - realCost - fee - vat
   return {
     realCost,

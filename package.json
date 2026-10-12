@@ -8,7 +8,8 @@
     "start": "next start",
     "lint": "eslint",
     "db:link": "supabase link --project-ref obxvucyhzlakensopalf",
-    "gen:types": "supabase gen types typescript --linked | node -e \"let d='';process.stdin.on('data',c=>d+=c).on('end',()=>process.stdout.write(d.replace(/<claude-code-hint[^>]*\\/>/g,'')))\" > types/supabase.ts"
+    "gen:types": "supabase gen types typescript --linked | node -e \"let d='';process.stdin.on('data',c=>d+=c).on('end',()=>process.stdout.write(d.replace(/<claude-code-hint[^>]*\\/>/g,'')))\" > types/supabase.ts",
+    "test:ts": "tsx --test \"src/**/*.test.ts\""
   },
   "dependencies": {
     "@google-analytics/data": "^5.2.1",

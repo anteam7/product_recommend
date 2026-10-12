@@ -4,6 +4,7 @@ import { PurchaseStatusCell } from './PurchaseStatusCell'
 import { PurchaseCostCell } from './PurchaseCostCell'
 import { InvoiceCell } from './InvoiceCell'
 import PurchaseButton from './PurchaseButton'
+import { netVat } from '@/lib/margin'
 
 export const dynamic = 'force-dynamic'
 
@@ -89,7 +90,6 @@ const SUPPLIER_LABELS: Record<string, string> = {
 }
 
 const PAGE_SIZE = 50
-const VAT_DIVISOR = 11
 const PERIOD_OPTIONS = [
   { v: 7, label: '7일' },
   { v: 30, label: '30일' },
@@ -182,7 +182,7 @@ async function fetchMeta() {
   return { total: total ?? 0, byPurchase }
 }
 
-/** 지정 기간 실수익 합산 (취소 제외). 실수익 = 결제금액 − 매입원가 − 수수료(실값) − 부가세 */
+/** 지정 기간 실수익 합산 (취소 제외). 실수익 = 결제금액 − 매입원가 − 수수료(실값) − 납부부가세((결제금액−매입원가)÷11, margin.ts) */
 async function fetchSummary(days: number) {
   const sb = createAdminClient() as unknown as {
     from: (t: string) => ReturnType<ReturnType<typeof createAdminClient>['from']>
@@ -206,7 +206,7 @@ async function fetchSummary(days: number) {
     const rev = r.total_payment_amount ?? 0
     revenue += rev
     fee += r.commission_amount ?? 0
-    vat += Math.round(rev / VAT_DIVISOR)
+    vat += netVat(rev, r.purchase_total_cost)
     if (r.purchase_total_cost != null) cost += r.purchase_total_cost
     else costMissing++
   }
@@ -283,8 +283,8 @@ export default async function NaverOrdersPage({
           <Kpi label="총 매출" value={`${summary.revenue.toLocaleString()}원`} />
           <Kpi label="총 매입원가" value={`${summary.cost.toLocaleString()}원`} />
           <Kpi label="수수료" value={`${summary.fee.toLocaleString()}원`} sub="네이버 실수수료 합" />
-          <Kpi label="총 실수익 (부가세 포함)" value={`${(summary.net + summary.vat).toLocaleString()}원`} sub={`부가세 차감 전 (부가세 ${summary.vat.toLocaleString()})`} />
-          <Kpi label="총 실수익 (부가세 제외)" value={`${summary.net.toLocaleString()}원`} sub={`부가세 −${summary.vat.toLocaleString()} 차감`} highlight positive={summary.net >= 0} />
+          <Kpi label="총 실수익 (부가세 포함)" value={`${(summary.net + summary.vat).toLocaleString()}원`} sub={`납부 부가세 차감 전 (부가세 ${summary.vat.toLocaleString()})`} />
+          <Kpi label="총 실수익 (부가세 제외)" value={`${summary.net.toLocaleString()}원`} sub={`납부 부가세 = (결제−매입원가)÷11 → −${summary.vat.toLocaleString()}`} highlight positive={summary.net >= 0} />
         </div>
         {summary.costMissing > 0 && (
           <p className="text-[11px] text-amber-600">
@@ -491,7 +491,7 @@ export default async function NaverOrdersPage({
         ℹ️ 흐름: 네이버 주문 자동 수집(매시간 07분) → 매입 상태를 <strong>발주완료</strong>로 바꾸면 <strong>네이버 발주확인이 자동 호출</strong>됩니다 (⚠ 발주확인 필요 표시가 ✓로 바뀜) → 🛒 매입처 발주 → 송장 입력(내부 기록).
         <br />※ 송장의 <strong>네이버 발송처리는 아직 수동</strong>입니다 — 스마트스토어센터에서 발송처리하세요 (API 연동은 후속 예정).
         <br />※ <strong>💳 결제진행</strong>(미발주·매입처 연결 건): 매입처 주문서 자동 작성 후 <strong>완주(무통장 주문완료 → 💰입금대기 자동 기록 + 주문번호 수집)</strong> 또는 <strong>직전 정지(직접 결제)</strong> 선택. 완주 후 계좌 이체를 마치면 <strong>[✓ 입금완료]</strong>로 바꿔주세요. 로컬 헬퍼(127.0.0.1:39201)가 꺼져 있으면 <code>jimorder://</code> 프로토콜로 자동 기동 — 이 PC에서만 작동.
-        <br />※ 실수익 = 결제금액 − 매입원가 − <strong>네이버 실수수료</strong>(주문 API 값) − 부가세(결제금액÷11). 쿠팡(요율 추정)과 달리 수수료 실값을 씁니다.
+        <br />※ 실수익 = 결제금액 − 매입원가 − <strong>네이버 실수수료</strong>(주문 API 값) − 납부부가세(<strong>(결제금액−매입원가)÷11</strong>, 매입세액 공제 반영). 쿠팡(요율 추정)과 달리 수수료 실값을 씁니다.
       </div>
     </div>
   )

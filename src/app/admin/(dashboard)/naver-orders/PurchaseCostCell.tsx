@@ -3,7 +3,7 @@
 import { useState } from 'react'
 import { useRouter } from 'next/navigation'
 
-const VAT_DIVISOR = 11 // 부가세 = 결제금액 / 11
+import { netProfit } from '@/lib/margin'
 
 interface Props {
   id: string
@@ -19,7 +19,7 @@ interface Props {
 
 /**
  * 매입 원가 인라인 입력(상품가+운송비) + 실수익 실시간 계산 (쿠팡 PurchaseCostCell 미러).
- * 실수익 = 결제금액 − 매입원가(상품가×수량+운송비) − 네이버수수료(실값) − 부가세
+ * 실수익 = 결제금액 − 매입원가(상품가×수량+운송비) − 네이버수수료(실값) − 납부부가세((결제금액−매입원가)÷11)
  */
 export function PurchaseCostCell({ id, unitCost, totalCost, quantity, paymentAmount, commissionAmount }: Props) {
   const router = useRouter()
@@ -37,10 +37,7 @@ export function PurchaseCostCell({ id, unitCost, totalCost, quantity, paymentAmo
   const cost = unitNum * qty + shipNum
 
   const revenue = paymentAmount ?? 0
-  const fee = commissionAmount ?? 0
-  const vat = Math.round(revenue / VAT_DIVISOR)
-  const net = revenue - cost - fee - vat
-  const netPct = revenue > 0 ? (net / revenue) * 100 : 0
+  const { fee, vat, net, netPct } = netProfit(revenue, cost, commissionAmount ?? 0)
   const hasCost = unitNum > 0
 
   async function save() {
@@ -94,7 +91,7 @@ export function PurchaseCostCell({ id, unitCost, totalCost, quantity, paymentAmo
         {hasCost ? (
           <>
             <div className="text-[10px] text-gray-400 tabular-nums">
-              결제 {revenue.toLocaleString()} − 수수료 {fee.toLocaleString()} − 부가세 {vat.toLocaleString()}
+              결제 {revenue.toLocaleString()} − 매입 {cost.toLocaleString()} − 수수료 {fee.toLocaleString()} − 부가세 {vat.toLocaleString()}
             </div>
             <div className={`text-[11px] font-semibold tabular-nums ${net >= 0 ? 'text-emerald-700' : 'text-rose-600'}`}>
               실수익 {net.toLocaleString()}원 ({netPct.toFixed(1)}%)

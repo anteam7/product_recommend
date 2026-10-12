@@ -15,7 +15,7 @@
 쿠팡 `/admin/coupang-orders` 미러. 흐름: 주문 자동수집 → 매입상태 **발주완료** 선택 시 **네이버 발주확인 자동 호출**(`POST /v1/pay-order/seller/product-orders/confirm`) → 💳 결제진행(order-server가 쿠팡/네이버 id 자동판별, 유픽·ggsan 주문서 자동작성) → 매입처 주문번호·송장 기록(내부).
 - 발주확인 전 건은 네이버 상태 칸에 **⚠ 발주확인 필요** 배지 (PAYED + placeOrderStatus≠OK)
 - **Vercel IP 함정**: 프로덕션 어드민의 발주확인은 Vercel IP라 GW.IP_NOT_ALLOWED → 브라우저가 로컬 order-server `POST /naver-confirm?id=`(집 PC = 허용 IP)로 자동 폴백. 이 PC에서 어드민을 열어야 발주확인 가능
-- 실수익 = 결제금액 − 매입원가 − **실수수료**(commission_amount) − 부가세(÷11)
+- 실수익 = 결제금액 − 매입원가 − **실수수료**(commission_amount) − 납부부가세(**(결제금액 − 매입원가) ÷ 11**, 매입세액 공제 반영 2026-10-13, `src/lib/margin.ts`)
 - 네이버 **발송처리 API는 미연동** — 송장은 내부 기록만, 발송처리는 스마트스토어센터에서 (후속 예정)
 - API 라우트: `/api/admin/naver-orders/update` (매입 필드 수정 + ORDERED 전환 시 발주확인 best-effort)
 

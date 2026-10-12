@@ -3,7 +3,7 @@ import { revalidatePath } from 'next/cache'
 import { createClient, isAdminEmail } from '@/lib/auth/server'
 import { createAdminClient } from '@/lib/auth/admin-supabase'
 import { logAdminAction } from '@/lib/admin-log'
-import { changeProductPrice, computeMargin, SHIP } from '@/lib/coupang/price'
+import { changeProductPrice, computeMargin, feeRateFor, SHIP } from '@/lib/coupang/price'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -22,6 +22,8 @@ interface Listing {
   dome_price_krw: number | null
   msp_price_krw: number | null
   list_price_krw: number | null
+  /** 매입처(cmtstory 등) — 수수료 요율 결정(fee.ts feeRateFor) */
+  source: string | null
 }
 
 /**
@@ -48,7 +50,7 @@ export async function POST(request: NextRequest) {
   const admin = createAdminClient() as any
   const { data: row, error: e1 } = await admin
     .from('jimscanner_coupang_listings')
-    .select('id, seller_product_id, registered_title, dome_price_krw, msp_price_krw, list_price_krw')
+    .select('id, seller_product_id, registered_title, dome_price_krw, msp_price_krw, list_price_krw, source')
     .eq('id', id)
     .single()
   if (e1 || !row) return NextResponse.json({ error: '상품을 찾을 수 없음' }, { status: 404 })
@@ -60,7 +62,7 @@ export async function POST(request: NextRequest) {
     const list = listing.list_price_krw ?? 0
     // 판매가 미정(0/NULL)이면 마진은 '미정'(null)으로 둔다 — 0%로 오표기 방지
     const hasList = list > 0
-    const m = computeMargin(list, newDome)
+    const m = computeMargin(list, newDome, SHIP, feeRateFor(listing.source))
     const { error } = await admin.from('jimscanner_coupang_listings').update({
       dome_price_krw: newDome,
       source_shipping_fee_krw: 0,
@@ -131,7 +133,7 @@ export async function POST(request: NextRequest) {
   }
   // seller_product_id 없으면 쿠팡 push 생략 (DB만 갱신)
 
-  const m = computeMargin(newPrice, listing.dome_price_krw ?? 0)
+  const m = computeMargin(newPrice, listing.dome_price_krw ?? 0, SHIP, feeRateFor(listing.source))
   const { error } = await admin.from('jimscanner_coupang_listings').update({
     list_price_krw: newPrice,
     estimated_fee_krw: m.fee,

@@ -148,7 +148,8 @@ DRAFT → TEMPORARY_SAVE → PENDING_APPROVAL → APPROVED → SELLING ⇄ STOPP
 등록가(listPrice) = max(MSP, 경쟁가(시세중앙값×0.95), realCost/0.65)  # 35% 마진 하한
 listPrice = ceil(listPrice / 100) * 100   # 100원 단위 올림
 수수료(fee) = round(listPrice × FEE_RATE)
-부가세(vat) = round(listPrice / 11)
+부가세(vat) = max(0, round((listPrice − realCost) / 11))   ← 납부세액 = 매출세액 − 매입세액 (2026-10-13, src/lib/margin.ts netVat)
+수수료율      = feeRateFor(source)  ← 기본 10.6%, 화장품스토리(cmtstory) 9.6% (src/lib/coupang/fee.ts)
 마진 = listPrice - realCost - fee - vat
 ```
 
