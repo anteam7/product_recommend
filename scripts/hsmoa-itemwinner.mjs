@@ -11,7 +11,7 @@
  *   ... --limit=8 --sleep=10000 --min-reviews=10 --fee=0.108
  *   ... --no-coupang        # 쿠팡 생략(네이버·에누리·방송가만)
  *
- * 쿠팡가는 워밍업 크롬(9222)으로 사람처럼 검색. launch-chrome-debug.cmd 로 띄우고 쿠팡 1회 접속 후 실행.
+ * 쿠팡가는 Aside 브라우저(기본) 또는 워밍업 크롬(9222, 폴백)으로 사람처럼 검색. 크롬 폴백은 launch-chrome-debug.cmd 로 띄우고 쿠팡 1회 접속 후 실행.
  * 에누리/hsmoa는 헤드리스(차단 없음). 쿠팡만 throttle 대상.
  */
 import { readFileSync } from 'node:fs'

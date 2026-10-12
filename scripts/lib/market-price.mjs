@@ -1,14 +1,21 @@
 /**
  * 시장가(경쟁가) 조회 — 위탁 소싱 마진 계산용.
  *   - naverShopMedian(kw): 네이버 쇼핑 검색 OpenAPI(공식, 무차단) → 경쟁 lprice 중앙값
- *   - coupangMedianViaCDP(kw): 떠 있는 사용자 크롬에 CDP 접속 → "사람처럼" 검색
- *       (쿠팡 메인 → 검색창 입력 → 검색버튼 클릭. ?q= 딥링크는 Akamai 차단되므로 금지)
+ *   - openCoupangSession(): 쿠팡 세션 — 백엔드 자동 선택(2026-10-13 사용자 요청: Aside CLI 우선)
+ *       · aside : Aside AI 브라우저(aside.exe repl, 사용자 로그인 세션) — 크롬 워밍업 불필요
+ *       · cdp   : 떠 있는 사용자 크롬(9222)에 CDP 접속 (launch-chrome-debug.cmd) — 폴백
+ *       둘 다 "사람처럼" 검색(메인 → 검색창 입력 → 검색버튼). ?q= 딥링크는 Akamai 차단되므로 금지.
+ *       선택: opts.backend 또는 env COUPANG_PRICE_BACKEND = auto(기본: aside→cdp) | aside | cdp
+ *   - coupangMedian(kw) / coupangMedianViaCDP(kw, 구명): 세션 1회 검색 래퍼
  *
- *   import { naverShopMedian, coupangMedianViaCDP, median } from './lib/market-price.mjs'
+ *   import { naverShopMedian, openCoupangSession, coupangMedian, median } from './lib/market-price.mjs'
  */
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
+import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
+const execFileP = promisify(execFile)
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const env = Object.fromEntries(
@@ -92,9 +99,9 @@ function _coupangResult(got) {
  * 최초 1회만 메인 진입(워밍업), 이후 search(kw)는 **결과페이지 검색란만 바꿔 재검색**
  * (새 탭/메인 재진입 없음 → 봇 패턴·Akamai 재차단 위험↓). 다건 스크리닝용.
  * 반환 null = CDP 미가동/차단. 끝나면 반드시 close().
- * @returns {Promise<{search:(kw:string)=>Promise<object|null>, close:()=>Promise<void>}|null>}
+ * @returns {Promise<{search:(kw:string)=>Promise<object|null>, close:()=>Promise<void>, backend:'cdp'}|null>}
  */
-export async function openCoupangSession({ endpoint = 'http://127.0.0.1:9222', timeoutMs = 25000 } = {}) {
+export async function openCoupangSessionViaCDP({ endpoint = 'http://127.0.0.1:9222', timeoutMs = 25000 } = {}) {
   let chromium
   try { ({ chromium } = await import('playwright')) } catch { ({ chromium } = await import('playwright-core')) }
   let browser
@@ -150,18 +157,112 @@ export async function openCoupangSession({ endpoint = 'http://127.0.0.1:9222', t
   }
   // 재사용한 사용자 탭은 닫지 않음(우리가 새로 연 탭만 닫음). browser.close는 CDP 연결만 끊음.
   async function close() { try { if (page && !reused) await page.close() } catch { /* noop */ } try { await browser.close() } catch { /* noop */ } }
-  return { search, close }
+  return { search, close, backend: 'cdp' }
+}
+
+// ─── Aside 백엔드 ───
+// aside.exe repl 은 Playwright 스타일 JS를 사용자의 Aside 브라우저(로그인·쿠키 유지)에서 실행하고 console.log 를 stdout 으로 돌려준다.
+// 호출마다 프로세스가 뜨지만 REPL 컨텍스트와 탭은 유지되므로, 쿠팡 탭을 한 번 열어두고 검색란만 바꿔 재검색(CDP 경로와 같은 패턴).
+// 주의: REPL 의 const/let 은 호출 간 유지되므로 코드를 async IIFE 로 감싸 바인딩이 새지 않게 한다.
+const ASIDE_MARK = '__ASIDE_RESULT__'
+let _asideOk = null
+/** Aside CLI 가용 여부(1회 캐시). PATH 의 aside.exe 를 --version 으로 확인. */
+export async function asideAvailable() {
+  if (_asideOk != null) return _asideOk
+  try { const { stdout } = await execFileP('aside', ['--version'], { timeout: 8000, windowsHide: true }); _asideOk = /\d+\.\d+/.test(stdout || '') } catch { _asideOk = false }
+  return _asideOk
+}
+async function asideRepl(code, { timeoutMs = 125000 } = {}) {
+  const { stdout } = await execFileP('aside', ['repl', code], { timeout: timeoutMs, windowsHide: true, maxBuffer: 16 * 1024 * 1024 })
+  const line = String(stdout || '').split(/\r?\n/).find((l) => l.startsWith(ASIDE_MARK))
+  if (!line) throw new Error(`aside repl: 결과 마커 없음 — ${String(stdout || '').replace(/\x1b\[[0-9;]*m/g, '').trim().slice(0, 200)}`)
+  return JSON.parse(line.slice(ASIDE_MARK.length))
+}
+// 쿠팡 탭 확보(있으면 붙고 없으면 메인 오픈) + 차단 확인. 결과 {blocked, title}
+function _asideAttachCode() {
+  return `await (async () => {
+  const tabs = await listBrowserTabs();
+  const t = tabs.find((x) => /(^|\\/\\/)(www\\.)?coupang\\.com/.test(x.url || ''));
+  if (t) { await attachBrowserTab(t.targetId); } else { await openTab('https://www.coupang.com/'); await sleep(1200); }
+  let title = await page.title();
+  if (/Access Denied/i.test(title)) { await page.goto('https://www.coupang.com/', { waitUntil: 'domcontentloaded', timeout: 25000 }).catch(() => {}); await sleep(2500); title = await page.title(); }
+  console.log(${JSON.stringify(ASIDE_MARK)} + JSON.stringify({ blocked: /Access Denied/i.test(title), title }));
+})()`
+}
+// 검색란 교체 → 검색 → 가격 추출. 결과 {blocked, url, got:[{price,title,reviews,rating}]}
+// kw 는 JSON.stringify 로 문자열 리터럴화해 주입(argv 로 전달되어 셸 인젝션 없음). 호출측 키워드는 우리 DB/스크립트 값만 쓴다.
+function _asideSearchCode(kw) {
+  return `await (async () => {
+  const KW = ${JSON.stringify(kw)};
+  const tabs = await listBrowserTabs();
+  const t = tabs.find((x) => /(^|\\/\\/)(www\\.)?coupang\\.com/.test(x.url || ''));
+  if (t) { await attachBrowserTab(t.targetId); } else { await openTab('https://www.coupang.com/'); await sleep(1200); }
+  const blocked = async () => /Access Denied/i.test(await page.title());
+  const doSearch = async () => {
+    const input = page.locator('input#headerSearchKeyword, input[name="q"]').first();
+    await input.waitFor({ state: 'visible', timeout: 8000 });
+    await input.click(); await input.fill(''); await input.type(KW, { delay: 40 });
+    const btn = page.locator('form#headerSearchForm button[type="submit"], button.search-btn, .search-btn, form button[type="submit"]').first();
+    if (await btn.count().catch(() => 0)) { await btn.click().catch(() => input.press('Enter')); } else { await input.press('Enter'); }
+    await sleep(2500);
+  };
+  await doSearch();
+  if (await blocked()) {
+    await page.goto('https://www.coupang.com/', { waitUntil: 'domcontentloaded', timeout: 25000 }).catch(() => {}); await sleep(2500);
+    if (await blocked()) { console.log(${JSON.stringify(ASIDE_MARK)} + JSON.stringify({ blocked: true })); return; }
+    await doSearch();
+    if (await blocked()) { console.log(${JSON.stringify(ASIDE_MARK)} + JSON.stringify({ blocked: true })); return; }
+  }
+  const extract = ${_extractCoupangPrices.toString()};
+  const got = await page.evaluate(extract);
+  console.log(${JSON.stringify(ASIDE_MARK)} + JSON.stringify({ blocked: false, url: page.url(), got }));
+})()`
+}
+/**
+ * 쿠팡 세션(Aside) — 사용자의 Aside 브라우저에서 검색. 크롬 9222 불필요. 반환 null = aside 미설치/차단.
+ * close()는 사용자 탭을 건드리지 않는다(no-op).
+ * @returns {Promise<{search:(kw:string)=>Promise<object|null>, close:()=>Promise<void>, backend:'aside'}|null>}
+ */
+export async function openCoupangSessionViaAside({ timeoutMs = 125000, quiet = false } = {}) {
+  const say = (m) => { if (!quiet) console.log(`  (aside 백엔드 불가: ${m})`) }
+  if (!(await asideAvailable())) { say('aside.exe 미설치/PATH 없음'); return null }
+  let probe
+  try { probe = await asideRepl(_asideAttachCode(), { timeoutMs: 60000 }) } catch (e) { say(`쿠팡 탭 확보 실패 — ${String(e?.message || e).slice(0, 160)}`); return null }
+  if (!probe) { say('응답 없음'); return null }
+  if (probe.blocked) { say(`쿠팡 Access Denied(차단) — title=${probe.title || ''}`); return null }
+  async function search(kw) {
+    try {
+      const r = await asideRepl(_asideSearchCode(kw), { timeoutMs })
+      if (!r || r.blocked) return null
+      return _coupangResult(Array.isArray(r.got) ? r.got : [])
+    } catch { return null }
+  }
+  async function close() { /* 사용자 브라우저 탭은 그대로 둔다 */ }
+  return { search, close, backend: 'aside' }
 }
 
 /**
- * 쿠팡 단건 시세 — openCoupangSession 1회 검색 래퍼(기존 호출부 호환). 크롬 9222 미가동/차단 시 null.
+ * 쿠팡 세션 — 백엔드 자동 선택. opts.backend | env COUPANG_PRICE_BACKEND = auto(기본) | aside | cdp.
+ * auto 는 aside → cdp 순으로 시도. 반환 null = 둘 다 불가. 끝나면 close().
+ */
+export async function openCoupangSession(opts = {}) {
+  const backend = String(opts.backend || process.env.COUPANG_PRICE_BACKEND || env.COUPANG_PRICE_BACKEND || 'auto').toLowerCase()
+  if (backend === 'cdp') return openCoupangSessionViaCDP(opts)
+  if (backend === 'aside') return openCoupangSessionViaAside(opts)
+  return (await openCoupangSessionViaAside(opts)) || openCoupangSessionViaCDP(opts)
+}
+
+/**
+ * 쿠팡 단건 시세 — openCoupangSession 1회 검색 래퍼. 세션 불가/차단 시 null.
  * @returns {Promise<{source:'coupang', median:number|null, count:number, samples:Array, items:Array}|null>}
  */
-export async function coupangMedianViaCDP(kw, opts = {}) {
+export async function coupangMedian(kw, opts = {}) {
   const s = await openCoupangSession(opts)
   if (!s) return null
   try { return await s.search(kw) } finally { await s.close() }
 }
+/** 구명 호환 — 이제 백엔드 자동(aside→cdp). */
+export const coupangMedianViaCDP = coupangMedian
 
 /**
  * 에누리 세션 — 헤드리스 1회 띄워 페이지 재사용(차단 없어 워밍업/CDP 불필요).

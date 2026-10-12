@@ -11,7 +11,7 @@
  *   node --env-file=.env.local scripts/domemedb-coupang-margin.mjs                 # 신규+인기
  *   ... --page=new|popular|both --limit=12 --sleep=10000 --min-reviews=10
  *   ... --no-coupang     # 공급가/상품만(쿠팡 생략)
- * 쿠팡: launch-chrome-debug.cmd 로 워밍업 크롬(9222) 띄우고 쿠팡 1회 접속 후 실행.
+ * 쿠팡: 기본 Aside 브라우저(aside.exe) 세션, 폴백은 launch-chrome-debug.cmd 로 워밍업 크롬(9222) 띄우고 쿠팡 1회 접속 후 실행.
  */
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
@@ -150,7 +150,7 @@ async function main() {
 
   // ③ 시장가 마진. MARKET=coupang(세션+throttle·후기검증) | naver(API·차단무관·빠름·비교상품수≥3 검증). TARGET 흑자 채우면 중단.
   const cp = MARKET === 'coupang' ? await openCoupangSession() : null
-  if (MARKET === 'coupang' && !cp) { console.log('⚠ 쿠팡 세션 실패(미가동/차단) — 크롬 9222 확인'); if (SAVE) await setRunState({ status: 'idle', message: '쿠팡 세션 실패(크롬 9222 확인)' }); return }
+  if (MARKET === 'coupang' && !cp) { console.log('⚠ 쿠팡 세션 실패(미가동/차단) — Aside 브라우저 또는 크롬 9222 확인'); if (SAVE) await setRunState({ status: 'idle', message: '쿠팡 세션 실패(Aside/크롬 9222 확인)' }); return }
   if (MARKET === 'naver' && (!NID || !NSEC)) { console.log('⚠ NAVER_OPENAPI 키 없음'); if (SAVE) await setRunState({ status: 'idle', message: 'NAVER 키 없음' }); return }
   if (SAVE) await setRunState({ status: 'running', found: 0, screened: 0, target: TARGET || LIMIT, started_at: new Date().toISOString(), message: `시장가:${MARKET}` })
   const rows = []

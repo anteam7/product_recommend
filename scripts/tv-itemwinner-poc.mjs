@@ -111,7 +111,7 @@ async function main() {
   const useCp = cdpUp && !COUPANG_MANUAL
   // 쿠팡 세션 1회 오픈 → 이후 검색은 같은 페이지 검색란만 교체(새 탭/메인 재진입 없음 → 재차단↓). 수동가면 불필요.
   const cp = useCp ? await openCoupangSession() : null
-  console.log(cp ? '쿠팡 CDP 사용(페이지 재사용·검색란 교체)' : (COUPANG_MANUAL ? `쿠팡가 수동 ${COUPANG_MANUAL.toLocaleString()}원` : '쿠팡 CDP 미가동 → --coupang 수동 or 크롬 9222'))
+  console.log(cp ? `쿠팡 세션 사용(${cp.backend || 'cdp'} · 페이지 재사용·검색란 교체)` : (COUPANG_MANUAL ? `쿠팡가 수동 ${COUPANG_MANUAL.toLocaleString()}원` : '쿠팡 세션 미가동 → --coupang 수동 or Aside 브라우저/크롬 9222'))
   if (useCp && !cp) console.log('⚠ 쿠팡 세션 열기 실패(미가동/차단) — 잠시 쉬었다 그 프로필로 쿠팡 1회 정상접속 후 재시도')
 
   try {

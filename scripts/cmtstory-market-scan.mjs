@@ -1,7 +1,7 @@
 /**
  * P0.5 쿠팡 시장성 스캔 — 화장품스토리 등록 후보를 쿠팡에서 검색해 같은 상품 리셀러(가격·후기)를 보고 verdict 를 매긴다.
  *   node scripts/cmtstory-market-scan.mjs [--limit=N] [--only=…] [--force] [--dry]
- * 전제: 워밍업된 사용자 크롬(CDP 9222) — scripts/launch-chrome-debug.cmd 로 띄우고 쿠팡 메인을 한 번 연 상태([[price_lookup_via_cdp]]).
+ * 전제: 쿠팡 세션 백엔드 — 기본은 Aside 브라우저(aside.exe, 2026-10-13), 폴백은 워밍업된 사용자 크롬(CDP 9222, scripts/launch-chrome-debug.cmd). env COUPANG_PRICE_BACKEND=aside|cdp 로 고정 가능.
  * 속도: 검색 간 6~10초(--delay=ms) + 결과 스크롤 흉내 + 15건마다 30~60초 휴식 — 2026-10-07 사용자 요청(빨리 돌리면 차단).
  *
  * verdict (jimscanner_cmtstory_products.market_verdict):
@@ -54,7 +54,7 @@ console.log(`대상 ${targets.length}건 (후보 ${rows.length}, 이미 확인 $
 if (!targets.length) process.exit(0)
 
 const session = await openCoupangSession()
-if (!session) { console.error('✗ 쿠팡 세션 없음 — scripts/launch-chrome-debug.cmd 로 디버그 크롬을 띄우고 쿠팡 메인을 한 번 연 뒤 다시 실행'); process.exit(1) }
+if (!session) { console.error('✗ 쿠팡 세션 없음 — Aside 브라우저를 켜거나(aside.exe), scripts/launch-chrome-debug.cmd 로 디버그 크롬(9222)을 띄우고 쿠팡 메인을 한 번 연 뒤 다시 실행'); process.exit(1) }
 const stats = { OPEN: 0, WIN: 0, LOSE: 0, UNKNOWN: 0 }
 try {
   for (let i = 0; i < targets.length; i++) {
