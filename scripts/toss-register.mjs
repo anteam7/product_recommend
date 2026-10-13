@@ -48,6 +48,24 @@ const CAT_RULES = [
   [/블루베리/, 59827], [/빌베리/, 59829], [/레시틴/, 59813], [/마카/, 59821], [/초록입홍합/, 59853], [/초유/, 59855],
   [/알로에/, 59845], [/보스웰리아/, 59825], [/징코|은행잎/, 59851], [/레스베라트롤/, 59811], [/아사이/, 59839], [/아스타잔틴|아스타크산틴/, 59841],
   [/mct/i, 59795], [/감초/, 59803], [/녹차|카테킨/, 59809], [/삼부커스|엘더베리/, 59831], [/퀘세틴|퀘르세틴/, 59865], [/카무카무/, 59857], [/아유르베다/, 59843],
+  // ── 2026-10-13 확장(toss-health-leaves.json 131개 기준). 위 규칙이 먼저 매칭되므로 기존 등록분 분류는 그대로다 ──
+  // 비타민/미네랄
+  [/멀티\s*비타민|종합\s*비타민|멀티비타민/, 59897], [/비타민\s*b|비타민비|b\s*군|b\s*컴플렉스/i, 59903], [/비타민\s*c(?![a-z])|비타민씨/i, 59905],
+  [/비타민\s*d(?![a-z])|비타민디/i, 59907], [/비타민\s*e(?![a-z])|토코페롤/i, 59909], [/비타민\s*k(?![a-z])/i, 59911], [/비타민\s*a(?![a-z])/i, 59901],
+  [/마그네슘/, 59895], [/칼슘/, 59925], [/철분/, 59921], [/엽산/, 59917], [/바이오틴/, 59899], [/아연/, 59915], [/셀레늄|셀렌/, 59913], [/비타민/, 59893],
+  // 기타건강식품
+  [/프로폴리스/, 59881], [/효소/, 59887], [/폴리코사놀/, 59879], [/트리뷸러스/, 59875], [/sam-?e|메티오닌/i, 59799],
+  // 홍삼 (형태별 leaf) — 젤리/캡슐/환/절편/농축액 순, 나머지는 진액/파우치
+  [/홍삼.*(젤리|캔디)|(젤리|캔디).*홍삼/, 59997], [/홍삼.*캡슐/, 59999], [/홍삼.*환(?![경장])/, 60001], [/홍삼.*(절편|정과)/, 59993], [/홍삼.*(농축|홍삼정(?!과))/, 59991], [/홍삼|인삼|고려삼/, 59995],
+  // 건강즙 (종류별)
+  [/흑마늘|마늘.*(즙|진액)/, 59949], [/양배추/, 59971], [/도라지|배즙/, 59953], [/흑염소|녹용|장어/, 59947], [/사과즙|사과.*즙/, 59963], [/비트/, 59961], [/칡/, 59977],
+  [/헛개/, 59981], [/호박.*즙|호박즙/, 59983], [/양파.*즙|양파즙/, 59973], [/매실/, 59951], [/복분자/, 59957], [/아로니아/, 59967], [/오디/, 59975], [/포도즙|포도.*즙/, 59979], [/abc\s*(즙|주스)/i, 59943],
+  [/백수오|하수오/, 59955], [/즙|진액|파우치|액상스틱/, 59945],
+  // 다이어트/헬스
+  [/가르시니아/, 60015], [/\bcla\b|공액\s*리놀레산/i, 60013], [/다이어트\s*쉐이크|쉐이크/, 60019], [/디톡스|클렌즈|해독/, 60027], [/다이어트|슬림|체지방|체중/, 60017],
+  [/프로틴|단백질\s*보충|웨이\s*프로틴/, 60055], [/bcaa/i, 60033], [/아르기닌/, 60041], [/크레아틴/, 60059], [/타우린/, 60061], [/글루타민/, 60035], [/카르니틴/, 60045],
+  // 환/분말, 영양식, 허브
+  [/건강환|침환|\d+\s*환(?![경장])/, 60007], [/분말|파우더|가루/, 60005], [/영양식|환자식|성인분유|연하식/, 59931], [/허브|추출물|추출분말|잎(?![가-힣])/, 59885],
 ]
 const DEFAULT_CAT = 59807 // 기타영양제
 const mapCategory = (t) => { for (const [re, id] of CAT_RULES) if (re.test(t || '')) return id; return DEFAULT_CAT }
@@ -75,12 +93,15 @@ function keywords(title, brand) {
 function parseUnits(title, itemName, attrs) {
   const t = `${title || ''} ${itemName || ''}`
   const per = t.match(/(\d+)\s*(포|스틱|개입|매|팩)/)
+  // 제목 자체에 "x 10포" 가 있으면 그 낱개 단위가 진짜다 — 쿠팡 itemName 은 "10정 1박스" 처럼 정으로 적힌 경우가 많다(2026-10-13 다이어트 카페·석류젤리)
+  const perTitle = (title || '').match(/(\d+)\s*(포|스틱|개입|매|팩)/)
   const cap = t.match(/(\d+)\s*(정|캡슐|환)/)
   const vol = t.match(/(\d+(?:\.\d+)?)\s*(ml|mL|ML|l|L)\b/)
   const wt = t.match(/(\d+(?:\.\d+)?)\s*(g|kg|mg)\b(?!\s*[x×])/) // "1,000mg x 120정" 의 mg 는 함량이라 x 앞이면 제외
-  const pack = t.match(/[x×]\s*(\d+)\s*(박스|개|세트|병|통|팩)/i) || t.match(/(\d+)\s*(박스|세트|병|통)\b/)
+  // \b 는 한글 뒤에서 단어 경계가 안 생겨 "10포 4박스" 의 4박스를 못 잡던 문제(2026-10-13) → 한글 미후속 lookahead
+  const pack = t.match(/[x×]\s*(\d+)\s*(박스|개|세트|병|통|팩)/i) || t.match(/(\d+)\s*(박스|세트|병|통)(?![가-힣])/)
   const attrQty = attrs?.find((a) => a.attributeTypeName === '수량')?.attributeValueName?.match(/(\d+)/)?.[1]
-  return { qty: pack ? pack[1] : (attrQty || '1'), per: per ? per[1] : null, perUnit: per ? (per[2] === '개입' ? '개' : per[2]) : null, cap: cap ? cap[1] : null, capUnit: cap ? cap[2] : null, vol: vol ? vol[1] : null, volUnit: vol ? vol[2].toLowerCase() : null, wt: wt ? wt[1] : null, wtUnit: wt ? wt[2] : null }
+  return { qty: pack ? pack[1] : (attrQty || '1'), per: per ? per[1] : null, perUnit: per ? (per[2] === '개입' ? '개' : per[2]) : null, perTitle: perTitle ? perTitle[1] : null, perTitleUnit: perTitle ? (perTitle[2] === '개입' ? '개' : perTitle[2]) : null, cap: cap ? cap[1] : null, capUnit: cap ? cap[2] : null, vol: vol ? vol[1] : null, volUnit: vol ? vol[2].toLowerCase() : null, wt: wt ? wt[1] : null, wtUnit: wt ? wt[2] : null }
 }
 function forceUnit(value, unitValues) {
   if (!unitValues?.length) return value
@@ -95,13 +116,24 @@ function buildOptions(template, ctx, optsArg) {
   const opts = template?.categorySalesOptions ?? []
   const ov = {}
   for (const kv of (optsArg || '').split(';').map((x) => x.trim()).filter(Boolean)) { const i = kv.indexOf('='); if (i > 0) ov[kv.slice(0, i).trim()] = kv.slice(i + 1).trim() }
-  const override = (key) => { const norm = (x) => x.replace(/\s|\(택1\)/g, ''); const k = Object.keys(ov).find((x) => norm(key).includes(norm(x)) || norm(x).includes(norm(key))); return k ? ov[k] : null }
+  // 키 매칭: 정확 일치(공백·(택1) 무시) 우선, 없을 때만 부분 일치 — "수량" 오버라이드가 "개당 수량"까지 덮던 버그 수정(2026-10-13)
+  const norm = (x) => x.replace(/\s|\(택1\)/g, '')
+  const templateKeys = opts.map((o) => norm(o.key))
+  const override = (key) => {
+    const keys = Object.keys(ov)
+    const exact = keys.find((x) => norm(x) === norm(key))
+    if (exact) return ov[exact]
+    // 부분 일치는 템플릿의 다른 옵션 키와 정확히 일치하는 오버라이드("수량")는 제외 — 그 값은 그 옵션의 것이다
+    const k = keys.find((x) => !templateKeys.includes(norm(x)) && (norm(key).includes(norm(x)) || norm(x).includes(norm(key))))
+    return k ? ov[k] : null
+  }
   const u = parseUnits(ctx.title, ctx.itemName, ctx.attrs)
   const auto = (key) => {
     if (/^수량$/.test(key)) return `${u.qty}개`
     if (/용량/.test(key)) return u.vol ? `${u.vol}${u.volUnit}` : null
     if (/중량/.test(key)) return u.wt ? `${u.wt}${u.wtUnit}` : null
-    if (/캡슐|정/.test(key)) return u.cap ? `${u.cap}${u.capUnit}` : null
+    // 템플릿에 '개당 수량' 이 없는 카테고리(다이어트식품 등)는 '개당 캡슐/정' 에 낱개(포/스틱)를 넣는다 — 단위는 forceUnit 이 템플릿 허용값으로 맞춤
+    if (/캡슐|정/.test(key)) return u.perTitle ? `${u.perTitle}${u.perTitleUnit}` : (u.cap ? `${u.cap}${u.capUnit}` : null)
     if (/개당 수량|수량/.test(key)) return u.per ? `${u.per}${u.perUnit}` : null
     return null
   }
@@ -116,7 +148,10 @@ function buildOptions(template, ctx, optsArg) {
   const oneOf = opts.filter((x) => x.isOneOfRequiredGroup)
   if (oneOf.length) {
     let chosen = oneOf.find((o) => override(o.key) != null), value = chosen ? override(chosen.key) : null
-    if (!chosen) for (const o of oneOf) { const a = auto(o.key); if (a) { chosen = o; value = a; break } }
+    // 제목에 "x 15포/스틱" 처럼 낱개 단위가 있으면 '개당 수량'을 먼저 본다 — 쿠팡 itemName 이 "15정"으로 잘못 적힌 젤리 스틱이
+    // 템플릿 순서(캡슐/정 먼저) 때문에 "15정"으로 등록되던 문제(2026-10-13 석류젤리 dry-run)
+    const ordered = u.per ? [...oneOf.filter((o) => /개당 수량/.test(o.key)), ...oneOf.filter((o) => !/개당 수량/.test(o.key))] : oneOf
+    if (!chosen) for (const o of ordered) { const a = auto(o.key); if (a) { chosen = o; value = a; break } }
     if (!chosen) { chosen = oneOf.find((o) => /개당 수량/.test(o.key)) || oneOf[0]; value = '1' + (chosen.unitValues?.[0] || '개'); console.log(`  ⚠ 택1 옵션 자동값 없음 → ${chosen.key}=${value}`) }
     out.push({ groupName: chosen.key, valueName: forceUnit(value, chosen.unitValues) })
   }

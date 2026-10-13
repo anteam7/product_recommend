@@ -82,3 +82,7 @@ data/scout/
 # 확장 배포용 압축본(로컬에서 원격 PC 복사용) — 커밋 금지
 extension/*.zip
 _order-server.log
+
+# 오케스트레이터·일괄 러너 작업 로그(일회성)
+_workspace/
+_workspace_prev/

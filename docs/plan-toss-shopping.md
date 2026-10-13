@@ -1,6 +1,7 @@
 # 토스쇼핑 연동 검토 및 계획 (2026-08-19)
 
 > 상태(2026-08-19 저녁): **P0/P1 완료** — `scripts/lib/toss-api.mjs` + `scripts/toss-register.mjs`로 12건 등록, 11건 자동검수 COMPLETE(인삼의힘 1건 "여백" 반려 보류). 파트너스 표시는 "판매 대기". hide API는 SUCCESS 반환하나 노출상태 변화 없음. **P2(주문 폴링·발주확인·송장) 미착수.** 썸네일 검수 실측 규칙은 §3.6 참조.
+> 상태(2026-10-13): **재개** — 8/19 등록분 11건이 두 달간 `WAITING_FOR_SALE`(판매 대기)로 묶여 있던 것을 `POST /products/show` 로 전부 SELLING 전환(§3.8). 단건 5건 추가 등록 + `scripts/toss-register-batch.mjs`(1건씩 검수 확인 후 다음, 자동) 로 상위 20건 일괄 진행. 토스 API IP 허용 갱신 필요했음.
 > 공식 문서: https://shopping-docs.toss.im/dev (각 페이지 URL 뒤 `.md` 붙이면 마크다운, 인덱스 `llms.txt`)
 > 키: `.env.local` `TOSS_SHOPPING_ACCESS_KEY` / `TOSS_SHOPPING_SECRET_KEY` (업체명 더모어커머스, 허용 IP 등록제)
 
@@ -162,3 +163,17 @@ jimscanner_coupang_listings (APPROVED, source upickb2b/ggsan, request_payload)
 - `/admin/orders?market=toss`(2026-10-13 전 마켓 통합 페이지로 합침, 옛 `/admin/toss-orders`는 리다이렉트; 토스 셀은 `orders/toss/PurchaseCell.tsx`) — 발송기한 D-1 경고, 매입 상태/주문번호 기록(PurchaseCell → `/api/admin/toss-orders/update`), 결제진행(쿠팡 PurchaseButton 재사용 — 로컬 order-server가 쿠팡→네이버→토스 순으로 주문키 해석)
 - `scripts/order-server.mjs` — `resolveTossOrder`: 매입처 = 주문별 오버라이드 > `item_management_code`("{source}:{goods_no}") > toss_listings 폴백, 완주 시 jimscanner_toss_orders 에 입금대기·주문번호 기록
 - 미구현(P3): 재고 sold_out→remainingCount 0 동기화, MSP 리프라이스 연동, 클레임 폴링
+
+## 3.8 2026-10-13 재개 — 판매 대기 해소·일괄 등록 러너
+
+**발견.** 8/19 등록분 12건 중 11건이 두 달 내내 **아이템 상태 `WAITING_FOR_SALE`(판매 대기)** 였고 토스 주문은 0건. 원인은 등록 직후의 `POST /products/hide`: 상품 `exposureStatus` 는 EXPOSURE 그대로라 "노출"처럼 보였지만, 실제 구매 가능 여부는 **`GET /product-items/grouped-by-products` → `productItems[].status.code`** 가 결정한다(`summaryStatus` 는 SELLING 이어도 PENDING 으로 찍히므로 무시). `POST /products/show` 호출 즉시 `SELLING` 으로 바뀜 → 11건 전부 전환. 인삼의힘(835563999)은 토스에서 삭제돼 있었고(DB `REMOVED`), P0 테스트 건(835157677 타트체리 젤리)은 DB에 없어 보강.
+
+**정합 조치.** 토스가 < 현재 쿠팡 MSP 인 타트체리즙은 `tossSetOriginPrice`→`tossSetSalePrice` 로 22,900 으로 올린 뒤 show. 쿠팡이 STOPPED(매입처 품절·auto_paused)인 타트체리 젤리는 토스도 hide(가격은 MSP 이상으로 정정). 쿠팡 재등록으로 spid 가 바뀐 커큐민은 `jimscanner_toss_listings.coupang_seller_product_id` 를 새 spid 로 교정 후 show. **토스 가격·재고는 쿠팡과 자동 동기화가 없다** — 후속 과제(쿠팡 price/stock sync 에 토스 반영 추가).
+
+**등록기 수정(`toss-register.mjs`).** `--opts` 키는 정확 일치(공백·(택1) 무시) 우선, 부분 일치는 템플릿의 다른 키와 정확히 같은 오버라이드는 제외("수량"이 "개당 수량"을 덮던 버그). 제목에 "x 15포/스틱"이 있으면 택1 그룹에서 '개당 수량'을 먼저 고르고, 그 키가 없는 템플릿(다이어트식품 등)은 '개당 캡슐/정'에 포 단위로 넣는다(쿠팡 itemName 이 "15정"으로 적힌 젤리 스틱 오류 방지). `\b` 가 한글 뒤에서 경계가 안 생겨 "10포 4박스"의 4박스를 못 잡던 버그 수정. `CAT_RULES` 를 leaf 131개 기준으로 확장(비타민군·멀티비타민·홍삼 형태별·건강즙 종류별·분말/환·다이어트·헬스보충). 카테고리 매핑 입력은 상품명 + 쿠팡 display_category_name.
+
+**신규 등록은 `--show` 로.** 검수(COMPLETE)가 노출을 막아주므로 hide 가 필요 없고, hide 하면 위의 판매 대기 함정에 빠진다.
+
+**일괄 러너 `scripts/toss-register-batch.mjs`.** 후보 = 쿠팡 APPROVED·auto_paused=false·request_payload 있음·매입처 ∈ ggsan/upickb2b/bio77/kwholesale·MSP>0·토스 미등록(spid)·토스에 같은 상품명 없음. 우선순위 = 최근 90일 쿠팡 판매수량 → 매입처 순 → 가격. 1건 `--show` 등록 → `--check` 60초 폴링(최대 25분) → COMPLETE/REJECT 기록 → 다음. 연속 실패 3건 또는 TIMEOUT 이면 중단. 로그 `_workspace/toss-batch-<KST날짜>.jsonl`. `--list` 로 계획만 출력. 화장품스토리(cmtstory)·웰루트 농산물은 카테고리/고시 미지원이라 후보에서 제외(후속: 화장품 카테고리·고시 매핑).
+
+**이날 결과.** 단건: 위드바이오 유산균·웰러스 햄프씨드·탱글 석류젤리·네이처그랜드 비타민B 통과, 김소형원방 다이어트 카페는 "여백" 반려 → `--rethumb`(세로 단일 박스 구도)로 교체 재검수. 일괄 20건 결과는 CLAUDE.md 변경 이력 / 로그 참조.
