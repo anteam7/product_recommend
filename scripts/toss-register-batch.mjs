@@ -43,7 +43,15 @@ const MAX_FAIL = Math.max(1, parseInt(arg('max-fail', '3'), 10) || 3)
 const SKIP = new Set(arg('skip', '').split(',').map((s) => s.trim()).filter(Boolean))
 // 옵션 자동값(수량·중량·용량·캡슐 수)을 제목/속성에서 못 찾은 상품은 자리값("1개")으로 올리지 않고 건너뛴다(기본 on, --allow-placeholder-opts 로 끔)
 const REQUIRE_OPTS = !has('allow-placeholder-opts')
+const RETRY_FAILED = has('retry-failed') // 이전 실행에서 FAILED 로 남긴 spid 도 다시 후보에 넣는다(원인 수정 후)
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+// 네트워크·토큰·IP·레이트리밋처럼 상품과 무관한 일시 오류 — FAILED 로 남기지 않는다
+const isTransientError = (msg) => /ECONN|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|timed? ?out|fetch failed|HTTP 5\d\d|INVALID_IP|토큰|429|rate ?limit|maxBuffer|SIGTERM|killed/i.test(String(msg || ''))
+/** 등록 전 단계에서 실패한 후보를 FAILED 행으로 기록(toss_product_id 없음) — 후보 선별이 이 spid 를 건너뛰고, 사람이 /admin·DB 에서 사유를 본다 */
+async function markFailed(c, errMsg) {
+  const { error } = await sb.from('jimscanner_toss_listings').insert({ coupang_seller_product_id: c.spid, source: c.source, name: c.name, inspection_status: 'FAILED', hidden: true, rejection_reasons: [{ title: '등록 실패', message: String(errMsg || '').slice(0, 500) }], registered_at: new Date().toISOString(), updated_at: new Date().toISOString() })
+  if (error) console.log(`  (FAILED 기록 실패: ${error.message} — 다음 실행에서 같은 건을 다시 시도하게 됨)`)
+}
 const today = new Date(Date.now() + 9 * 3600_000).toISOString().slice(0, 10).replace(/-/g, '') // KST 날짜로 로그 파일명
 const LOG_DIR = path.join(ROOT, '_workspace')
 const LOG = path.join(LOG_DIR, `toss-batch-${today}.jsonl`)
@@ -67,8 +75,10 @@ async function candidates() {
     fetchAll(() => sb.from('jimscanner_coupang_listings').select('id, seller_product_id, source, source_goods_no, status, registered_title, list_price_krw, msp_price_krw, auto_paused, request_payload').eq('status', 'APPROVED').eq('auto_paused', false)),
     fetchAll(() => sb.from('jimscanner_coupang_orders').select('id, seller_product_id, shipping_count, purchase_status, shipping_status').gte('ordered_at', new Date(Date.now() - 90 * 86400000).toISOString())),
   ])
-  const onToss = new Set(toss.map((t) => Number(t.coupang_seller_product_id)).filter(Boolean))
-  const tossNames = new Set(toss.filter((t) => t.inspection_status !== 'REMOVED').map((t) => normName(t.name)))
+  // FAILED(등록 자체가 실패해 토스에 없는 행)는 기본 제외, --retry-failed 면 다시 후보에 넣는다(toss-register.mjs 가 성공 시 FAILED 행을 지운다)
+  const blocking = toss.filter((t) => !(RETRY_FAILED && t.inspection_status === 'FAILED'))
+  const onToss = new Set(blocking.map((t) => Number(t.coupang_seller_product_id)).filter(Boolean))
+  const tossNames = new Set(blocking.filter((t) => !['REMOVED', 'FAILED'].includes(t.inspection_status)).map((t) => normName(t.name)))
   const sold = new Map()
   for (const o of orders) { if (o.purchase_status === 'CANCELLED' || ['CANCEL', 'RETURNS'].includes(o.shipping_status)) continue; sold.set(o.seller_product_id, (sold.get(o.seller_product_id) || 0) + (o.shipping_count || 1)) }
   const srcRank = new Map(SOURCES.map((s, i) => [s, i]))
@@ -102,7 +112,9 @@ async function runRegister(spid, extra = []) {
     if (!p.tossId && optsUnknown) return { ok: false, skip: 'OPTS_UNKNOWN', ...p, error: `옵션 자동값 없음(${optsUnknown.slice(0, 120)}) → 수동: --opts` }
     // 매입처 실시간 품절(ggsan 상세 확인)은 상품 문제가 아니라 재고 문제 → 건너뜀(재입고 후 다음 실행에서 자동 후보)
     if (!p.tossId && /품절 — 등록 중단/.test(out)) return { ok: false, skip: 'SOLD_OUT', ...p, error: '매입처 품절 → 건너뜀(재입고 후 자동 후보)' }
-    return { ok: !!p.tossId, ...p, error: (out || e.message).split('\n').slice(-3).join(' | ').slice(0, 400) }
+    // 스택 꼬리("at async …:488")가 아니라 실제 예외 메시지 줄을 남긴다 — 2026-10-14 이미지 404 크래시가 스택 꼬리로만 기록돼 원인 추적이 늦어짐
+    const errLine = out.split('\n').map((l) => l.trim()).find((l) => /^(?:[A-Za-z]*Error)\b[:\s]/.test(l))
+    return { ok: !!p.tossId, ...p, error: (errLine || (out || e.message).split('\n').slice(-3).join(' | ')).slice(0, 400) }
   }
 }
 
@@ -130,13 +142,15 @@ async function checkInspection(tossId) {
   } catch (e) { return { inspection: null, item: null, reasons: null, err: String(e.message).slice(0, 120) } }
 }
 
-/** 이전 실행에서 검수 대기로 남은 최근 24h 등록분도 추적 대상에 넣는다 (--no-resume 로 끔) */
+/** 이전 실행에서 검수 대기로 남은 최근 7일 등록분도 추적 대상에 넣는다 (--no-resume 로 끔). 첫 폴링에서 1회 확인하고, 여전히 대기면 조용히
+ *  빼둔다(TIMEOUT 실패로 세지 않음) — 토스가 일부 상품을 수동 검수로 돌리면 하루 넘게 걸린다(2026-10-14 새벽 16건 3시간+ 관찰) */
 async function resumePending() {
   if (has('no-resume')) return []
-  const since = new Date(Date.now() - 24 * 3600_000).toISOString()
-  const { data, error } = await sb.from('jimscanner_toss_listings').select('toss_product_id, coupang_seller_product_id, name, source, registered_at').eq('inspection_status', 'LLM_INSPECTION_READY').gte('registered_at', since)
+  const since = new Date(Date.now() - 7 * 86400_000).toISOString()
+  const { data, error } = await sb.from('jimscanner_toss_listings').select('toss_product_id, coupang_seller_product_id, name, source, registered_at, last_response').eq('inspection_status', 'LLM_INSPECTION_READY').gte('registered_at', since)
   if (error) { console.log(`(검수 대기분 조회 실패: ${error.message})`); return [] }
-  return (data ?? []).map((r) => ({ spid: r.coupang_seller_product_id, name: r.name, source: r.source, tossId: r.toss_product_id, t0: Date.parse(r.registered_at) || Date.now(), resumed: true }))
+  // 썸네일을 이미 한 번 교체한 건(last_response.lastInspectionRequestedAt)은 다시 반려돼도 재교체하지 않는다 — 2026-10-14 글루타치온이 수동 교체 후 러너가 또 교체해 4회째 반려
+  return (data ?? []).map((r) => ({ spid: r.coupang_seller_product_id, name: r.name, source: r.source, tossId: r.toss_product_id, t0: Date.parse(r.registered_at) || Date.now(), resumed: true, rethumb: !!r.last_response?.lastInspectionRequestedAt }))
 }
 
 /** 최근 24h 반려분(이전 실행에서 자동 조치 안 된 것) — 시작 시 tryRecat(카테고리 불일치) / tryRethumb(여백) 대상 */
@@ -250,6 +264,9 @@ while (idx < plan.length || pending.length) {
       console.log(`  ✗ 등록 실패: ${reg.error}`)
       log({ spid: c.spid, name: c.name, source: c.source, step: 'register', ok: false, error: reg.error })
       results.push({ ...c, result: 'REGISTER_FAIL' })
+      // 상품 자체의 문제(이미지 404·브랜드 금지어·MSP 미달·고시 불가 등)는 DB 에 FAILED 로 남겨 다음 실행 후보에서 빠지게 한다 — 안 남기면 매 실행
+      // 같은 3건에서 "연속 실패 3건" 으로 멈추는 공회전(2026-10-14 감독 루프 38회 관찰). 네트워크·토큰·IP 같은 일시 오류는 남기지 않는다(재시도 대상).
+      if (!isTransientError(reg.error)) await markFailed(c, reg.error)
       if (failStreak >= MAX_FAIL) break
       continue
     }
@@ -270,7 +287,12 @@ while (idx < plan.length || pending.length) {
       if (insp.inspection === 'REJECT' && (await tryRecat(p, insp.reasons) || await tryRethumb(p, insp.reasons))) continue
       settle(p, insp)
     }
-    else if (Date.now() - p.t0 > WAIT_MAX_MIN * 60_000) { pending.splice(pending.indexOf(p), 1); settle(p, { inspection: 'TIMEOUT', item: null, reasons: null, err: insp.err }) }
+    else if (Date.now() - p.t0 > WAIT_MAX_MIN * 60_000) {
+      pending.splice(pending.indexOf(p), 1)
+      // 이전 실행에서 이어받은 건은 이번 실행에서 1회만 확인 — 계속 대기면 실패·TIMEOUT 으로 세지 않고 다음 실행에 넘긴다(검수가 수동으로 넘어간 상품)
+      if (p.resumed) { console.log(`  ⏳ ${p.tossId} ${String(p.name || '').slice(0, 36)} — 검수 대기 지속 ${((Date.now() - p.t0) / 3600_000).toFixed(1)}시간 (다음 실행에서 재확인)`); continue }
+      settle(p, { inspection: 'TIMEOUT', item: null, reasons: null, err: insp.err })
+    }
   }
   if (!halt && failStreak >= MAX_FAIL) halt = `연속 실패 ${failStreak}건`
   if (!halt && timeoutStreak >= PARALLEL) halt = `검수 대기 ${WAIT_MAX_MIN}분 초과 ${timeoutStreak}건 연속(토스 검수 지연 의심)`

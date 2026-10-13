@@ -113,8 +113,11 @@ function keywords(title, brand) {
 
 // ── 판매옵션: 카테고리 제약 템플릿의 모든 옵션을 채움 (2025.06.16~ salesOption 전부 필수, 택1 그룹은 1개) ──
 // 자동 파싱(제목/옵션명) + --opts="수량=1개;개당 용량=70ml;개당 수량=30개" 식 오버라이드(키는 부분일치). 단위는 템플릿 unitValues 로 강제.
-function parseUnits(title, itemName, attrs) {
-  const t = `${title || ''} ${itemName || ''}`
+function parseUnits(title, itemName, attrs, extra) {
+  // 제목에 수량·중량 토큰이 하나도 없을 때만 고시 제품명/포장단위(ggsan 원문, "60gx3병")를 제목 다음·쿠팡 itemName 앞에 끼운다 — itemName 은
+  // 쿠팡 속성("3 회분")에서 만들어져 "3정 1박스"처럼 틀릴 수 있다(2026-10-14 홍삼분말세트 "상품 정보 불일치" 반려). 제목에 정보가 있으면 종전과 동일.
+  const titleHasUnits = /\d\s*(kg|g|mg|ml|l|정|캡슐|환|포|스틱|매|팩|개입|박스|병|통|세트)(?![a-z가-힣])/i.test(title || '')
+  const t = `${title || ''} ${!titleHasUnits && extra ? extra : ''} ${itemName || ''}`
   const per = t.match(/(\d+)\s*(포|스틱|개입|매|팩)/)
   // 제목 자체에 "x 10포" 가 있으면 그 낱개 단위가 진짜다 — 쿠팡 itemName 은 "10정 1박스" 처럼 정으로 적힌 경우가 많다(2026-10-13 다이어트 카페·석류젤리)
   const perTitle = (title || '').match(/(\d+)\s*(포|스틱|개입|매|팩)/)
@@ -127,7 +130,11 @@ function parseUnits(title, itemName, attrs) {
   const attrNum = (type) => { const v = attrs?.find((a) => a.attributeTypeName === type)?.attributeValueName; const m = /(\d+(?:\.\d+)?)\s*([a-zA-Z]+)/.exec(v || ''); return m && Number(m[1]) > 0 ? m : null }
   const attrVol = attrNum('개당 용량'), attrWt = attrNum('개당 중량')
   // \b 는 한글 뒤에서 단어 경계가 안 생겨 "10포 4박스" 의 4박스를 못 잡던 문제(2026-10-13) → 한글 미후속 lookahead
-  const pack = t.match(/[x×]\s*(\d+)\s*(박스|개|세트|병|통|팩)/i) || t.match(/(\d+)\s*(박스|세트|병|통)(?![가-힣])/)
+  // 묶음 수량: 제목을 먼저 보고(쿠팡 itemName 의 "1박스" 가 제목의 "2개" 를 덮지 않게), "120정 2개"·"60캡슐 3통" 처럼 낱개 토큰 뒤의 "N개" 도 x 없이 인정
+  // — 2026-10-14 종근당 MSM 120정 2개 가 수량 1개로 등록됨. g/ml 뒤의 "N개"("20g 10개" = 낱개 수)는 제외
+  const packRes = [/[x×]\s*(\d+)\s*(박스|개|세트|병|통|팩)/i, /(\d+)\s*(박스|세트|병|통)(?![가-힣])/, /(?:정|캡슐|환|포|스틱|매)\s*(\d+)\s*(개|통|병|박스)(?![가-힣])/]
+  const firstPack = (s) => { for (const re of packRes) { const m = (s || '').match(re); if (m) return m } return null }
+  const pack = firstPack(title) || firstPack(t)
   const attrQty = attrs?.find((a) => a.attributeTypeName === '수량')?.attributeValueName?.match(/(\d+)/)?.[1]
   const volM = vol || attrVol, wtM = wt || attrWt
   const liquid = /즙|주스|진액|액상|음료|오일|시럽|식초|드링크|워터|에센스/.test(title || '') // g→ml 대체 허용 여부(가루·정제는 제외)
@@ -159,7 +166,7 @@ function buildOptions(template, ctx, optsArg) {
     const k = keys.find((x) => !templateKeys.includes(norm(x)) && (norm(key).includes(norm(x)) || norm(x).includes(norm(key))))
     return k ? ov[k] : null
   }
-  const u = parseUnits(ctx.title, ctx.itemName, ctx.attrs)
+  const u = parseUnits(ctx.title, ctx.itemName, ctx.attrs, ctx.extra)
   const auto = (key) => {
     if (/^수량$/.test(key)) return `${u.qty}개`
     // 액상(즙·주스 키워드)인데 제목이 g 로만 적힌 경우(푸룬주스 20g x 14포) 템플릿이 용량만 받으면 g≈ml 로 넣는다. 가루·정제는 제외.
@@ -248,8 +255,23 @@ Pure white background (#FFFFFF). The ENTIRE product must be fully visible — no
 }
 // strict=true(재검수용): 풀블리드 프롬프트 + 최대 3회 생성 중 가장 정사각에 가까운 결과 채택 → 근사 정사각이면 cover(중앙 크롭)로 여백 0, 아니면 100% fit
 async function ensureThumb(url, spid, { clean = true, strict = false } = {}) {
-  const r = await fetch(url, { signal: AbortSignal.timeout(60_000) }); if (!r.ok) throw new Error(`썸네일 다운로드 실패 ${r.status} ${url}`)
-  let src = Buffer.from(await r.arrayBuffer())
+  // url 은 문자열 또는 후보 배열. 쿠팡 payload 에 저장된 ggsan CDN 경로가 나중에 404 가 되는 경우(2026-10-14 포스파티딜세린·NMN 3건, 공급처 이미지 교체)가
+  // 있어 대표 → 쿠팡 CDN 사본 → ggsan 현재 페이지 대표 → 나머지 payload 이미지 순으로 받아지는 첫 이미지를 쓴다.
+  const urls = [...new Set((Array.isArray(url) ? url : [url]).filter(Boolean))]
+  let src = null
+  const errs = []
+  for (const u of urls) {
+    try {
+      const r = await fetch(u, { signal: AbortSignal.timeout(60_000) })
+      if (!r.ok) { errs.push(`${r.status} …${u.slice(-50)}`); continue }
+      const b = Buffer.from(await r.arrayBuffer())
+      await sharp(b).metadata() // 404 HTML 같은 비이미지 응답 걸러냄
+      src = b
+      if (u !== urls[0]) console.log(`  ⚠ 대표 이미지 대체 → …${u.slice(-60)} (원본 ${errs[0] || '실패'})`)
+      break
+    } catch (e) { errs.push(`${String(e.message).slice(0, 40)} …${u.slice(-50)}`) }
+  }
+  if (!src) throw new Error(`썸네일 다운로드 실패: ${errs.join(' | ').slice(0, 300)}`)
   // --crop=left,top,width,height (0~1 비율) : 원본에서 일부(예: 박스만)만 잘라 Gemini 에 넘김 — 모델이 레이아웃을 보존해 재구성을 안 하므로 입력을 바꿔야 함
   if (arg('crop')) {
     const v = arg('crop').split(',').map(Number)
@@ -358,7 +380,8 @@ async function buildPayload(listing, refs) {
   // 옵션
   const legacy = [arg('opt-qty') ? `수량=${arg('opt-qty')}` : null, arg('opt-unit') ? `개당 수량=${arg('opt-unit')}` : null].filter(Boolean).join(';')
   OPT_WARN.length = 0
-  const options = buildOptions(tpl.data, { title: listing.registered_title, itemName: it.itemName, attrs: it.attributes }, [arg('opts'), legacy].filter(Boolean).join(';'))
+  const noticeText = (it.notices || []).filter((n) => /제품명|포장단위/.test(n.noticeCategoryDetailName || '')).map((n) => n.content).filter((c) => c && !/참조/.test(c)).join(' ')
+  const options = buildOptions(tpl.data, { title: listing.registered_title, itemName: it.itemName, attrs: it.attributes, extra: noticeText }, [arg('opts'), legacy].filter(Boolean).join(';'))
 
   // --require-opts: 자리값으로 채운 옵션이 있으면 등록하지 않고 종료(코드 3) — 일괄 러너가 OPTS_UNKNOWN 으로 건너뛰고 로그에 남긴다
   if (has('require-opts') && OPT_WARN.length) { console.error(`OPTS_UNKNOWN: ${OPT_WARN.join('; ')} — 제목/속성에서 수량·중량·용량을 못 찾음. 수동: --opts="키=값;…"`); process.exit(3) }
@@ -366,7 +389,9 @@ async function buildPayload(listing, refs) {
   // 이미지
   const rep = (it.images || []).find((i) => i.imageType === 'REPRESENTATION') || (it.images || [])[0]
   if (!rep) throw new Error('대표 이미지 없음')
-  const thumb = DRY ? { url: 'DRY-RUN(썸네일 생략)', note: 'dry: 생성 생략' } : await ensureThumb(rep.vendorPath || rep.cdnPath, listing.seller_product_id)
+  // 대표 이미지 후보: payload 대표 → 쿠팡 CDN 사본 → ggsan 현재 페이지 대표(공급처가 이미지를 바꿔 옛 URL 이 404 인 경우) → 나머지 payload 이미지
+  const thumbSrcs = [rep.vendorPath, rep.cdnPath, ...(g?.images_main ?? []), ...(it.images || []).flatMap((i) => [i.vendorPath, i.cdnPath])]
+  const thumb = DRY ? { url: 'DRY-RUN(썸네일 생략)', note: 'dry: 생성 생략' } : await ensureThumb(thumbSrcs, listing.seller_product_id)
   if (thumb.buf) { try { const { writeFileSync, mkdirSync } = await import('node:fs'); const dir = path.join(process.env.TEMP || '.', 'toss-thumbs'); mkdirSync(dir, { recursive: true }); writeFileSync(path.join(dir, `${listing.seller_product_id}.jpg`), thumb.buf) } catch { /* preview only */ } }
   const images = [{ type: 'THUMBNAIL', order: 0, url: thumb.url }]
   let order = 1
@@ -480,7 +505,8 @@ const SPID = arg('spid')
 if (!SPID) { console.error('사용: --spid=<seller_product_id> [--dry] [--show] [--cat=] [--opt-qty=] [--opt-unit=] [--prep-days=3] [--origin=ggsan|sale] | --check=<toss_product_id>'); process.exit(1) }
 const { data: listing, error } = await sb.from('jimscanner_coupang_listings').select('*').eq('seller_product_id', Number(SPID)).single()
 if (error || !listing) { console.error('쿠팡 리스팅 없음:', error?.message); process.exit(1) }
-const { data: dup } = await sb.from('jimscanner_toss_listings').select('toss_product_id,inspection_status').eq('coupang_seller_product_id', Number(SPID)).limit(1)
+// FAILED(등록 자체가 실패해 토스에 없는 행)는 중복으로 보지 않는다 — 원인 수정 후 --force 없이 재시도 가능, 성공하면 아래에서 지운다
+const { data: dup } = await sb.from('jimscanner_toss_listings').select('toss_product_id,inspection_status').eq('coupang_seller_product_id', Number(SPID)).or('inspection_status.is.null,inspection_status.neq.FAILED').limit(1)
 if (dup?.length && !has('force')) { console.error(`이미 토스 등록됨: ${dup[0].toss_product_id} (${dup[0].inspection_status}) — --force 로 중복 등록 가능(페널티 주의)`); process.exit(1) }
 
 console.log(`▶ ${listing.registered_title} | ${listing.source} ${listing.source_goods_no} | 쿠팡가 ${listing.list_price_krw} MSP ${listing.msp_price_krw} 도매 ${listing.dome_price_krw}`)
@@ -512,5 +538,7 @@ await upsertListing({
   inspection_status: d.inspectionStatus ?? null, exposure_status: d.exposureStatus ?? null, rejection_reasons: d.rejectionReasons ?? null, hidden,
   request_payload: payload, last_response: g.raw, registered_at: new Date().toISOString(), last_synced_at: new Date().toISOString(), updated_at: new Date().toISOString(),
 })
+// 이전 실패 기록(FAILED, 토스에 없는 행)은 성공했으니 정리 — 남겨두면 일괄 러너 후보 선별·가격 동기화가 같은 spid 를 두 행으로 본다
+{ const { error: delErr } = await sb.from('jimscanner_toss_listings').delete().eq('coupang_seller_product_id', listing.seller_product_id).eq('inspection_status', 'FAILED'); if (delErr) console.log(`  (FAILED 행 정리 실패: ${delErr.message})`) }
 console.log(`✓ 토스 상품 ${productId} 등록 | inspection=${d.inspectionStatus} exposure=${d.exposureStatus} | itemId ${d.stocks?.[0]?.itemId}`)
 console.log(`  상태 확인: node scripts/toss-register.mjs --check=${productId}`)
