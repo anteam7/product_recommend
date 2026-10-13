@@ -231,8 +231,10 @@ const settle = (p, insp) => {
   results.push({ spid: p.spid, name: p.name, tossId: p.tossId, result: insp.inspection })
 }
 while (idx < plan.length || pending.length) {
-  // 1) 중단 사유 없으면 빈 슬롯만큼 등록 (검수 창 = 동시에 검수 대기시킬 최대 건수)
-  while (!halt && idx < plan.length && pending.length < PARALLEL) {
+  // 1) 중단 사유 없으면 빈 슬롯만큼 등록 (검수 창 = 이번 실행에서 새로 등록해 검수 대기 중인 건수. 이전 실행에서 이어받은
+  //    건(resumed)은 토스 검수가 수십 분째 멈춘 것들이라 창에서 빼지 않으면 러너가 놀게 된다 — 2026-10-14 00:11 관찰)
+  const fresh = () => pending.filter((p) => !p.resumed).length
+  while (!halt && idx < plan.length && fresh() < PARALLEL) {
     const c = plan[idx++]
     console.log(`\n[${idx}/${plan.length}] ${c.spid} ${c.name.slice(0, 40)} — 등록 중… (검수 대기 ${pending.length}건)`)
     const reg = await runRegister(c.spid)
