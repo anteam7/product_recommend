@@ -14,7 +14,8 @@
  *  - 상세 = 쿠팡 contents 이미지(IMAGE*) 순서대로 DESCRIPTION, HTML 이면 DESCRIPTION_HTML
  *  - 고시 = PROCESSED_FOOD(가공식품, 쿠팡과 동일 전략) 항목 id 매핑. 건기식 판매업 신고 전까지 HEALTH_FUNCTIONAL_FOOD 미사용
  *  - 판매옵션 = 카테고리 제약 템플릿(수량 + (택1) 개당 수량|개당 캡슐/정) 자동 파싱, --opt-qty/--opt-unit 로 강제
- *  - 가격: salePrice = 쿠팡 list_price_krw(MSP 이상), originPrice = ggsan 정가(있고 ≥ sale) / --origin=sale 이면 동일
+ *  - 가격: salePrice = 쿠팡 list_price_krw 에 수수료 차이 보정(토스 11% vs 쿠팡 10.6% → 같은 순이익, 약 +0.5%, lib/toss-price.mjs; --no-fee-adjust 로 끔),
+ *          MSP 이상 검사. originPrice = ggsan 정가(있고 ≥ sale) / --origin=sale 이면 동일. 기등록분 가격 동기화는 scripts/toss-reprice.mjs
  *  - 배송: NORMAL/NORMAL, preparationDays 3(영업일=발송기한·페널티 기준), FREE, 제주/도서산간 미배송(쿠팡 remoteAreaDeliverable N 미러), CJ
  */
 import { readFileSync } from 'node:fs'
@@ -23,6 +24,7 @@ import { fileURLToPath } from 'node:url'
 import { createClient } from '@supabase/supabase-js'
 import sharp from 'sharp'
 import { tossApi, tossRegisterProduct, tossHideProduct, tossProduct, tossConstraintTemplate, tossNotices, tossExchangeRefundLocations, tossDeliveryLocations, tossDeliveryCompanies, PARTNER_NAME } from './lib/toss-api.mjs'
+import { tossPriceFromCoupang } from './lib/toss-price.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const env = Object.fromEntries(readFileSync(path.join(__dirname, '..', '.env.local'), 'utf8').split(/\r?\n/).filter((l) => l && !l.startsWith('#') && l.includes('=')).map((l) => { const i = l.indexOf('='); let v = l.slice(i + 1).trim(); if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) v = v.slice(1, -1); return [l.slice(0, i).trim(), v] }))
@@ -64,6 +66,27 @@ const CAT_RULES = [
   // 다이어트/헬스
   [/가르시니아/, 60015], [/\bcla\b|공액\s*리놀레산/i, 60013], [/다이어트\s*쉐이크|쉐이크/, 60019], [/디톡스|클렌즈|해독/, 60027], [/다이어트|슬림|체지방|체중/, 60017],
   [/프로틴|단백질\s*보충|웨이\s*프로틴/, 60055], [/bcaa/i, 60033], [/아르기닌/, 60041], [/크레아틴/, 60059], [/타우린/, 60061], [/글루타민/, 60035], [/카르니틴/, 60045],
+  // ── 일반 식품(2026-10-13 사용자 요청 "올리브오일 같은 일반 식품도 등록되게", lib/toss-food-leaves.json 1,280 leaf 기준) ──
+  // 식용유 — 캡슐 제품(호두오일 캡슐 등)은 제외해 영양제로 남긴다
+  [/올리브\s*(오일|유)/, 29191], [/들기름/, 29183], [/참기름/, 29195], [/코코넛\s*오일/, 29179],
+  [/(호두|아마씨|플랙시드|햄프씨드|대마종자|아보카도|포도씨|해바라기|호박씨|카놀라|현미유|식용)\s*(오일|유)(?![\s\S]*캡슐)/, 29177],
+  // 잡곡·씨앗
+  [/볶음\s*참깨|참깨(?!드레싱|가루)/, 28455], [/볶음\s*들깨|들깨(?!가루|유)/, 28437], [/귀리|오트밀/, 28429], [/율무(?!차)/, 28451],
+  // 꿀·시럽·잼 ("꿀담은"·"꿀배" 같은 상품명 수식은 제외)
+  [/벌집꿀/, 26527], [/허니파우더|벌화분/, 26531], [/벌꿀|사양꿀|아카시아꿀|밤꿀|야생화꿀|꿀(?![가-힣])/, 26529], [/메이플\s*시럽/, 26537], [/아가베/, 26539],
+  // 가루(미숫·선식·콩) — 건강분말(60005) 규칙보다 앞에 둔다
+  [/미숫가루|미숫/, 26693], [/선식/, 26695], [/콩가루/, 26697], [/누룽지/, 26575],
+  // 건과·견과
+  [/건대추|대추(?!차|즙)/, 27927], [/푸룬|건자두/, 27937], [/건블루베리/, 27933], [/건망고/, 27929], [/건포도/, 27943], [/곶감/, 27945], [/감말랭이/, 27923],
+  [/혼합\s*견과|믹스\s*넛|믹스넛/, 27999], [/호두(?!오일|유)/, 27995], [/캐슈/, 27985], [/피스타치오/, 27987],
+  // 차·커피
+  [/커피\s*믹스|믹스\s*커피/, 29329], [/드립백|티백\s*커피/, 29315], [/커피/, 29319],
+  [/곡물차|보리차|현미차|옥수수차/, 29419], [/율무차/, 29425], [/천마차|마차\b/, 29427], [/국화차/, 29439], [/카모마일|캐모마일/, 29463], [/페퍼민트/, 29467], [/루이보스/, 29449],
+  [/히비스커스/, 29469], [/자스민|재스민/, 29459], [/보이차/, 29455], [/콤부차/, 29465], [/허브\s*티|허브차|꽃차/, 29443], [/우롱차/, 29415], [/홍차/, 29473], [/\S+차\s*\d+\s*(티백|포|개입)|티백/, 29441],
+  // 식초
+  [/애사비|사과\s*초모\s*식초|사과\s*식초/, 29141], [/발사믹/, 29137], [/음용\s*식초|마시는\s*식초|흑초/, 29149], [/식초/, 29133],
+  // 음료·간식
+  [/꿀물/, 27585], [/비타민\s*음료/, 27587], [/에너지\s*음료/, 27591], [/주스/, 27511], [/약과/, 27683], [/강정/, 27681], [/한과/, 27691], [/곤약\s*젤리/, 27875], [/다크\s*초콜릿/, 27887],
   // 환/분말, 영양식, 허브
   [/건강환|침환|\d+\s*환(?![경장])/, 60007], [/분말|파우더|가루/, 60005], [/영양식|환자식|성인분유|연하식/, 59931], [/허브|추출물|추출분말|잎(?![가-힣])/, 59885],
 ]
@@ -97,11 +120,18 @@ function parseUnits(title, itemName, attrs) {
   const perTitle = (title || '').match(/(\d+)\s*(포|스틱|개입|매|팩)/)
   const cap = t.match(/(\d+)\s*(정|캡슐|환)/)
   const vol = t.match(/(\d+(?:\.\d+)?)\s*(ml|mL|ML|l|L)\b/)
-  const wt = t.match(/(\d+(?:\.\d+)?)\s*(g|kg|mg)\b(?!\s*[x×])/) // "1,000mg x 120정" 의 mg 는 함량이라 x 앞이면 제외
+  // g/kg 는 "10g x 30포"(식품 스틱) 처럼 x 앞에 와도 낱개 중량이다. mg 만 "1,000mg x 120정"(함량)이라 x 앞이면 제외 (2026-10-13 일반 식품 확장)
+  // 경계: 끝/비영문/"x숫자"("15gx30포" 처럼 붙여 쓴 경우) — 영단어 안의 g(gram 등)는 제외
+  const wt = t.match(/(\d+(?:\.\d+)?)\s*(kg|g)(?=$|[^a-z]|x\d)/i) || t.match(/(\d+(?:\.\d+)?)\s*(mg)\b(?!\s*[x×])/)
+  // 제목에 용량/중량이 없으면 쿠팡 속성(개당 용량/개당 중량, 0 이 아닐 때)으로 보충
+  const attrNum = (type) => { const v = attrs?.find((a) => a.attributeTypeName === type)?.attributeValueName; const m = /(\d+(?:\.\d+)?)\s*([a-zA-Z]+)/.exec(v || ''); return m && Number(m[1]) > 0 ? m : null }
+  const attrVol = attrNum('개당 용량'), attrWt = attrNum('개당 중량')
   // \b 는 한글 뒤에서 단어 경계가 안 생겨 "10포 4박스" 의 4박스를 못 잡던 문제(2026-10-13) → 한글 미후속 lookahead
   const pack = t.match(/[x×]\s*(\d+)\s*(박스|개|세트|병|통|팩)/i) || t.match(/(\d+)\s*(박스|세트|병|통)(?![가-힣])/)
   const attrQty = attrs?.find((a) => a.attributeTypeName === '수량')?.attributeValueName?.match(/(\d+)/)?.[1]
-  return { qty: pack ? pack[1] : (attrQty || '1'), per: per ? per[1] : null, perUnit: per ? (per[2] === '개입' ? '개' : per[2]) : null, perTitle: perTitle ? perTitle[1] : null, perTitleUnit: perTitle ? (perTitle[2] === '개입' ? '개' : perTitle[2]) : null, cap: cap ? cap[1] : null, capUnit: cap ? cap[2] : null, vol: vol ? vol[1] : null, volUnit: vol ? vol[2].toLowerCase() : null, wt: wt ? wt[1] : null, wtUnit: wt ? wt[2] : null }
+  const volM = vol || attrVol, wtM = wt || attrWt
+  const liquid = /즙|주스|진액|액상|음료|오일|시럽|식초|드링크|워터|에센스/.test(title || '') // g→ml 대체 허용 여부(가루·정제는 제외)
+  return { liquid, qty: pack ? pack[1] : (attrQty || '1'), per: per ? per[1] : null, perUnit: per ? (per[2] === '개입' ? '개' : per[2]) : null, perTitle: perTitle ? perTitle[1] : null, perTitleUnit: perTitle ? (perTitle[2] === '개입' ? '개' : perTitle[2]) : null, cap: cap ? cap[1] : null, capUnit: cap ? cap[2] : null, vol: volM ? volM[1] : null, volUnit: volM ? volM[2].toLowerCase() : null, wt: wtM ? wtM[1] : null, wtUnit: wtM ? wtM[2].toLowerCase() : null }
 }
 function forceUnit(value, unitValues) {
   if (!unitValues?.length) return value
@@ -112,6 +142,8 @@ function forceUnit(value, unitValues) {
   for (const cand of alias[u] || []) if (unitValues.includes(cand)) return num + cand
   return num + unitValues[0]
 }
+// 자동값을 못 찾아 '1개' 같은 자리값을 넣은 옵션 목록 — --require-opts 면 등록하지 않고 종료(코드 3, "OPTS_UNKNOWN")해 일괄 러너가 건너뛰게 한다
+const OPT_WARN = []
 function buildOptions(template, ctx, optsArg) {
   const opts = template?.categorySalesOptions ?? []
   const ov = {}
@@ -130,7 +162,8 @@ function buildOptions(template, ctx, optsArg) {
   const u = parseUnits(ctx.title, ctx.itemName, ctx.attrs)
   const auto = (key) => {
     if (/^수량$/.test(key)) return `${u.qty}개`
-    if (/용량/.test(key)) return u.vol ? `${u.vol}${u.volUnit}` : null
+    // 액상(즙·주스 키워드)인데 제목이 g 로만 적힌 경우(푸룬주스 20g x 14포) 템플릿이 용량만 받으면 g≈ml 로 넣는다. 가루·정제는 제외.
+    if (/용량/.test(key)) return u.vol ? `${u.vol}${u.volUnit}` : (u.liquid && u.wt && u.wtUnit === 'g' ? `${u.wt}ml` : null)
     if (/중량/.test(key)) return u.wt ? `${u.wt}${u.wtUnit}` : null
     // 템플릿에 '개당 수량' 이 없는 카테고리(다이어트식품 등)는 '개당 캡슐/정' 에 낱개(포/스틱)를 넣는다 — 단위는 forceUnit 이 템플릿 허용값으로 맞춤
     if (/캡슐|정/.test(key)) return u.perTitle ? `${u.perTitle}${u.perTitleUnit}` : (u.cap ? `${u.cap}${u.capUnit}` : null)
@@ -141,7 +174,7 @@ function buildOptions(template, ctx, optsArg) {
   // 1) 택1 아닌 옵션: 전부 채움 (오버라이드 > 자동 > '1'+첫단위)
   for (const o of opts.filter((x) => !x.isOneOfRequiredGroup)) {
     let v = override(o.key) ?? auto(o.key) ?? (/^수량$/.test(o.key) ? '1개' : null)
-    if (!v) { v = '1' + (o.unitValues?.[0] || '개'); console.log(`  ⚠ 옵션 '${o.key}' 자동값 없음 → ${v} (필요시 --opts 로 지정)`) }
+    if (!v) { v = '1' + (o.unitValues?.[0] || '개'); console.log(`  ⚠ 옵션 '${o.key}' 자동값 없음 → ${v} (필요시 --opts 로 지정)`); OPT_WARN.push(`${o.key}→${v}`) }
     out.push({ groupName: o.key, valueName: forceUnit(v, o.unitValues) })
   }
   // 2) 택1 그룹: 오버라이드가 가리키는 키 > 자동 파싱 가능한 키 > 개당 수량 '1개'
@@ -150,9 +183,11 @@ function buildOptions(template, ctx, optsArg) {
     let chosen = oneOf.find((o) => override(o.key) != null), value = chosen ? override(chosen.key) : null
     // 제목에 "x 15포/스틱" 처럼 낱개 단위가 있으면 '개당 수량'을 먼저 본다 — 쿠팡 itemName 이 "15정"으로 잘못 적힌 젤리 스틱이
     // 템플릿 순서(캡슐/정 먼저) 때문에 "15정"으로 등록되던 문제(2026-10-13 석류젤리 dry-run)
-    const ordered = u.per ? [...oneOf.filter((o) => /개당 수량/.test(o.key)), ...oneOf.filter((o) => !/개당 수량/.test(o.key))] : oneOf
+    // 낱개(포/스틱)가 있으면 '개당 수량' → '개당 캡슐/정'(포 단위 허용) → 중량/용량 순으로 본다: 홍삼차 3g x 100포 는 "100포"가 "3g"보다 정보가 많다
+    const rank = (o) => (/개당 수량/.test(o.key) ? 0 : /캡슐|정/.test(o.key) ? 1 : 2)
+    const ordered = u.per ? [...oneOf].sort((a, b) => rank(a) - rank(b)) : oneOf
     if (!chosen) for (const o of ordered) { const a = auto(o.key); if (a) { chosen = o; value = a; break } }
-    if (!chosen) { chosen = oneOf.find((o) => /개당 수량/.test(o.key)) || oneOf[0]; value = '1' + (chosen.unitValues?.[0] || '개'); console.log(`  ⚠ 택1 옵션 자동값 없음 → ${chosen.key}=${value}`) }
+    if (!chosen) { chosen = oneOf.find((o) => /개당 수량/.test(o.key)) || oneOf[0]; value = '1' + (chosen.unitValues?.[0] || '개'); console.log(`  ⚠ 택1 옵션 자동값 없음 → ${chosen.key}=${value}`); OPT_WARN.push(`${chosen.key}→${value}`) }
     out.push({ groupName: chosen.key, valueName: forceUnit(value, chosen.unitValues) })
   }
   // 값 규칙: [0-9a-zA-Z가-힣*()-_+/.]{1,30}
@@ -312,8 +347,9 @@ async function buildPayload(listing, refs) {
   if (g && g.in_stock === false) throw new Error('ggsan 품절 — 등록 중단')
 
   // 가격
-  const salePrice = listing.list_price_krw
-  if (!salePrice || salePrice < 1) throw new Error('list_price_krw 없음')
+  if (!listing.list_price_krw || listing.list_price_krw < 1) throw new Error('list_price_krw 없음')
+  // 토스 수수료(11%)가 쿠팡(10.6%)보다 높아 같은 가격이면 순이익이 줄어든다 → 같은 순이익이 나오는 가격으로 보정(lib/toss-price.mjs, 약 +0.5%). --no-fee-adjust 로 끔
+  const salePrice = has('no-fee-adjust') ? listing.list_price_krw : tossPriceFromCoupang(listing.list_price_krw, listing.source)
   const msp = listing.msp_price_krw || g?.msp || 0
   if (msp && salePrice < msp) throw new Error(`판매가 ${salePrice} < MSP ${msp}`)
   let originPrice = salePrice
@@ -321,7 +357,11 @@ async function buildPayload(listing, refs) {
 
   // 옵션
   const legacy = [arg('opt-qty') ? `수량=${arg('opt-qty')}` : null, arg('opt-unit') ? `개당 수량=${arg('opt-unit')}` : null].filter(Boolean).join(';')
+  OPT_WARN.length = 0
   const options = buildOptions(tpl.data, { title: listing.registered_title, itemName: it.itemName, attrs: it.attributes }, [arg('opts'), legacy].filter(Boolean).join(';'))
+
+  // --require-opts: 자리값으로 채운 옵션이 있으면 등록하지 않고 종료(코드 3) — 일괄 러너가 OPTS_UNKNOWN 으로 건너뛰고 로그에 남긴다
+  if (has('require-opts') && OPT_WARN.length) { console.error(`OPTS_UNKNOWN: ${OPT_WARN.join('; ')} — 제목/속성에서 수량·중량·용량을 못 찾음. 수동: --opts="키=값;…"`); process.exit(3) }
 
   // 이미지
   const rep = (it.images || []).find((i) => i.imageType === 'REPRESENTATION') || (it.images || [])[0]

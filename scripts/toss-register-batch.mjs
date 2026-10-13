@@ -22,6 +22,8 @@ import { fileURLToPath } from 'node:url'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { createClient } from '@supabase/supabase-js'
+import { tossRemoveProduct } from './lib/toss-api.mjs'
+import { parseRecommendedCategory, resolveLeafByPath } from './lib/toss-categories.mjs'
 
 const execFileP = promisify(execFile)
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -39,6 +41,8 @@ const WAIT_MAX_MIN = Math.max(1, parseInt(arg('wait-max', '90'), 10) || 90)
 const PARALLEL = Math.max(1, parseInt(arg('parallel', '1'), 10) || 1) // 동시에 검수 대기시킬 최대 건수(창). 1 = 엄격한 1건씩
 const MAX_FAIL = Math.max(1, parseInt(arg('max-fail', '3'), 10) || 3)
 const SKIP = new Set(arg('skip', '').split(',').map((s) => s.trim()).filter(Boolean))
+// 옵션 자동값(수량·중량·용량·캡슐 수)을 제목/속성에서 못 찾은 상품은 자리값("1개")으로 올리지 않고 건너뛴다(기본 on, --allow-placeholder-opts 로 끔)
+const REQUIRE_OPTS = !has('allow-placeholder-opts')
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 const today = new Date(Date.now() + 9 * 3600_000).toISOString().slice(0, 10).replace(/-/g, '') // KST 날짜로 로그 파일명
 const LOG_DIR = path.join(ROOT, '_workspace')
@@ -83,8 +87,8 @@ function parseRegisterOutput(out) {
   return { tossId: id ? Number(id) : null, category: cat ? `${cat[1]} ${cat[2].trim()}` : null, options: opts ?? null }
 }
 
-async function runRegister(spid) {
-  const args = [path.join(__dirname, 'toss-register.mjs'), `--spid=${spid}`, '--show']
+async function runRegister(spid, extra = []) {
+  const args = [path.join(__dirname, 'toss-register.mjs'), `--spid=${spid}`, '--show', ...(REQUIRE_OPTS ? ['--require-opts'] : []), ...extra]
   try {
     const { stdout, stderr } = await execFileP(process.execPath, args, { cwd: ROOT, timeout: 40 * 60_000, maxBuffer: 8 * 1024 * 1024, windowsHide: true })
     const out = `${stdout}\n${stderr}`
@@ -94,11 +98,26 @@ async function runRegister(spid) {
     // exit≠0 이어도 등록 API 자체는 성공했을 수 있다(후속 단계 실패) → stdout 에서 id 를 먼저 건진다. 토스엔 있는데 로그만 실패로 남는 상황 방지.
     const out = `${e.stdout || ''}\n${e.stderr || ''}`.trim()
     const p = parseRegisterOutput(out)
+    const optsUnknown = /OPTS_UNKNOWN:\s*([^\n]*)/.exec(out)?.[1] ?? null
+    if (!p.tossId && optsUnknown) return { ok: false, skip: 'OPTS_UNKNOWN', ...p, error: `옵션 자동값 없음(${optsUnknown.slice(0, 120)}) → 수동: --opts` }
+    // 매입처 실시간 품절(ggsan 상세 확인)은 상품 문제가 아니라 재고 문제 → 건너뜀(재입고 후 다음 실행에서 자동 후보)
+    if (!p.tossId && /품절 — 등록 중단/.test(out)) return { ok: false, skip: 'SOLD_OUT', ...p, error: '매입처 품절 → 건너뜀(재입고 후 자동 후보)' }
     return { ok: !!p.tossId, ...p, error: (out || e.message).split('\n').slice(-3).join(' | ').slice(0, 400) }
   }
 }
 
 // ── 검수 추적 (병렬 창) ──
+/** 등록 없이 변환만(--dry) 돌려 옵션·카테고리가 채워지는지 확인. {ok, reason} */
+async function dryCheck(spid, extra = []) {
+  const args = [path.join(__dirname, 'toss-register.mjs'), `--spid=${spid}`, '--dry', ...(REQUIRE_OPTS ? ['--require-opts'] : []), ...extra]
+  try { await execFileP(process.execPath, args, { cwd: ROOT, timeout: 10 * 60_000, maxBuffer: 8 * 1024 * 1024, windowsHide: true }); return { ok: true } }
+  catch (e) {
+    const out = `${e.stdout || ''}\n${e.stderr || ''}`
+    const optsUnknown = /OPTS_UNKNOWN:\s*([^\n]*)/.exec(out)?.[1]
+    return { ok: false, reason: optsUnknown ? `옵션 자동값 없음(${optsUnknown.slice(0, 100)})` : out.trim().split('\n').slice(-2).join(' | ').slice(0, 200) }
+  }
+}
+
 /** 단건 검수 상태 1회 조회 — toss-register.mjs --check (DB 갱신 포함) */
 async function checkInspection(tossId) {
   try {
@@ -120,6 +139,72 @@ async function resumePending() {
   return (data ?? []).map((r) => ({ spid: r.coupang_seller_product_id, name: r.name, source: r.source, tossId: r.toss_product_id, t0: Date.parse(r.registered_at) || Date.now(), resumed: true }))
 }
 
+/** 최근 24h 반려분(이전 실행에서 자동 조치 안 된 것) — 시작 시 tryRecat(카테고리 불일치) / tryRethumb(여백) 대상 */
+async function pastRejects() {
+  if (has('no-resume')) return []
+  const since = new Date(Date.now() - 24 * 3600_000).toISOString()
+  const { data, error } = await sb.from('jimscanner_toss_listings').select('toss_product_id, coupang_seller_product_id, name, source, registered_at, rejection_reasons, last_response').eq('inspection_status', 'REJECT').gte('registered_at', since)
+  if (error) { console.log(`(반려분 조회 실패: ${error.message})`); return [] }
+  // 이미 썸네일 교체(PUT) 한 건은 last_response.lastInspectionRequestedAt 이 남는다 → 재시도 1회 제한
+  return (data ?? []).map((r) => ({ spid: r.coupang_seller_product_id, name: r.name, source: r.source, tossId: r.toss_product_id, t0: Date.parse(r.registered_at) || Date.now(), reasons: r.rejection_reasons, rethumb: !!r.last_response?.lastInspectionRequestedAt }))
+}
+
+const isMarginReject = (reasons) => (Array.isArray(reasons) ? reasons : []).some((r) => /여백/.test(`${r?.title ?? ''}`))
+
+/**
+ * "여백"(썸네일 구도) 반려 → --rethumb --strict --apply 로 풀블리드 클린 패키지샷 재생성 + PUT 교체 → 재검수 대기. spid 당 1회.
+ * (memory: 세로로 긴 구도·정사각 구도는 통과, 와이드·반사·잘림은 반려. strict = 3회 생성 중 가장 정사각에 가까운 결과를 cover 크롭)
+ */
+async function tryRethumb(p, reasons) {
+  if (!isMarginReject(reasons) || p.rethumb) return false
+  console.log(`  ↪ 썸네일 "여백" 반려 → strict 패키지샷으로 교체 재검수 (${p.tossId})`)
+  const args = [path.join(__dirname, 'toss-register.mjs'), `--rethumb=${p.tossId}`, '--apply', '--strict']
+  try {
+    const { stdout } = await execFileP(process.execPath, args, { cwd: ROOT, timeout: 15 * 60_000, maxBuffer: 8 * 1024 * 1024, windowsHide: true })
+    const ok = /PUT 응답: OK/.test(stdout)
+    log({ spid: p.spid, name: p.name, source: p.source, step: 'rethumb', ok, tossId: p.tossId, tail: stdout.trim().split('\n').slice(-2).join(' | ').slice(0, 200) })
+    if (!ok) { console.log(`  ↪ 썸네일 교체 실패: ${stdout.trim().split('\n').slice(-2).join(' | ').slice(0, 160)}`); return false }
+    console.log(`  ↪ 썸네일 교체 OK → 재검수 대기`)
+    pending.push({ spid: p.spid, name: p.name, source: p.source, tossId: p.tossId, t0: Date.now(), category: p.category ?? null, options: p.options ?? null, rethumb: true })
+    return true
+  } catch (e) {
+    const out = `${e.stdout || ''}\n${e.stderr || ''}`.trim().split('\n').slice(-2).join(' | ').slice(0, 200)
+    log({ spid: p.spid, name: p.name, source: p.source, step: 'rethumb', ok: false, tossId: p.tossId, error: out || e.message })
+    console.log(`  ↪ 썸네일 교체 실패: ${out || e.message}`)
+    return false
+  }
+}
+
+/**
+ * "카테고리 불일치" 반려 → 토스가 추천한 경로를 leaf id 로 풀어 기존 상품 삭제 후 --cat 으로 재등록(검수 대기에 다시 넣음).
+ * 사용자 요청(2026-10-13): 올리브오일 같은 일반 식품도 등록되게. 한 spid 당 1회만 시도. 성공 시 true (실패 streak 에 안 셈).
+ */
+async function tryRecat(p, reasons) {
+  const rec = parseRecommendedCategory(reasons)
+  if (!rec || p.recat) return false
+  const leaf = resolveLeafByPath(rec)
+  if (!leaf) { console.log(`  ↪ 추천 카테고리 해석 실패(leaf 캐시에 없음): ${rec}`); log({ spid: p.spid, name: p.name, step: 'recat', ok: false, recommended: rec, error: 'leaf not found' }); return false }
+  console.log(`  ↪ 카테고리 불일치 → ${leaf.id} ${leaf.path} 로 재등록 (기존 ${p.tossId} 삭제)`)
+  // 삭제 전에 새 카테고리 템플릿으로 옵션이 채워지는지 dry-run 으로 확인 — 옵션 미확보면 삭제하지 않고 반려로 둔다(수동 --opts 대상)
+  const dry = await dryCheck(p.spid, [`--cat=${leaf.id}`, '--force'])
+  if (!dry.ok) { console.log(`  ↪ 재등록 보류(${dry.reason}) — 기존 상품 유지`); log({ spid: p.spid, name: p.name, step: 'recat', ok: false, recommended: rec, categoryId: leaf.id, error: dry.reason }); return false }
+  const rm = await tossRemoveProduct(p.tossId)
+  if (!rm.ok) { console.log(`  ↪ 기존 상품 삭제 실패: ${JSON.stringify(rm.error).slice(0, 120)}`); log({ spid: p.spid, name: p.name, step: 'recat', ok: false, recommended: rec, error: 'remove failed' }); return false }
+  const { error: dbErr } = await sb.from('jimscanner_toss_listings').update({ inspection_status: 'REMOVED', exposure_status: 'REMOVED', updated_at: new Date().toISOString() }).eq('toss_product_id', p.tossId)
+  if (dbErr) console.log(`  ↪ (DB REMOVED 표시 실패: ${dbErr.message} — 토스에선 삭제됨, 다음 --check 가 "존재하지 않는 상품"으로 알려줌)`)
+  const reg = await runRegister(p.spid, [`--cat=${leaf.id}`, '--force'])
+  log({ spid: p.spid, name: p.name, source: p.source, step: 'recat', ok: reg.ok, removedTossId: p.tossId, recommended: rec, categoryId: leaf.id, tossId: reg.tossId ?? null, error: reg.ok ? null : reg.error })
+  if (!reg.ok) {
+    // 기존 상품은 이미 삭제됨 — 사람이 보도록 RECAT_FAILED 로 남긴다(후보 중복 제외는 유지되므로 수동: node scripts/toss-register.mjs --spid=… --cat=… --force)
+    await sb.from('jimscanner_toss_listings').update({ inspection_status: 'RECAT_FAILED', updated_at: new Date().toISOString() }).eq('toss_product_id', p.tossId)
+    console.log(`  ↪ 재등록 실패(기존 ${p.tossId} 는 삭제됨, DB RECAT_FAILED): ${reg.error} → 수동: node scripts/toss-register.mjs --spid=${p.spid} --cat=${leaf.id} --force --show`)
+    return false
+  }
+  console.log(`  ↪ 재등록 OK id=${reg.tossId} | ${reg.category} | ${reg.options}`)
+  pending.push({ spid: p.spid, name: p.name, source: p.source, tossId: reg.tossId, t0: Date.now(), category: reg.category, options: reg.options, recat: true })
+  return true
+}
+
 const cands = await candidates()
 const plan = cands.slice(0, LIMIT)
 console.log(`후보 ${cands.length}건 (sources=${SOURCES.join(',')}, min-sold=${MIN_SOLD}) → 이번 실행 ${plan.length}건${LIST ? ' [계획만]' : ''} · 검수 창 ${PARALLEL}건 · 대기 최대 ${WAIT_MAX_MIN}분`)
@@ -130,6 +215,10 @@ let okCount = 0, failStreak = 0, timeoutStreak = 0, halt = null
 const results = []
 const pending = await resumePending()
 if (pending.length) console.log(`이전 실행의 검수 대기 ${pending.length}건 이어서 추적: ${pending.map((p) => p.tossId).join(', ')}`)
+for (const r of await pastRejects()) {
+  console.log(`\n이전 반려 ${r.tossId} ${String(r.name || '').slice(0, 36)} — ${JSON.stringify((r.reasons ?? []).map((x) => x?.title)).slice(0, 60)}`)
+  if (!(await tryRecat(r, r.reasons))) await tryRethumb(r, r.reasons)
+}
 let idx = 0
 const settle = (p, insp) => {
   const mins = +(((Date.now() - p.t0) / 60000).toFixed(1))
@@ -147,6 +236,13 @@ while (idx < plan.length || pending.length) {
     const c = plan[idx++]
     console.log(`\n[${idx}/${plan.length}] ${c.spid} ${c.name.slice(0, 40)} — 등록 중… (검수 대기 ${pending.length}건)`)
     const reg = await runRegister(c.spid)
+    if (reg.skip) {
+      // 옵션 자동값 없음 — 상품 문제가 아니라 제목 정보 부족이라 실패 streak 에 안 셈. 로그에 남겨 나중에 --opts 로 수동 등록
+      console.log(`  ↷ 건너뜀(${reg.skip}): ${reg.error}`)
+      log({ spid: c.spid, name: c.name, source: c.source, step: 'register', ok: false, skip: reg.skip, error: reg.error })
+      results.push({ ...c, result: reg.skip })
+      continue
+    }
     if (!reg.ok) {
       failStreak++
       console.log(`  ✗ 등록 실패: ${reg.error}`)
@@ -166,7 +262,12 @@ while (idx < plan.length || pending.length) {
   await sleep(60_000)
   for (const p of [...pending]) {
     const insp = await checkInspection(p.tossId)
-    if (insp.inspection && insp.inspection !== 'LLM_INSPECTION_READY') { pending.splice(pending.indexOf(p), 1); settle(p, insp) }
+    if (insp.inspection && insp.inspection !== 'LLM_INSPECTION_READY') {
+      pending.splice(pending.indexOf(p), 1)
+      // 카테고리 불일치 → 추천 카테고리로 재등록(1회), 썸네일 "여백" → strict 패키지샷 교체 재검수(1회) — 둘 다 실패 streak 에 안 셈
+      if (insp.inspection === 'REJECT' && (await tryRecat(p, insp.reasons) || await tryRethumb(p, insp.reasons))) continue
+      settle(p, insp)
+    }
     else if (Date.now() - p.t0 > WAIT_MAX_MIN * 60_000) { pending.splice(pending.indexOf(p), 1); settle(p, { inspection: 'TIMEOUT', item: null, reasons: null, err: insp.err }) }
   }
   if (!halt && failStreak >= MAX_FAIL) halt = `연속 실패 ${failStreak}건`

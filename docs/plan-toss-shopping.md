@@ -177,3 +177,9 @@ jimscanner_coupang_listings (APPROVED, source upickb2b/ggsan, request_payload)
 **일괄 러너 `scripts/toss-register-batch.mjs`.** 후보 = 쿠팡 APPROVED·auto_paused=false·request_payload 있음·매입처 ∈ ggsan/upickb2b/bio77/kwholesale·MSP>0·토스 미등록(spid)·토스에 같은 상품명 없음. 우선순위 = 최근 90일 쿠팡 판매수량 → 매입처 순 → 가격. 1건 `--show` 등록 → `--check` 60초 폴링(최대 25분) → COMPLETE/REJECT 기록 → 다음. 연속 실패 3건 또는 TIMEOUT 이면 중단. 로그 `_workspace/toss-batch-<KST날짜>.jsonl`. `--list` 로 계획만 출력. 화장품스토리(cmtstory)·웰루트 농산물은 카테고리/고시 미지원이라 후보에서 제외(후속: 화장품 카테고리·고시 매핑).
 
 **이날 결과.** 단건: 위드바이오 유산균·웰러스 햄프씨드·탱글 석류젤리·네이처그랜드 비타민B 통과, 김소형원방 다이어트 카페는 "여백" 반려 → `--rethumb`(세로 단일 박스 구도)로 교체 재검수. 일괄 20건 결과는 CLAUDE.md 변경 이력 / 로그 참조.
+
+### 3.8.1 추가(2026-10-14 새벽) — 일반 식품·반려 자동 조치·가격 보정
+- **일반 식품 카테고리**: `scripts/toss-dump-food-leaves.mjs` 가 토스 식품(50995) 트리 전체를 BFS 로 받아 `scripts/lib/toss-food-leaves.json`(leaf 1,280개) 에 캐시. `toss-register.mjs` CAT_RULES 에 식용유(올리브유·들기름·참기름·기타오일, 캡슐 제품 제외)·잡곡/씨앗·꿀/시럽·미숫/선식·건과/견과·차/커피·식초·음료/간식 규칙 추가(건강식품 규칙 뒤, 환/분말 규칙 앞). 모든 식품 leaf 템플릿이 PROCESSED_FOOD 고시를 받으므로 고시 로직은 그대로.
+- **반려 자동 조치(`toss-register-batch.mjs`)**: "카테고리 불일치" → 반려 메시지의 추천 경로를 `lib/toss-categories.mjs` 로 leaf id 로 풀어 기존 상품 삭제 후 `--cat --force` 재등록(삭제 전 `--dry --require-opts` 로 옵션 확보 확인, 미확보면 보류). "여백" → `--rethumb --strict --apply` 풀블리드 패키지샷 교체 재검수(1회). 둘 다 실패 streak 에 안 셈. 시작 시 최근 24h 반려분도 같은 조치.
+- **옵션 가드**: 제목/속성에서 수량·중량·용량·캡슐 수를 못 찾아 자리값("1개")이 되는 상품은 `--require-opts`(러너 기본) 로 등록하지 않고 `OPTS_UNKNOWN` 건너뜀(로그). 매입처 실시간 품절도 `SOLD_OUT` 건너뜀. 파싱 개선: "10g x 30포"의 g 는 낱개 중량(mg 만 함량으로 제외), 액상 키워드면 g→ml 대체, 쿠팡 속성(개당 용량/중량) 폴백, 택1 우선순위 개당 수량→캡슐/정(포 단위)→중량/용량.
+- **수수료 차이 가격 보정(사용자 요청)**: `lib/toss-price.mjs` — 토스가 = 쿠팡가 × (1−f_c−1/11)/(1−f_t−1/11), f_c=쿠팡 매입처별(10.6%/화장품 9.6%), f_t=토스 11% → 같은 순이익(기본 약 +0.5%, 10원 올림, MSP 이상). 등록기 기본 적용(`--no-fee-adjust` 로 끔), 기등록분은 `scripts/toss-reprice.mjs`(정가→판매가 순, 실패 시 정가 되돌림, 쿠팡 STOPPED/품절은 보류) 로 일괄 반영(2026-10-14 41건). 쿠팡 가격이 바뀌면 다시 돌리면 된다(크론 미연결 — 후속).
