@@ -275,7 +275,7 @@ export default async function CoupangPublishPage({
             ) : (
               <div>최근 주문 동기화: <strong>{fmtDate(cronStatus.ordersLastSync)}</strong></div>
             )}
-            <div>누적 주문: <strong>{cronStatus.ordersTotal.toLocaleString()}</strong> · <a href="/admin/coupang-orders" className="text-blue-600 hover:underline">→ 주문 관리</a></div>
+            <div>누적 주문: <strong>{cronStatus.ordersTotal.toLocaleString()}</strong> · <a href="/admin/orders?market=coupang" className="text-blue-600 hover:underline">→ 주문 관리</a></div>
           </div>
         </div>
 

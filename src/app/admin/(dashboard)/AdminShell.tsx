@@ -183,35 +183,18 @@ const NAV_GROUPS: NavGroup[] = [
         icon: '🅒',
         match: (p) => p.startsWith('/admin/coupang-publish'),
       },
+    ],
+  },
+  {
+    // 2026-10-13 쿠팡·네이버·토스 주문 메뉴를 하나로 통합(마켓 필터 ?market=). 옛 /admin/{coupang,naver,toss}-orders 는 리다이렉트.
+    id: 'orders',
+    label: '주문 · 매입',
+    items: [
       {
-        href: '/admin/coupang-orders',
-        label: '주문 ↔ 매입',
+        href: '/admin/orders',
+        label: '주문 ↔ 매입 (전 마켓)',
         icon: '📦',
-        match: (p) => p.startsWith('/admin/coupang-orders'),
-      },
-    ],
-  },
-  {
-    id: 'naver',
-    label: '네이버 스마트스토어',
-    items: [
-      {
-        href: '/admin/naver-orders',
-        label: '주문 ↔ 매입',
-        icon: '🟢',
-        match: (p) => p.startsWith('/admin/naver-orders'),
-      },
-    ],
-  },
-  {
-    id: 'toss',
-    label: '토스쇼핑',
-    items: [
-      {
-        href: '/admin/toss-orders',
-        label: '주문 ↔ 매입',
-        icon: '🔵',
-        match: (p) => p.startsWith('/admin/toss-orders'),
+        match: (p) => p.startsWith('/admin/orders') || p.startsWith('/admin/coupang-orders') || p.startsWith('/admin/naver-orders') || p.startsWith('/admin/toss-orders'),
       },
     ],
   },

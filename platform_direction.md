@@ -100,7 +100,7 @@
 | | 수집 상태 | `/admin/trend-radar/sources` | 수집 크론 헬스 |
 | | 핀 (채택 후보) | `/admin/trend-radar/pins` | 수동 핀 |
 | **쿠팡 자동등록** | 등록 상품 관리 | `/admin/coupang-publish` | 등록 상품 상태·가격·노출·마진 관리 |
-| | 주문 ↔ 매입 | `/admin/coupang-orders` | 쿠팡 주문 ↔ ggsan 발주 매칭 |
+| | 주문 ↔ 매입 (전 마켓) | `/admin/orders` | 쿠팡·네이버·토스 주문 ↔ 매입처 발주를 한 화면에(마켓 필터 `?market=`, 통합 실수익 카드 — 2026-10-13). 옛 `/admin/{coupang,naver,toss}-orders`는 리다이렉트 |
 | **메타** | 개선 제안 | `/admin/improvement-ideas` | 기능 백로그 |
 
 > 사이드바에 없는 라우트(rates, forwarders, blog, content, deals, analytics, search-console 등)는

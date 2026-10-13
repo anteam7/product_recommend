@@ -11,7 +11,7 @@
 |---|---|---|---|
 | `Naver-Orders-Sync` | `scripts/local-cron-naver-orders-sync.mjs` | 매시간 07분 | 주문 수집 → `jimscanner_naver_orders` upsert |
 
-### 주문 ↔ 매입 관리 메뉴 (`/admin/naver-orders`, 2026-07-03)
+### 주문 ↔ 매입 관리 메뉴 (`/admin/orders?market=naver` — 2026-07-03 신설, 2026-10-13 전 마켓 통합 페이지 `/admin/orders`로 합침, 옛 `/admin/naver-orders`는 리다이렉트)
 쿠팡 `/admin/coupang-orders` 미러. 흐름: 주문 자동수집 → 매입상태 **발주완료** 선택 시 **네이버 발주확인 자동 호출**(`POST /v1/pay-order/seller/product-orders/confirm`) → 💳 결제진행(order-server가 쿠팡/네이버 id 자동판별, 유픽·ggsan 주문서 자동작성) → 매입처 주문번호·송장 기록(내부).
 - 발주확인 전 건은 네이버 상태 칸에 **⚠ 발주확인 필요** 배지 (PAYED + placeOrderStatus≠OK)
 - **Vercel IP 함정**: 프로덕션 어드민의 발주확인은 Vercel IP라 GW.IP_NOT_ALLOWED → 브라우저가 로컬 order-server `POST /naver-confirm?id=`(집 PC = 허용 IP)로 자동 폴백. 이 PC에서 어드민을 열어야 발주확인 가능

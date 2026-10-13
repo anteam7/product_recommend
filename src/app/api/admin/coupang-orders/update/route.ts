@@ -188,7 +188,7 @@ export async function POST(request: NextRequest) {
     summary: `주문#${order.order_id} ${changes.join(', ')} (${(order.product_name ?? '').slice(0, 24)})`,
     metadata: { ...update },
   })
-  revalidatePath('/admin/coupang-orders')
+  revalidatePath('/admin/orders'); revalidatePath('/admin/coupang-orders')
   return NextResponse.json({
     ok: true,
     purchase_status: update.purchase_status ?? order.purchase_status,

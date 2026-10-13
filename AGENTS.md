@@ -66,7 +66,7 @@
 
 | 영역 | 위치 |
 |------|------|
-| 쿠팡 등록/운영 | `src/app/admin/(dashboard)/coupang-publish`, `coupang-orders`, `scripts/coupang-*.mjs`, `src/app/api/cron/coupang-*` |
+| 쿠팡 등록/운영 | `src/app/admin/(dashboard)/coupang-publish`, `orders`(전 마켓 주문↔매입 통합, 2026-10-13), `scripts/coupang-*.mjs`, `src/app/api/cron/coupang-*` |
 | 발굴(트렌드) | `src/app/admin/(dashboard)/trend-radar/**`, `src/app/api/cron/collect-*` |
 | 소싱(ggsan) | `scripts/ggsan-*.mjs`, ggsan 테이블·RPC (본업 DB 공유) |
 | 본업 잔재 | 사이드바 미노출 라우트 (`SEPARATION_NOTES.md` 참조) |

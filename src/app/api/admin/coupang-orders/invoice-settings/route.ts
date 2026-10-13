@@ -75,7 +75,7 @@ export async function POST(request: NextRequest) {
     summary: `송장 자동등록 ${auto_upload ? 'ON(자동)' : 'OFF(반자동)'}`,
     metadata: { auto_upload },
   })
-  revalidatePath('/admin/coupang-orders')
+  revalidatePath('/admin/orders'); revalidatePath('/admin/coupang-orders')
 
   return NextResponse.json({
     ok: true,

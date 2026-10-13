@@ -38,7 +38,7 @@ export default function SyncOrdersButton() {
         className="inline-flex items-center gap-1 px-3 py-1.5 rounded bg-emerald-600 text-white text-xs font-semibold hover:bg-emerald-700 disabled:opacity-60"
         title="매시 정각 자동 수집을 기다리지 않고 지금 쿠팡 주문을 즉시 가져옵니다(집 PC 큐 실행, 수 초~수십 초 소요)"
       >
-        🔄 지금 수집{busy ? '…' : ''}
+        🔄 쿠팡 주문 지금 수집{busy ? '…' : ''}
       </button>
       {msg && <span className={`text-[11px] ${msgErr ? 'text-rose-600' : 'text-emerald-600'}`}>{msg}</span>}
     </span>

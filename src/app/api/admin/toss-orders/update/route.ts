@@ -117,6 +117,6 @@ export async function POST(req: NextRequest) {
     summary: `토스주문#${order.order_product_id} ${changes.join(', ')} (${(order.product_name ?? '').slice(0, 24)})`,
     metadata: { ...update },
   }) } catch { /* 감사 로그 실패해도 저장은 유지 */ }
-  revalidatePath('/admin/toss-orders')
+  revalidatePath('/admin/orders'); revalidatePath('/admin/toss-orders')
   return NextResponse.json({ ok: true })
 }
