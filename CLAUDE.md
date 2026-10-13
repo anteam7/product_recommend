@@ -15,9 +15,9 @@
 | 2026-06-13 | 초기 구성 | 전체 | Loop Engineering 적용 + 유픽→네이버 파이프라인 신규 구축 |
 | 2026-07-22 | 쿠팡 소싱 스카우트 구축 | extension/, /api/ext/scout, scripts/scout-agent·analyze.mjs | 크롬 확장(손)↔로컬 Claude 두뇌로 수요 발굴 — docs/scout-protocol.md |
 | 2026-10-13 | 실수익 공식 정정: 부가세 = (결제액−매입원가)÷11(매입세액 공제) + 쿠팡 수수료 매입처별(화장품 9.6%) — 판매내역(쿠팡·네이버)·등록보드 공통 모듈화 + 단위테스트(`npm run test:ts`); 쿠팡 시세 조회에 Aside 브라우저 백엔드(aside.exe repl) 추가, CDP 9222는 폴백 | src/lib/margin.ts·coupang/fee.ts(신규), coupang/price.ts, admin coupang-orders·naver-orders, api coupang-publish/update, scripts/lib/market-price.mjs | 화장품스토리 주문이 실제 10% 순마진인데 화면에 2%로 과소 표시(옛 공식: 결제액÷11·10.6% 고정); 시세 조회의 크롬 워밍업 의존 제거(사용자 요청) |
+| 2026-10-13 | 주문 ↔ 매입 메뉴를 전 마켓 통합(`/admin/orders`): 쿠팡·네이버·토스 주문을 한 목록에 합치고 마켓 칩(`?market=`)·기간·매입상태·검색·정렬, 매출·실수익 카드 통합 + 마켓별 분해, 기간 무관 "처리 대기" 배너(미발주·입금대기·확인필요). 옛 세 라우트는 리다이렉트, 마켓별 셀은 `orders/{coupang,naver,toss}/`로 이동, 매입가 셀 공통화(CostCell), 순수 모델 단위테스트 | src/app/admin/(dashboard)/orders/*(신규), coupang-orders·naver-orders·toss-orders/page.tsx(리다이렉트), AdminShell, src/lib/toss/fee.ts(신규), api */update revalidatePath | 마켓별로 메뉴가 나뉘어 다른 마켓 주문을 놓치는 일이 반복(사용자 요청) |
 
 ---
-| 2026-10-13 | 주문 ↔ 매입 메뉴를 전 마켓 통합(`/admin/orders`): 쿠팡·네이버·토스 주문을 한 목록에 합치고 마켓 칩(`?market=`)·기간·매입상태·검색·정렬, 매출·실수익 카드 통합 + 마켓별 분해, 기간 무관 "처리 대기" 배너(미발주·입금대기·확인필요). 옛 세 라우트는 리다이렉트, 마켓별 셀은 `orders/{coupang,naver,toss}/`로 이동, 매입가 셀 공통화(CostCell), 순수 모델 단위테스트 | src/app/admin/(dashboard)/orders/*(신규), coupang-orders·naver-orders·toss-orders/page.tsx(리다이렉트), AdminShell, src/lib/toss/fee.ts(신규), api */update revalidatePath | 마켓별로 메뉴가 나뉘어 다른 마켓 주문을 놓치는 일이 반복(사용자 요청) |
 
 ## 핵심 규칙
 
