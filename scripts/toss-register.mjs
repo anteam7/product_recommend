@@ -66,6 +66,9 @@ const CAT_RULES = [
   // 정제형 삼: 산양삼 60정이 홍삼진액/파우치(59995)로 가 '개당 중량 0g' + 카테고리 불일치 반려(2026-10-14) → 홍삼 아닌 삼 정제는 기타영양제, 홍삼 N정은 홍삼캡슐
   [/(산양삼|장뇌삼|산삼|인삼|수삼)(?!.*홍삼).*\d\s*(정|캡슐|환)(?![가-힣])/, 59807], [/홍삼.*\d\s*(정|캡슐)(?![가-힣])/, 59999],
   [/홍삼.*(젤리|캔디)|(젤리|캔디).*홍삼/, 59997], [/홍삼.*캡슐/, 59999], [/홍삼.*환(?![경장])/, 60001], [/홍삼.*(절편|정과)/, 59993], [/홍삼.*(농축|홍삼정(?!과))/, 59991], [/홍삼|인삼|고려삼/, 59995],
+  // 제형 우선(2026-10-14 저녁): 분말·환 상품이 재료 이름(비트·양배추·도라지…) 때문에 건강즙 leaf(용량 템플릿)로 가 OPTS_UNKNOWN 되던 것 — wellroot 비트 분말 150g·발효 복분자 농축 분말·도라지 맥문동 환
+  [/(?=.*(분말|가루|파우더))(?=.*(흑마늘|마늘|양배추|도라지|배즙|흑염소|녹용|장어|사과|비트|칡|헛개|호박|양파|매실|복분자|아로니아|오디|포도|백수오|하수오|abc))/i, 60005],
+  [/(?=.*환(?![가-힣경장]))(?=.*(흑마늘|마늘|양배추|도라지|배즙|흑염소|녹용|장어|사과|비트|칡|헛개|호박|양파|매실|복분자|아로니아|오디|포도|백수오|하수오))/, 60007],
   // 건강즙 (종류별)
   [/흑마늘|마늘.*(즙|진액)/, 59949], [/양배추/, 59971], [/도라지|배즙/, 59953], [/흑염소|녹용|장어/, 59947], [/사과즙|사과.*즙/, 59963], [/비트/, 59961], [/칡/, 59977],
   [/헛개/, 59981], [/호박.*즙|호박즙/, 59983], [/양파.*즙|양파즙/, 59973], [/매실/, 59951], [/복분자/, 59957], [/아로니아/, 59967], [/오디/, 59975], [/포도즙|포도.*즙/, 59979], [/abc\s*(즙|주스)/i, 59943],
@@ -169,7 +172,12 @@ function parseUnits(title, itemName, attrs, extra) {
   const powder = /분말|가루|파우더/.test(title || '')
   const singleNeg = /진액|보액|액상|앰플|스틱|포(?![가-힣])|정(?![가-힣])|캡슐|환(?![가-힣])|알약|정제|젤리|티백|박스|세트|회분/.test(title || '') || (!powder && /즙/.test(title || ''))
   const single = !per && !capEff && !bottles && (!pack || pack[1] === '1') && !!(volM || wtM) && /분말|가루|파우더|청(?![가-힣])|꿀|오일|스프레이|흑마늘|케일|곡물|견과|씨드|원두/.test(title || '') && !singleNeg
-  return { liquid, qty: pack ? pack[1] : (attrQty || '1'), per: per ? per[1] : (bottles ? bottles[1] : null), perUnit: per ? (per[2] === '개입' ? '개' : per[2]) : (bottles ? '개' : null), perTitle: perTitle ? perTitle[1] : null, perTitleUnit: perTitle ? (perTitle[2] === '개입' ? '개' : perTitle[2]) : null, cap: capEff ? capEff[1] : null, capUnit: capEff ? capEff[2] : null, single, vol: volM ? volM[1] : null, volUnit: volM ? volM[2].toLowerCase() : null, wt: wtM ? wtM[1] : null, wtUnit: wtM ? wtM[2].toLowerCase() : null }
+  // 키워드 목록에 없는 단일 용기 식품(루피니빈 500g·밥다시마 110g·건조 톳 60g·용융소금 140g·피쉬콜라겐 펩타이드 60g — 2026-10-14 저녁 wellroot OPTS_UNKNOWN)도
+  // g/kg 50 이상·ml 100 이상이면 용기 1개로 본다. mg(함량)·소량(스틱 1개 분)은 제외, 진액·포·정·박스 류는 singleNeg 그대로
+  const grams = wtM ? (wtM[2].toLowerCase() === 'kg' ? Number(wtM[1]) * 1000 : wtM[2].toLowerCase() === 'g' ? Number(wtM[1]) : 0) : 0
+  const mls = volM ? (volM[2].toLowerCase() === 'l' ? Number(volM[1]) * 1000 : Number(volM[1])) : 0
+  const singleBulk = !per && !capEff && !bottles && (!pack || pack[1] === '1') && !singleNeg && (grams >= 50 || mls >= 100)
+  return { liquid, qty: pack ? pack[1] : (attrQty || '1'), per: per ? per[1] : (bottles ? bottles[1] : null), perUnit: per ? (per[2] === '개입' ? '개' : per[2]) : (bottles ? '개' : null), perTitle: perTitle ? perTitle[1] : null, perTitleUnit: perTitle ? (perTitle[2] === '개입' ? '개' : perTitle[2]) : null, cap: capEff ? capEff[1] : null, capUnit: capEff ? capEff[2] : null, single: single || singleBulk, vol: volM ? volM[1] : null, volUnit: volM ? volM[2].toLowerCase() : null, wt: wtM ? wtM[1] : null, wtUnit: wtM ? wtM[2].toLowerCase() : null }
 }
 function forceUnit(value, unitValues) {
   if (!unitValues?.length) return value
@@ -421,8 +429,8 @@ async function buildPayload(listing, refs) {
   const name = stripBanned(cleanName(arg('name') || listing.registered_title || p.sellerProductName))
   const brand = (listing.brand || p.brand || '').replace(/[^0-9a-zA-Z가-힣 *()\-_+/.,]/g, '').trim().slice(0, 50) || null
   if (brand && /없음|중국|기타|OEM|협력사/i.test(brand)) throw new Error(`브랜드 금지어: ${brand}`)
-  const categoryId = parseInt(arg('cat', ''), 10) || mapCategory(`${name} ${listing.display_category_name || ''}`)
-  const tpl = await tossConstraintTemplate(categoryId)
+  let categoryId = parseInt(arg('cat', ''), 10) || mapCategory(`${name} ${listing.display_category_name || ''}`)
+  let tpl = await tossConstraintTemplate(categoryId)
   if (!tpl.ok) throw new Error(`제약 템플릿 조회 실패 ${JSON.stringify(tpl.error)}`)
   if (!(tpl.data?.productNoticeInfoTemplateTypes ?? []).includes('PROCESSED_FOOD')) throw new Error(`카테고리 ${categoryId}(${tpl.data?.categoryName})는 PROCESSED_FOOD 고시 불가: ${JSON.stringify(tpl.data?.productNoticeInfoTemplateTypes)}`)
   const g = gPre || (listing.source === 'ggsan' ? await ggsanInfo(listing.source_goods_no) : null)
@@ -441,7 +449,13 @@ async function buildPayload(listing, refs) {
   const legacy = [arg('opt-qty') ? `수량=${arg('opt-qty')}` : null, arg('opt-unit') ? `개당 수량=${arg('opt-unit')}` : null].filter(Boolean).join(';')
   OPT_WARN.length = 0
   const noticeText = (it.notices || []).filter((n) => /제품명|포장단위/.test(n.noticeCategoryDetailName || '')).map((n) => n.content).filter((c) => c && !/참조/.test(c)).join(' ')
-  const options = buildOptions(tpl.data, { title: listing.registered_title, itemName: it.itemName, attrs: it.attributes, extra: noticeText }, [arg('opts'), legacy].filter(Boolean).join(';'))
+  const optCtx = { title: listing.registered_title, itemName: it.itemName, attrs: it.attributes, extra: noticeText }, optArg = [arg('opts'), legacy].filter(Boolean).join(';')
+  let options = buildOptions(tpl.data, optCtx, optArg)
+  // 제형 안전망: 제목에 N정/캡슐이 있는데 템플릿에 캡슐/정 옵션이 없으면(양배추정 90정 → 양배추즙 leaf 의 용량 템플릿, 2026-10-14) 기타영양제(59807)로 바꿔 다시 짠다 — --cat 지정 시 제외
+  if (OPT_WARN.length && !arg('cat') && categoryId !== 59807 && /\d\s*(정|캡슐)(?![가-힣])/.test(listing.registered_title || '') && !(tpl.data?.categorySalesOptions ?? []).some((o) => /캡슐|정/.test(o.key))) {
+    const alt = await tossConstraintTemplate(59807)
+    if (alt.ok) { console.log('  ℹ 제형(정/캡슐) ≠ 카테고리 템플릿(' + (tpl.data?.categoryName || categoryId) + ') → 기타영양제(59807)로 변경'); categoryId = 59807; tpl = alt; OPT_WARN.length = 0; options = buildOptions(alt.data, optCtx, optArg) }
+  }
 
   // --require-opts: 자리값으로 채운 옵션이 있으면 등록하지 않고 종료(코드 3) — 일괄 러너가 OPTS_UNKNOWN 으로 건너뛰고 로그에 남긴다
   if (has('require-opts') && OPT_WARN.length) { console.error(`OPTS_UNKNOWN: ${OPT_WARN.join('; ')} — 제목/속성에서 수량·중량·용량을 못 찾음. 수동: --opts="키=값;…"`); process.exit(3) }
