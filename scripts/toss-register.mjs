@@ -134,7 +134,11 @@ function parseUnits(title, itemName, attrs, extra) {
   const cap = t.match(/(\d+)\s*(정|캡슐|환)/)
   // 병·통·캔으로만 세는 상품(알부민 25ml x 30병, 아토셀 500ml x 3병): 정/캡슐/포 토큰이 없으면 병 수를 낱개 수(N개)로 본다 —
   // 2026-10-14 "25ml x 30병"이 수량 30개 + 캡슐/정 30정으로 올라가 반려·수동검수
-  const bottles = !per && !cap ? t.match(/(\d+)\s*(병|통|캔)(?![가-힣])/) : null
+  // 제목에 병·통·캔이 있고 정/캡슐/포 토큰이 없으면 제목이 진짜다 — 쿠팡 itemName '2정 1박스'(속성 '2 회분'에서 생성)가 정 수로 잡혀 '1L x 2병'의 병 수를 못 세던 문제(2026-10-14 오미자 진액)
+  const capTitle = (title || '').match(/(\d+)\s*(정|캡슐|환)/)
+  const bottlesTitle = !perTitle && !capTitle ? (title || '').match(/(\d+)\s*(병|통|캔)(?![가-힣])/) : null
+  const bottles = bottlesTitle || (!per && !cap ? t.match(/(\d+)\s*(병|통|캔)(?![가-힣])/) : null)
+  const capEff = bottlesTitle ? null : cap
   const vol = t.match(/(\d+(?:\.\d+)?)\s*(ml|mL|ML|l|L)\b/)
   // g/kg 는 "10g x 30포"(식품 스틱) 처럼 x 앞에 와도 낱개 중량이다. mg 만 "1,000mg x 120정"(함량)이라 x 앞이면 제외 (2026-10-13 일반 식품 확장)
   // 경계: 끝/비영문/"x숫자"("15gx30포" 처럼 붙여 쓴 경우) — 영단어 안의 g(gram 등)는 제외
@@ -151,7 +155,12 @@ function parseUnits(title, itemName, attrs, extra) {
   const attrQty = attrs?.find((a) => a.attributeTypeName === '수량')?.attributeValueName?.match(/(\d+)/)?.[1]
   const volM = vol || attrVol, wtM = wt || attrWt
   const liquid = /즙|주스|진액|액상|음료|오일|시럽|식초|드링크|워터|에센스/.test(title || '') // g→ml 대체 허용 여부(가루·정제는 제외)
-  return { liquid, qty: pack ? pack[1] : (attrQty || '1'), per: per ? per[1] : (bottles ? bottles[1] : null), perUnit: per ? (per[2] === '개입' ? '개' : per[2]) : (bottles ? '개' : null), perTitle: perTitle ? perTitle[1] : null, perTitleUnit: perTitle ? (perTitle[2] === '개입' ? '개' : perTitle[2]) : null, cap: cap ? cap[1] : null, capUnit: cap ? cap[2] : null, vol: volM ? volM[1] : null, volUnit: volM ? volM[2].toLowerCase() : null, wt: wtM ? wtM[1] : null, wtUnit: wtM ? wtM[2].toLowerCase() : null }
+  // 단일 용기 상품(분말·가루·청·꿀·오일·스프레이·통흑마늘·케일…): 낱개(포·정·병) 토큰이 없고 중량/용량만 있으면 '개당 수량 1개'(용기 1개)가 사실이지 자리값이 아니다.
+  // 진액·즙·보액(2100ml = 70ml x 30포 박스)·정제·스틱 류는 낱개 수를 모르는 것이므로 제외 — 2026-10-14 OPTS_UNKNOWN 48건 중 9건이 이 유형으로 매 회차 건너뜀
+  const powder = /분말|가루|파우더/.test(title || '')
+  const singleNeg = /진액|보액|액상|앰플|스틱|포(?![가-힣])|정(?![가-힣])|캡슐|환(?![가-힣])|알약|정제|젤리|티백|박스|세트|회분/.test(title || '') || (!powder && /즙/.test(title || ''))
+  const single = !per && !capEff && !bottles && (!pack || pack[1] === '1') && !!(volM || wtM) && /분말|가루|파우더|청(?![가-힣])|꿀|오일|스프레이|흑마늘|케일|곡물|견과|씨드|원두/.test(title || '') && !singleNeg
+  return { liquid, qty: pack ? pack[1] : (attrQty || '1'), per: per ? per[1] : (bottles ? bottles[1] : null), perUnit: per ? (per[2] === '개입' ? '개' : per[2]) : (bottles ? '개' : null), perTitle: perTitle ? perTitle[1] : null, perTitleUnit: perTitle ? (perTitle[2] === '개입' ? '개' : perTitle[2]) : null, cap: capEff ? capEff[1] : null, capUnit: capEff ? capEff[2] : null, single, vol: volM ? volM[1] : null, volUnit: volM ? volM[2].toLowerCase() : null, wt: wtM ? wtM[1] : null, wtUnit: wtM ? wtM[2].toLowerCase() : null }
 }
 function forceUnit(value, unitValues) {
   if (!unitValues?.length) return value
@@ -187,7 +196,7 @@ function buildOptions(template, ctx, optsArg) {
     if (/중량/.test(key)) return u.wt ? `${u.wt}${u.wtUnit}` : null
     // 템플릿에 '개당 수량' 이 없는 카테고리(다이어트식품 등)는 '개당 캡슐/정' 에 낱개(포/스틱)를 넣는다 — 단위는 forceUnit 이 템플릿 허용값으로 맞춤
     if (/캡슐|정/.test(key)) return u.perTitle ? `${u.perTitle}${u.perTitleUnit}` : (u.cap ? `${u.cap}${u.capUnit}` : null)
-    if (/개당 수량|수량/.test(key)) return u.per ? `${u.per}${u.perUnit}` : null
+    if (/개당 수량|수량/.test(key)) { if (u.per) return `${u.per}${u.perUnit}`; if (u.single) { console.log('  ℹ 단일 용기 상품(분말·청·꿀 등) → 개당 수량 1개'); return '1개' } return null }
     return null
   }
   const out = []
@@ -207,6 +216,7 @@ function buildOptions(template, ctx, optsArg) {
     const rank = (o) => (/개당 수량/.test(o.key) ? 0 : /캡슐|정/.test(o.key) ? 1 : 2)
     const ordered = u.per ? [...oneOf].sort((a, b) => rank(a) - rank(b)) : oneOf
     if (!chosen) for (const o of ordered) { const a = auto(o.key); if (a) { chosen = o; value = a; break } }
+    if (!chosen && u.single) { const o = oneOf.find((x) => /개당 수량/.test(x.key)); if (o) { chosen = o; value = '1개'; console.log('  ℹ 단일 용기 상품(분말·청·꿀 등) → 개당 수량 1개') } }
     if (!chosen) { chosen = oneOf.find((o) => /개당 수량/.test(o.key)) || oneOf[0]; value = '1' + (chosen.unitValues?.[0] || '개'); console.log(`  ⚠ 택1 옵션 자동값 없음 → ${chosen.key}=${value}`); OPT_WARN.push(`${chosen.key}→${value}`) }
     out.push({ groupName: chosen.key, valueName: forceUnit(value, chosen.unitValues) })
   }
