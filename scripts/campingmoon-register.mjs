@@ -185,9 +185,10 @@ let rows = await fetchAll(() => sb.from(TABLE).select('*').eq('status', 'active'
 if (ONLY.length) rows = rows.filter((r) => ONLY.includes(r.product_no))
 const allItems = await fetchAll(() => sb.from(ITEMS).select('*').eq('status', 'active').order('item_code'))
 const itemsBy = new Map(); for (const it of allItems) { if (!itemsBy.has(it.product_no)) itemsBy.set(it.product_no, []); itemsBy.get(it.product_no).push(it) }
-const { data: existing, error: exErr } = await sb.from('jimscanner_coupang_listings').select('source_goods_no, status').eq('source', SOURCE)
-if (exErr) { console.error('기등록 조회 실패:', exErr.message); process.exit(1) }
-const existingSet = new Set((existing ?? []).filter((r) => r.status !== 'FAILED').map((r) => r.source_goods_no))
+let existing
+try { existing = await fetchAll(() => sb.from('jimscanner_coupang_listings').select('source_goods_no, status, last_synced_at').eq('source', SOURCE).order('id')) } catch (e) { console.error('기등록 조회 실패:', e.message); process.exit(1) }
+// FAILED 는 24시간 뒤에만 재시도 — 드립 루프(10분마다 N건)가 같은 실패 건으로 자리를 채우지 않게
+const existingSet = new Set((existing ?? []).filter((r) => r.status !== 'FAILED' || (r.last_synced_at && Date.now() - Date.parse(r.last_synced_at) < 24 * 3600e3)).map((r) => r.source_goods_no))
 const skipped = []
 const candidates = rows.filter((r) => {
   if (existingSet.has(r.product_no)) { skipped.push([r.product_no, '이미 등록됨']); return false }
@@ -200,15 +201,21 @@ const candidates = rows.filter((r) => {
   if (block) { skipped.push([r.product_no, `상품명 🚫 ${block.key}("${block.hit}")`]); return false }
   return true
 })
-const targets = LIMIT > 0 ? candidates.slice(0, LIMIT) : candidates
-console.log(`=== 캠핑문 → 쿠팡 등록 ${DRY ? '[DRY]' : ''}${NO_APPROVAL ? ' [승인요청 안 함]' : ''} · 할인기준 ${DISCOUNT_BASE} · 수수료 ${(COUPANG_FEE * 100).toFixed(1)}% ===`)
-console.log(`대상 ${targets.length}건 (후보 ${candidates.length} · 제외 ${skipped.length} · 기등록 ${existingSet.size})`)
+// --limit=N 은 "성공 N건"(보류·실패는 자리를 안 먹는다 — 드립 루프용). 후보는 순서대로 훑다가 N건 성공하면 멈춘다
+const targets = candidates
+console.log(`=== 캠핑문 → 쿠팡 등록 ${DRY ? '[DRY]' : ''}${NO_APPROVAL ? ' [승인요청 안 함]' : ''} · 할인기준 ${DISCOUNT_BASE} · 수수료 ${(COUPANG_FEE * 100).toFixed(1)}%${LIMIT ? ` · 이번 실행 성공 ${LIMIT}건까지` : ''} ===`)
+console.log(`후보 ${candidates.length}건 (제외 ${skipped.length} · 기등록 ${existingSet.size})`)
 if (skipped.length) { const g = skipped.reduce((m, [no, why]) => { const k = why.replace(/\("[^"]*"\)|\(.*\)$/g, ''); (m[k] ??= []).push(no); return m }, {}); for (const [why, nos] of Object.entries(g)) console.log(`  · ${why}: ${nos.length}건 (${nos.slice(0, 8).join(',')}${nos.length > 8 ? '…' : ''})`) }
 console.log('')
 
 const summary = { success: 0, fail: 0, approved: 0, skip: 0, errors: [] }
 const logDir = path.join(__dirname, '..', '_tmp_campingmoon_register'); if (!DRY && !existsSync(logDir)) mkdirSync(logDir, { recursive: true })
+// 등록 전 단계의 결정적 실패(필수 수치 속성·고시·이미지)는 상품에 제외 사유를 남겨 다음 회차 후보에서 빠지게 한다(원인 고치면 /admin 또는 DB 에서 해제)
+const DETERMINISTIC = /필수 수치 속성|처리 규칙 없음|고시만 있는 카테고리|상세 이미지 없음|대표 이미지 (없음|다운로드 실패)|옵션 조합 중복/
+const excludeProduct = async (row, reason) => { if (DRY) return; await sb.from(TABLE).update({ register_excluded: true, exclude_reason: `자동: ${reason}`.slice(0, 200), updated_at: new Date().toISOString() }).eq('product_no', row.product_no) }
+let done = 0
 for (let i = 0; i < targets.length; i++) {
+  if (LIMIT > 0 && done >= LIMIT) break
   const row = targets[i]; const idx = `[${i + 1}/${targets.length}]`
   try {
     const title = cleanTitle(row)
@@ -235,6 +242,7 @@ for (let i = 0; i < targets.length; i++) {
     if (DRY) {
       console.log(`${idx} (dry) ${row.product_no} ${built.title.slice(0, 34).padEnd(34)} [${cat.code}${cat.cached ? '' : '*'} ${String(cat.name ?? '').slice(0, 14)}] 고시 ${built.noticeName} 상세 ${built.contentCount}장 | 시세 ${row.market_low ?? '-'}(${row.market_count ?? 0}) ${pick.verdict}${n > 1 ? ` 묶음 ${n}개` : ''}`)
       for (const it of items) console.log(`        ${it.item_code} ${(it.option_value || '단품').padEnd(12)} x${it._n} 캠핑문 ${priceOf(it)} → 원가 ${it._cost} 판매 ${it._price} 순이익 ${it._net} (${(it._net / it._price * 100).toFixed(1)}%) | ${built.payload.items.find((b) => b.externalVendorSku.endsWith(`:${it.item_code}:${it._n}`))?.attributes.map((a) => `${a.attributeTypeName}=${a.attributeValueName}${a.exposed === 'EXPOSED' ? '*' : ''}`).join(' ')}`)
+      done++
       continue
     }
     let r = await api('POST', '/v2/providers/seller_api/apis/api/v1/marketplace/seller-products', built.payload)
@@ -258,7 +266,7 @@ for (let i = 0; i < targets.length; i++) {
     const liRows = items.map((it) => ({ market: 'coupang', listing_key: String(sellerProductId), external_sku: `${SOURCE}:${row.product_no}:${it.item_code}:${it._n}`, source: SOURCE, goods_no: row.product_no, item_code: it.item_code, option_value: it.option_value, pack_qty: it._n, sale_price: it._price, cost_price: it._cost, status: 'ACTIVE' }))
     const { error: liErr } = await sb.from('jimscanner_listing_items').upsert(liRows, { onConflict: 'market,listing_key,external_sku' })
     if (liErr) console.log(`      ⚠ listing_items 기록 실패: ${liErr.message}`)
-    summary.success++
+    summary.success++; done++
     console.log(`${idx} ✓ ${row.product_no} ${built.title.slice(0, 30).padEnd(30)} | ${items.length}옵션 ${first._price.toLocaleString()}원~ sellerPID ${sellerProductId}`)
     if (!NO_APPROVAL && sellerProductId) {
       let appr
@@ -272,7 +280,10 @@ for (let i = 0; i < targets.length; i++) {
         else { console.log(`      → 승인요청 실패: ${JSON.stringify(appr.body).slice(0, 150)}`); await sb.from('jimscanner_coupang_listings').update({ rejection_reason: `승인요청 실패: ${JSON.stringify(appr.body).slice(0, 300)}`, last_synced_at: new Date().toISOString() }).eq('id', inserted.id) }
       }
     }
-  } catch (e) { summary.fail++; summary.errors.push({ no: row.product_no, title: String(row.name_clean || '').slice(0, 36), reason: e.message }); console.log(`${idx} ✗ ${row.product_no} ERROR: ${e.message}`) }
+  } catch (e) {
+    summary.fail++; summary.errors.push({ no: row.product_no, title: String(row.name_clean || '').slice(0, 36), reason: e.message }); console.log(`${idx} ✗ ${row.product_no} ERROR: ${e.message}`)
+    if (DETERMINISTIC.test(e.message)) await excludeProduct(row, e.message)
+  }
   await sleep(400)
 }
 console.log('\n=== 완료 ===')
