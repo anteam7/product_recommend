@@ -103,6 +103,10 @@ function optionAxes(optTitle, optValue) {
   const get = (re) => { const k = Object.keys(out).find((a) => re.test(a)); return k ? out[k] : null }
   return { color: get(/색상|컬러|색/), size: get(/사이즈|크기|길이|단수|용량|규격/), raw: String(optValue || '').trim() }
 }
+// 색상 옵션이 없는 상품의 '색상' 필수 속성: 쿠팡은 색상 어휘를 검사한다('단일색상' → "허용되지 않는 구매옵션 값", 2026-10-14 실측; '회색'·'청록색'은 통과).
+// 제목의 색상어 → 재질 추정(스텐·티타늄=실버, 원목=우드, 주철=블랙) → '혼합색상'(쿠팡 표준 색상값)
+const COLOR_WORDS = [['블랙', /블랙|검정|검은/], ['화이트', /화이트|흰색|백색/], ['그레이', /그레이|회색/], ['실버', /실버|은색|스텐|스테인리스|티타늄|알루미늄|메탈/], ['우드', /우드|원목|월넛|오크|자작/], ['브라운', /브라운|갈색|가죽/], ['카키', /카키|올리브/], ['베이지', /베이지|탄|샌드/], ['네이비', /네이비|남색/], ['블루', /블루|파랑|청색/], ['그린', /그린|초록|녹색/], ['레드', /레드|빨강|적색/], ['오렌지', /오렌지|주황/], ['옐로우', /옐로우|노랑/], ['골드', /골드|금색|황동/], ['투명', /투명|클리어/]]
+const colorFromTitle = (title) => (COLOR_WORDS.find(([, re]) => re.test(title || '')) || [])[0] || (/주철|무쇠/.test(title || '') ? '블랙' : '혼합색상')
 /** item 속성 — MANDATORY 전부 채움. 못 채우는 NUMBER 속성은 {error} */
 function buildAttributes(meta, row, item, n, title) {
   const ax = optionAxes(row.option_title, item.option_value)
@@ -111,7 +115,7 @@ function buildAttributes(meta, row, item, n, title) {
     if (a.required !== 'MANDATORY') continue
     const nm = a.attributeTypeName, exposed = a.exposed === 'EXPOSED' ? 'EXPOSED' : 'NONE'
     if (/수량/.test(nm)) { out.push({ attributeTypeName: nm, attributeValueName: `${n}${pickUnit(a.usableUnits, ['개', '개입', '세트', '팩'])}`, exposed }); continue }
-    if (/색상|컬러/.test(nm)) { out.push({ attributeTypeName: nm, attributeValueName: (ax.color || (row.has_option && !ax.size ? ax.raw : null) || '단일색상').slice(0, 30), exposed }); continue }
+    if (/색상|컬러/.test(nm)) { out.push({ attributeTypeName: nm, attributeValueName: (ax.color || (row.has_option && !ax.size ? ax.raw : null) || colorFromTitle(title)).slice(0, 30), exposed }); continue }
     if (/사이즈|크기/.test(nm) && a.dataType !== 'NUMBER') { out.push({ attributeTypeName: nm, attributeValueName: (ax.size || (row.has_option && !ax.color ? ax.raw : null) || 'FREE').slice(0, 30), exposed }); continue }
     if (a.dataType === 'NUMBER' && a.usableUnits?.length) {
       const unitAlt = a.usableUnits.map((u) => u.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')
@@ -158,7 +162,8 @@ async function buildPayload(row, items, meta, cat) {
   const combos = built.map((b) => JSON.stringify(b.attributes.filter((a) => a.exposed === 'EXPOSED').map((a) => [a.attributeTypeName, a.attributeValueName])))
   if (new Set(combos).size !== combos.length) throw new Error('옵션 조합 중복(EXPOSED 속성이 같은 item 2개) — 옵션 축이 쿠팡 속성에 없음')
   const payload = {
-    vendorId: VENDOR_ID, sellerProductName: title, displayProductName: title, displayCategoryCode: cat.code, brand: '캠핑문',
+    // brand 생략 — '캠핑문'을 넣으면 "Brand Name은 존재하지만 해당 셀러가 enroll하지 않았습니다"(2026-10-14 실측, 검수 반려 위험). 브랜드는 상품명 앞 '캠핑문'으로 충분([[coupang_register_gotchas]])
+    vendorId: VENDOR_ID, sellerProductName: title, displayProductName: title, displayCategoryCode: cat.code,
     generalProductName: title, productGroup: title.split(/\s+/).slice(0, 3).join(' '), manufacture: MANUFACTURER,
     saleStartedAt: new Date().toISOString().slice(0, 19), saleEndedAt: '2099-12-31T00:00:00',
     deliveryMethod: 'SEQUENCIAL', deliveryCompanyCode: DELIVERY_COMPANY, deliveryChargeType: 'FREE', deliveryCharge: 0, freeShipOverAmount: 0, deliveryChargeOnReturn: RETURN_CHARGE,
