@@ -204,3 +204,11 @@ purchase_catalog 뷰 UNION ALL 블록(kwholesale 블록 복제), 리스팅 sourc
 - **P5 구현**: TRACKERS 1줄(송장은 첫 배송에서 실측), stock-sync SUPPLIERS + 옵션 단계(5-a), followup 이 vendorItemId 를 listing_items 에 채움(승인 후 `node scripts/coupang-followup-approvals.mjs --source=campingmoon`).
 - **P6 일부**: 어드민 등록표·카탈로그 뷰(적용됨). **리프라이스 크론(`campingmoon-reprice.mjs`)은 미작성** — 시세 전수 조회가 끝난 뒤 작성.
 - **남은 일**: 시세 조회 완료 → 선별 리포트 검토 → `campingmoon-register.mjs`(--limit 20) → 승인 후 followup → 토스 러너 sources 에 campingmoon 추가 → 첫 주문 dry 로 할인 기준 확정 → reprice 크론.
+
+## 9. 전량 등록 모드 (2026-10-15 오전, 사장님 "캠핑문 900여개에 대한 상품 등록")
+
+- **배경**: 시세 조회가 Aside 차단 때문에 10건/28분(전수 25시간+)이고, 조회된 것도 대부분 STRUCTURAL(캠핑문 35% 원가 > 쿠팡 사입 셀러 최저가, 일부는 이름 오매칭)이라 시세 게이트를 유지하면 등록이 거의 안 늘었다(밤새 12건). 사장님이 전량 등록을 지시.
+- **규칙 변경**: `campingmoon-register.mjs --allow-nomatch --allow-structural` — 시세 미조회(NO_MATCH)·시세<하한(STRUCTURAL) 모두 **목표가(순마진 10%, ≥하한)** 로 등록. 묶음이 OK 면 묶음 우선(pickPack 그대로). 시세가 들어오면 `campingmoon-market-loop.sh` 가 묶음마다 `campingmoon-reprice.mjs` 를 돌려 천장(시세−1%)까지만 내린다(하한 아래 금지, STRUCTURAL 은 보고만). → "남들보다 높으면 안 됨"은 시세가 하한 위인 상품에서만 보장되고, 하한 아래 시세인 상품은 목표가로 노출된다(사장님 인지 사항).
+- **등록기 보강**: 옵션 필수 카테고리(isAllowSingleItem=false)의 변형 1개 상품은 속성만 채워 등록 시도('item 2개 이상' 해석 폐기, 거절되면 되돌릴 것) · 필수 수치 '단 수'는 제목에 N단 없으면 1단 · 상세 이미지 없는 옛 잡화 22건은 대표 이미지를 상세로 · 이미지 '다운로드 실패'는 자동 제외 사유에서 제거 · 연속 오류 6건이면 회차 중단(일시 장애 때 수백 건 훑으며 실패·제외 쌓는 것 방지) · DB insert 실패는 즉시 중단(중복 등록 방지) · 승인요청 직후 '승인반려'는 REJECTED 로 기록(사유는 API 에 없음, Wing 확인).
+- **운영**: `CM_REGISTER_FLAGS="--allow-nomatch --allow-structural" bash scripts/campingmoon-register-drip.sh 5 10 300 12`(5건/10분, 3회차마다 followup) + `bash scripts/campingmoon-market-loop.sh 10 25 60` + `bash scripts/toss-register-supervise.sh 40 8`(승인분 → 토스). 02:00 PC 재부팅으로 루프 3개가 다 죽었던 것을 08:22 재시작 — 재부팅 뒤엔 로그 마지막 시각 확인 후 재시작.
+- **제외 유지(후보 512 기준)**: 품절 358 · KC 의심 61(`--allow-kc` 전까지, 사장님 판단) · 상품명 광고성 11(특가·세일·사은품·1+1)·타플랫폼 1(스마트스토어전용) · 필수 수치 못 읽는 테이블류('가로길이'). 첫 회차 5건 중 4건은 수 분 내 자동 승인, 1건(1516 돼지꼬리팩, 텐트펙 81819) 요청 직후 자동 반려.

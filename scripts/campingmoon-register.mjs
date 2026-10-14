@@ -293,7 +293,9 @@ for (let i = 0; i < targets.length; i++) {
       else {
         await sleep(3000)
         const cur = (await api('GET', `/v2/providers/seller_api/apis/api/v1/marketplace/seller-products/${sellerProductId}`)).body?.data?.statusName ?? ''
-        if (cur && !/임시저장/.test(cur)) { await sb.from('jimscanner_coupang_listings').update({ status: 'PENDING_APPROVAL', approval_status_name: cur, last_synced_at: new Date().toISOString() }).eq('id', inserted.id); summary.approved++; console.log(`      → 승인요청 응답은 오류지만 쿠팡 상태 '${cur}' → PENDING_APPROVAL`) }
+        // 요청 직후 이미 '승인반려'면 자동 반려(사유는 Wing 에서만 보임) → REJECTED 로 기록하고 응답 본문을 사유 칸에 남긴다(2026-10-15 돼지꼬리팩 1516)
+        if (cur && /승인반려/.test(cur)) { const hint = JSON.stringify(appr.body).slice(0, 300); await sb.from('jimscanner_coupang_listings').update({ status: 'REJECTED', approval_status_name: cur, rejection_reason: `승인요청 직후 자동 반려 — 응답: ${hint}`, last_synced_at: new Date().toISOString() }).eq('id', inserted.id); console.log(`      → 승인요청 직후 '승인반려'(자동 반려, 사유는 Wing) 응답: ${hint.slice(0, 160)}`) }
+        else if (cur && !/임시저장/.test(cur)) { await sb.from('jimscanner_coupang_listings').update({ status: 'PENDING_APPROVAL', approval_status_name: cur, last_synced_at: new Date().toISOString() }).eq('id', inserted.id); summary.approved++; console.log(`      → 승인요청 응답은 오류지만 쿠팡 상태 '${cur}' → PENDING_APPROVAL`) }
         else { console.log(`      → 승인요청 실패: ${JSON.stringify(appr.body).slice(0, 150)}`); await sb.from('jimscanner_coupang_listings').update({ rejection_reason: `승인요청 실패: ${JSON.stringify(appr.body).slice(0, 300)}`, last_synced_at: new Date().toISOString() }).eq('id', inserted.id) }
       }
     }
