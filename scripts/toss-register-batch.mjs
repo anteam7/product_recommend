@@ -156,7 +156,7 @@ async function resumePending() {
   return (data ?? []).map((r) => ({ spid: r.coupang_seller_product_id, name: r.name, source: r.source, tossId: r.toss_product_id, t0: Date.parse(r.registered_at) || Date.now(), resumed: true, rethumb: !!r.last_response?.lastInspectionRequestedAt }))
 }
 
-/** 최근 24h 반려분(이전 실행에서 자동 조치 안 된 것) — 시작 시 tryRecat(카테고리 불일치) / tryRethumb(여백) 대상 */
+/** 최근 24h 반려분(이전 실행에서 자동 조치 안 된 것) — 시작 시 tryRecat(카테고리 불일치) / tryRethumb(여백) / tryRequant(옵션 수량) / tryRetag(검색태그 금칙어) 대상 */
 async function pastRejects() {
   if (has('no-resume')) return []
   const since = new Date(Date.now() - 24 * 3600_000).toISOString()
@@ -259,6 +259,41 @@ async function tryRequant(p, reasons) {
   return true
 }
 
+const isTagReject = (reasons) => (Array.isArray(reasons) ? reasons : []).some((r) => /금칙어/.test(`${r?.title ?? ''} ${r?.message ?? ''}`))
+const parseBannedWords = (reasons) => [...new Set((Array.isArray(reasons) ? reasons : []).flatMap((r) => { const m = `${r?.message ?? ''}`.match(/금칙어\s*:\s*([^)\n]+)/); return m ? m[1].split(/[,\s/]+/).map((w) => w.trim()).filter(Boolean) : [] }))]
+
+/**
+ * "검색태그 금칙어" 반려(2026-10-14 더존건강 '명품 황제 …' 3건: "검색태그에 상품명 금칙어와 동일한 단어는 입력할 수 없어요 (금칙어: 명품)") →
+ * 메시지에서 금칙어를 뽑아 기존 상품을 삭제하고 --ban=<단어> 로 재등록(등록기가 상품명·검색태그 토큰에서 제거). 토스 금칙어 목록은 비공개라
+ * 반려 문구가 유일한 소스 — 등록기 기본값(명품)에 없는 단어가 나오면 이 경로로 1회 구제하고, 반복되면 등록기 NAME_BANNED 에 추가한다. spid 당 1회.
+ */
+async function tryRetag(p, reasons) {
+  if (!isTagReject(reasons) || p.retag) return false
+  const words = parseBannedWords(reasons)
+  if (!words.length) { console.log(`  ↪ 금칙어 반려인데 메시지에서 단어를 못 읽음 — 수동 확인: ${JSON.stringify(reasons).slice(0, 160)}`); return false }
+  const { data: row, error: rowErr } = await sb.from('jimscanner_toss_listings').select('category_id').eq('toss_product_id', p.tossId).maybeSingle()
+  if (rowErr) { console.log(`  ↪ 금칙어 반려 자동 조치 보류 — DB 조회 실패: ${rowErr.message}`); return false } // 카테고리 모른 채 삭제·재등록하지 않는다
+  const extra = [...(row?.category_id ? [`--cat=${row.category_id}`] : []), '--force', `--ban=${words.join(',')}`]
+  console.log(`  ↪ 검색태그 금칙어(${words.join(', ')}) → 금칙어 제외하고 재등록 (기존 ${p.tossId} 삭제)`)
+  const dry = await dryCheck(p.spid, extra)
+  if (!dry.ok) { console.log(`  ↪ 재등록 보류(${dry.reason}) — 기존 상품 유지`); log({ spid: p.spid, name: p.name, step: 'retag', ok: false, words, error: dry.reason }); return false }
+  const rm = await tossRemoveProduct(p.tossId)
+  if (!rm.ok) { console.log(`  ↪ 기존 상품 삭제 실패: ${JSON.stringify(rm.error).slice(0, 120)}`); log({ spid: p.spid, name: p.name, step: 'retag', ok: false, words, error: 'remove failed' }); return false }
+  const { error: dbErr } = await sb.from('jimscanner_toss_listings').update({ inspection_status: 'REMOVED', exposure_status: 'REMOVED', updated_at: new Date().toISOString() }).eq('toss_product_id', p.tossId)
+  if (dbErr) console.log(`  ↪ (DB REMOVED 표시 실패: ${dbErr.message} — 토스에선 삭제됨)`)
+  const reg = await runRegister(p.spid, extra)
+  log({ spid: p.spid, name: p.name, source: p.source, step: 'retag', ok: reg.ok, removedTossId: p.tossId, words, tossId: reg.tossId ?? null, error: reg.ok ? null : reg.error })
+  if (!reg.ok) {
+    // 기존 상품은 이미 삭제됨(dryCheck 로 사전 확인한 뒤라 드묾) — 사람이 보도록 RECAT_FAILED 로 남긴다(후보 중복 제외 유지)
+    const { error: markErr } = await sb.from('jimscanner_toss_listings').update({ inspection_status: 'RECAT_FAILED', updated_at: new Date().toISOString() }).eq('toss_product_id', p.tossId)
+    console.log(`  ↪ 재등록 실패(기존 ${p.tossId} 는 삭제됨, DB ${markErr ? 'REMOVED 그대로 — RECAT_FAILED 표시 실패: ' + markErr.message : 'RECAT_FAILED'}): ${reg.error} → 수동: node scripts/toss-register.mjs --spid=${p.spid} ${extra.join(' ')} --show`)
+    return false
+  }
+  console.log(`  ↪ 재등록 OK id=${reg.tossId} | ${reg.category} | ${reg.options}`)
+  pending.push({ spid: p.spid, name: p.name, source: p.source, tossId: reg.tossId, t0: Date.now(), category: reg.category, options: reg.options, retag: true })
+  return true
+}
+
 const cands = await candidates()
 const plan = cands.slice(0, LIMIT)
 console.log(`후보 ${cands.length}건 (sources=${SOURCES.join(',')}, min-sold=${MIN_SOLD}) → 이번 실행 ${plan.length}건${LIST ? ' [계획만]' : ''} · 검수 창 ${PARALLEL}건 · 대기 최대 ${WAIT_MAX_MIN}분`)
@@ -271,7 +306,7 @@ const pending = await resumePending()
 if (pending.length) console.log(`이전 실행의 검수 대기 ${pending.length}건 이어서 추적: ${pending.map((p) => p.tossId).join(', ')}`)
 for (const r of await pastRejects()) {
   console.log(`\n이전 반려 ${r.tossId} ${String(r.name || '').slice(0, 36)} — ${JSON.stringify((r.reasons ?? []).map((x) => x?.title)).slice(0, 60)}`)
-  if (!(await tryRecat(r, r.reasons)) && !(await tryRethumb(r, r.reasons))) await tryRequant(r, r.reasons)
+  if (!(await tryRecat(r, r.reasons)) && !(await tryRethumb(r, r.reasons)) && !(await tryRequant(r, r.reasons))) await tryRetag(r, r.reasons)
 }
 let idx = 0
 const settle = (p, insp) => {
@@ -325,8 +360,8 @@ while (idx < plan.length || pending.length) {
     const insp = await checkInspection(p.tossId)
     if (insp.inspection && insp.inspection !== 'LLM_INSPECTION_READY') {
       pending.splice(pending.indexOf(p), 1)
-      // 카테고리 불일치 → 추천 카테고리로 재등록(1회), 썸네일 "여백" → strict 패키지샷 교체 재검수(1회), 옵션(수량>1) → 수량 1개로 재등록(1회) — 모두 실패 streak 에 안 셈
-      if (insp.inspection === 'REJECT' && (await tryRecat(p, insp.reasons) || await tryRethumb(p, insp.reasons) || await tryRequant(p, insp.reasons))) continue
+      // 카테고리 불일치 → 추천 카테고리로 재등록(1회), 썸네일 "여백" → strict 패키지샷 교체 재검수(1회), 옵션(수량>1) → 수량 1개로 재등록(1회), 검색태그 금칙어 → 금칙어 제외 재등록(1회) — 모두 실패 streak 에 안 셈
+      if (insp.inspection === 'REJECT' && (await tryRecat(p, insp.reasons) || await tryRethumb(p, insp.reasons) || await tryRequant(p, insp.reasons) || await tryRetag(p, insp.reasons))) continue
       settle(p, insp)
     }
     else if (Date.now() - p.t0 > WAIT_MAX_MIN * 60_000) {

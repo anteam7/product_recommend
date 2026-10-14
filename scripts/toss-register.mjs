@@ -7,6 +7,7 @@
  *   node scripts/toss-register.mjs --spid=... --show                   # 등록 후 숨기지 않음
  *   node scripts/toss-register.mjs --spid=... --opt-qty=3개 --opt-unit=30포 --prep-days=3 --origin=sale
  *   node scripts/toss-register.mjs --check=835157677                   # 토스 상품 상태(검수/노출) 조회 + DB 갱신
+ *   node scripts/toss-register.mjs --spid=... --ban=명품,최고          # 상품명·검색태그에서 금칙어 토큰 제거(토스 "검색태그 금칙어" 반려 대응, 기본 명품)
  *
  * 규칙(실측 기준):
  *  - 상품명 1~100자 [0-9a-zA-Z가-힣 ()\-·\[\]/&+,~.*_#] — 등록 후 변경 불가(반려 시만) → 쿠팡 registered_title 사용
@@ -105,6 +106,11 @@ const PF_MAP = [
 const PF_ALL = [319, 321, 323, 325, 327, 329, 331, 333, 335, 337, 339, 341] // 319 = 헤더 항목(표시사항)도 내용 필수 — 실측 BAD_REQUEST
 
 // ── 상품명/키워드 ──
+// 토스 "검색태그 금칙어" 반려(2026-10-14 더존건강 '명품 황제 …' 3건): "검색태그에 상품명 금칙어와 동일한 단어는 입력할 수 없어요 (금칙어: 명품)".
+// 금칙어 목록은 비공개 — 실측된 단어(명품) + 러너가 반려 메시지에서 뽑아 --ban= 으로 넘긴 단어를 상품명·검색태그 토큰에서 제거한다(검색태그는 과장 표현도 넓게 제외).
+const NAME_BANNED = new Set(['명품', ...String(arg('ban', '')).split(/[,\s/]+/).map((w) => w.trim()).filter(Boolean)])
+const TAG_BANNED = new Set([...NAME_BANNED, '최고', '최저가', '1위', '1등', '베스트', '특가', '할인', '무료배송', '정품', '추천', '인기'])
+const stripBanned = (name) => { const toks = name.split(' '); const out = toks.filter((t) => !NAME_BANNED.has(t)); if (out.length !== toks.length) console.log(`  ℹ 상품명 금칙어 제거: ${toks.filter((t) => NAME_BANNED.has(t)).join(', ')} → ${out.join(' ')}`); return out.join(' ').trim() || name }
 const cleanName = (t) => (t || '').replace(/\s*-\s*(수량별 판매가[^()]*|쿠팡[^()]*|오픈마켓[^()]*|본사[^()]*|노출가[^()]*)$/g, '').replace(/[^0-9A-Za-z가-힣 ()\-·\[\]/&+,~.*_#]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 100)
 function keywords(title, brand) {
   const stop = /^(\d|x$|mg|kg|ml|g$|정$|캡슐$|포$|개입|박스|병|슈퍼|프리미엄|골드|플러스|함유|선물세트|세트|정품|본사|상시|모니터링|노출가|준수|반드시)/i
@@ -112,7 +118,7 @@ function keywords(title, brand) {
   const out = new Set(toks.slice(0, 6))
   if (brand && /^[0-9A-Za-z가-힣]{1,10}$/.test(brand)) out.add(brand)
   for (const [re, kw] of [[/유산균|프로바이오/, '유산균'], [/낙산균/, '낙산균'], [/오메가\s*3/i, '오메가3'], [/루테인/, '루테인'], [/콜라겐/, '콜라겐'], [/밀크씨슬|밀크시슬/, '밀크씨슬'], [/홍삼/, '홍삼'], [/비타민/, '비타민'], [/커큐민/, '커큐민'], [/msm/i, 'MSM'], [/징코|은행잎/, '은행잎'], [/프로폴리스/, '프로폴리스'], [/멀티비타민|종합비타민/, '멀티비타민'], [/선물세트/, '선물세트'], [/젤리/, '젤리'], [/스틱/, '스틱']]) if (re.test(title || '')) out.add(kw)
-  return [...out].filter((k) => /^[0-9a-zA-Z가-힣]{1,10}$/.test(k)).slice(0, 10)
+  return [...out].filter((k) => /^[0-9a-zA-Z가-힣]{1,10}$/.test(k) && !TAG_BANNED.has(k)).slice(0, 10)
 }
 
 // ── 판매옵션: 카테고리 제약 템플릿의 모든 옵션을 채움 (2025.06.16~ salesOption 전부 필수, 택1 그룹은 1개) ──
@@ -365,7 +371,7 @@ async function buildPayload(listing, refs) {
     p = { sellerProductName: listing.registered_title, brand: listing.brand, items: [it], remoteAreaDeliverable: 'N', returnCharge: RETURN_ONEWAY }
     console.log(`  ℹ payload 없음 → ggsan 직접 구성: 대표 ${rep.slice(-40)} / 상세 ${contents.length}장`)
   }
-  const name = cleanName(arg('name') || listing.registered_title || p.sellerProductName)
+  const name = stripBanned(cleanName(arg('name') || listing.registered_title || p.sellerProductName))
   const brand = (listing.brand || p.brand || '').replace(/[^0-9a-zA-Z가-힣 *()\-_+/.,]/g, '').trim().slice(0, 50) || null
   if (brand && /없음|중국|기타|OEM|협력사/i.test(brand)) throw new Error(`브랜드 금지어: ${brand}`)
   const categoryId = parseInt(arg('cat', ''), 10) || mapCategory(`${name} ${listing.display_category_name || ''}`)
