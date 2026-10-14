@@ -28,7 +28,7 @@ const GEMINI = env.GEMINI_API_KEY
 if (!GEMINI) { console.error('GEMINI_API_KEY 없음'); process.exit(1) }
 const arg = (k, d) => { const a = process.argv.find((x) => x.startsWith(`--${k}=`)); return a ? a.split('=').slice(1).join('=') : d }
 const has = (k) => process.argv.includes(`--${k}`)
-const DRY = has('dry'), APPLY = has('apply')
+const DRY = has('dry'), APPLY = has('apply') || has('apply-only')
 const MIN_CONF = arg('min-conf', 'high')
 const LIMIT = parseInt(arg('limit', '0'), 10) || 0
 const CONC = Math.max(1, parseInt(arg('concurrency', '3'), 10) || 3)
@@ -168,7 +168,9 @@ async function readOne(t) {
   return { ...t, images: undefined, chunks: used, errors: errs, result: r }
 }
 
-const list = await targets()
+// --apply-only: 다시 읽지 않고 오늘 결과 파일(OUT_JSON)만 병합·적용 (판독 15분을 반복하지 않게)
+const list = has('apply-only') ? [] : await targets()
+if (has('apply-only') && !existsSync(OUT_JSON)) { console.error(`결과 파일 없음: ${OUT_JSON}`); process.exit(1) }
 console.log(`대상 ${list.length}건 (수량형 ${list.filter((t) => t.need === 'count').length} · 중량형 ${list.filter((t) => t.need === 'weight').length}) · 동시 ${CONC} · 이미지 최대 ${MAX_IMAGES}+대표 · 조각 최대 ${MAX_CHUNKS}`)
 const results = []
 let idx = 0
@@ -187,7 +189,14 @@ async function worker() {
 }
 await Promise.all(Array.from({ length: CONC }, worker))
 // 같은 날 결과 파일이 있으면 병합(--spids 재판독이 전체 결과를 덮어쓰지 않게) — 이번에 읽은 spid 만 교체
-if (!DRY && existsSync(OUT_JSON)) { try { const prev = JSON.parse(readFileSync(OUT_JSON, 'utf8')); const done = new Set(results.map((r) => r.spid)); for (const p of prev) if (!done.has(p.spid)) results.push(p) } catch { /* 새로 쓴다 */ } }
+if (!DRY && existsSync(OUT_JSON)) {
+  try { const prev = JSON.parse(readFileSync(OUT_JSON, 'utf8')); const done = new Set(results.map((r) => r.spid)); for (const p of prev) if (!done.has(p.spid)) results.push(p) }
+  catch (e) { // 깨진 결과 파일을 덮어써 하루치 판독을 잃지 않게: apply-only 면 중단, 아니면 백업 뒤 새로 쓴다
+    if (has('apply-only')) { console.error(`결과 파일 파싱 실패: ${OUT_JSON} — ${e.message}`); process.exit(1) }
+    const bak = OUT_JSON.replace(/\.json$/, `.corrupt-${Date.now()}.json`); writeFileSync(bak, readFileSync(OUT_JSON)); console.log(`⚠ 기존 결과 파일 파싱 실패 → ${bak} 로 백업 후 새로 씀`)
+  }
+}
+if (has('apply-only') && !results.length) { console.error('결과 파일이 비어 있음 — 적용할 것이 없다'); process.exit(1) }
 results.sort((a, b) => (CONF_RANK[b.result.confidence] ?? 0) - (CONF_RANK[a.result.confidence] ?? 0) || a.source.localeCompare(b.source))
 const tally = results.reduce((m, r) => { m[r.result.confidence] = (m[r.result.confidence] || 0) + 1; return m }, {})
 console.log(`\n판독 ${results.length}건: ${Object.entries(tally).map(([k, v]) => `${k} ${v}`).join(' · ')}`)
