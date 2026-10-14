@@ -8,12 +8,14 @@
 set -u
 cd "$(dirname "$0")/.."
 MAX=${1:-40}; PAR=${2:-8}; SRC=${3:-ggsan,upickb2b,bio77,kwholesale,wellroot}
+case "$MAX$PAR" in *[!0-9]*) echo "사용법: $0 [최대 반복(숫자)] [검수 창(숫자)] [sources]" >&2; exit 2;; esac
 DAY=$(date +%Y%m%d); mkdir -p _workspace   # 이 PC 로컬 시각(KST). TZ=Asia/Seoul 은 Git Bash 에서 UTC 로 떨어짐(10-13 파일명 실측)
 SUM="_workspace/toss-supervise-$DAY.log"
+TAG="$DAY-$(date +%H%M)"   # 같은 날 두 번째 감독부터 러너 로그가 1회차 파일을 덮어쓰지 않게 시작 시각을 붙인다
 echo "$(date +%H:%M:%S) 감독 시작 max=$MAX parallel=$PAR sources=$SRC" | tee -a "$SUM"
 idle=0
 for i in $(seq 1 "$MAX"); do
-  LOG="_workspace/toss-run-$DAY-$i.log"
+  LOG="_workspace/toss-run-$TAG-$i.log"
   node scripts/toss-register-batch.mjs --limit=600 --parallel="$PAR" --wait-max=90 --sources="$SRC" > "$LOG" 2>&1
   code=$?
   cand=$(head -1 "$LOG" | grep -o '후보 [0-9]*' | grep -o '[0-9]*'); cand=${cand:-0}
@@ -21,7 +23,12 @@ for i in $(seq 1 "$MAX"); do
   ok=$(grep -c '^  ✓' "$LOG"); ng=$(grep -c '^  ✗' "$LOG"); skip=$(grep -c '^  ↷' "$LOG"); wait=$(grep -c '^  ⏳' "$LOG")
   halt=$(grep -E '→ 등록 중단' "$LOG" | tail -1 | cut -c1-80)
   echo "$(date +%H:%M:%S) #$i exit=$code 후보=$cand 등록=$reg 통과=$ok 실패=$ng 건너뜀=$skip 검수대기=$wait ${halt:+중단:$halt}" | tee -a "$SUM"
-  if [ "$cand" -eq 0 ]; then echo "$(date +%H:%M:%S) 후보 소진 → 종료" | tee -a "$SUM"; break; fi
+  # 러너가 후보 집계 전에 죽으면(exit≠0, 첫 줄 없음) 후보 0 이 아니라 크래시다 — 소진으로 오판해 끝내지 않고 무진전 회차로 센다
+  if [ "$cand" -eq 0 ] && [ "$code" -ne 0 ]; then echo "$(date +%H:%M:%S) 러너 비정상 종료(exit=$code, 후보 집계 전) — $(tail -1 "$LOG" | cut -c1-120)" | tee -a "$SUM"; reg=0; ok=0
+  elif [ "$cand" -eq 0 ]; then echo "$(date +%H:%M:%S) 후보 소진 → 종료" | tee -a "$SUM"; break; fi
+  # 러너가 "연속 실패"(반려·등록 오류 --max-fail 건 연속)로 멈춘 건 썸네일·옵션 규칙 같은 구조적 문제다 — 다시 띄우면 같은 유형 반려만 쌓인다.
+  # (2026-10-14 09:51 "옵션 정보가 잘못 입력" 신규 반려 유형 8건 연속 → 등록 수를 진전으로 보고 30초 뒤 재시작, 수동 재등록 거리만 늘림.) 사람이 원인을 고친 뒤 재개.
+  case "$halt" in *"연속 실패"*) echo "$(date +%H:%M:%S) 연속 실패로 중단됨 → 구조적 반려 의심, 감독 종료(원인 확인: $LOG)" | tee -a "$SUM"; break;; esac
   if [ "$reg" -eq 0 ] && [ "$ok" -eq 0 ]; then
     idle=$((idle + 1))
     if [ "$idle" -ge 6 ]; then echo "$(date +%H:%M:%S) 진전 없음 연속 $idle회 → 종료(원인 확인 필요: $LOG)" | tee -a "$SUM"; break; fi

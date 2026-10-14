@@ -19,6 +19,7 @@
 | 2026-10-13 | 토스쇼핑 등록 재개: 8/19 등록분 11건이 두 달간 판매 대기(WAITING_FOR_SALE)였던 것을 show API로 SELLING 전환, 가격·매핑 정합(MSP 미달 인상·품절 hide·재등록 spid 교정), 등록기 옵션/카테고리 버그 수정, 1건씩 검수 확인 후 다음으로 도는 일괄 러너 신설 | scripts/toss-register.mjs, scripts/toss-register-batch.mjs(신규), docs/plan-toss-shopping.md §3.8 | 토스 주문 0건의 원인이 hide 후 판매 대기 상태였음, 쿠팡과 동일하게 토스 등록(사용자 요청) |
 | 2026-10-14 | 토스 일반 식품 카테고리 매핑(식품 leaf 1,280 캐시 + 규칙), 반려 자동 조치(카테고리 불일치→추천 카테고리 재등록, 여백→strict 썸네일 교체), 옵션 자리값 가드·품절 건너뜀, 토스 등록가 수수료 차이 보정(+0.5%, 기등록 41건 일괄 반영) | scripts/toss-register.mjs, toss-register-batch.mjs, toss-reprice.mjs(신규), lib/toss-price.mjs·toss-categories.mjs·toss-food-leaves.json·toss-dump-food-leaves.mjs(신규), docs/plan-toss-shopping.md §3.8.1 | 올리브오일 등 일반 식품이 카테고리 불일치로 반려(사용자 요청), 토스 11% 수수료로 같은 가격이면 순이익이 0.4%p 낮음(사용자 요청) |
 | 2026-10-14 | 토스 감독 루프 공회전 수정: 대표 이미지 404 폴백(쿠팡 CDN·ggsan 현재 이미지), 등록 전 실패를 DB FAILED 로 기록해 후보 제외(`--retry-failed`), 이어받은 검수 대기분은 1회만 확인·실패로 안 셈(창 7일), 옵션 파싱에 고시 제품명 보강, 감독 루프 진전 판정(등록·통과 기준)+연속 6회 무진전 종료 | scripts/toss-register.mjs, toss-register-batch.mjs, toss-register-supervise.sh | 새벽 감독 40회 중 38회가 같은 3건(ggsan 이미지 교체로 404)에서 "연속 실패 3건"으로 2분 만에 멈추는 공회전, 토스가 일부 상품을 3시간+ 수동 검수로 돌림 |
+| 2026-10-14 | 토스 "옵션 수량" 반려 대응: 수량 옵션 기본 1개(세트, `--pack-qty` 로 묶음 수)·병/통만 있는 상품은 개당 수량 N개, 러너가 이 사유+수량≠1 이면 삭제 후 재등록(tryRequant), 감독 루프는 연속 실패 중단 시 재시작 않고 종료 | scripts/toss-register.mjs, toss-register-batch.mjs, toss-register-supervise.sh, docs/plan-toss-shopping.md §3.8.3 | 묶음 수량(2·6개)으로 올린 29건 중 3건만 통과(반려 11·수동검수 15), 오전 8건 연속 반려를 감독 루프가 등록 수로 진전 오판해 30초 뒤 재시작 |
 
 ---
 

@@ -219,6 +219,43 @@ async function tryRecat(p, reasons) {
   return true
 }
 
+const isOptionReject = (reasons) => (Array.isArray(reasons) ? reasons : []).some((r) => /옵션/.test(`${r?.message ?? ''}`) && /수량|가격/.test(`${r?.message ?? ''}`))
+
+/**
+ * "옵션 정보가 잘못 입력되었어요. 옵션 수량 또는 가격 정보를 확인" 반려 → 수량 옵션이 1개가 아니면 기존 상품을 삭제하고 등록기 기본값(수량 1개 세트)으로
+ * 재등록(검수 대기에 다시 넣음). spid 당 1회. 2026-10-14 09:30~09:50 수량 2개·6개 묶음 8건이 같은 사유로 연속 반려(수량>1 은 29건 중 3건만 통과).
+ * 수량이 이미 1개면 가격 등 다른 원인이라 자동 조치 없이 반려로 둔다(수동 확인).
+ */
+async function tryRequant(p, reasons) {
+  if (!isOptionReject(reasons) || p.requant) return false
+  const { data: row, error: rowErr } = await sb.from('jimscanner_toss_listings').select('category_id, request_payload').eq('toss_product_id', p.tossId).maybeSingle()
+  if (rowErr) { console.log(`  ↪ 옵션 반려 자동 조치 보류 — DB 조회 실패: ${rowErr.message}`); return false } // 카테고리 모른 채 삭제·재등록하지 않는다
+  let opts = row?.request_payload?.stocks?.[0]?.options
+  if (!Array.isArray(opts)) { try { opts = JSON.parse(p.options || '[]') } catch { opts = [] } }
+  if (!Array.isArray(opts)) opts = []
+  const qty = opts.find((o) => o?.groupName === '수량')?.valueName ?? null
+  if (!qty || qty === '1개') { console.log(`  ↪ 옵션 반려인데 수량이 ${qty ?? '미상'} — 자동 조치 없음(가격 등 다른 원인, 수동 확인)`); return false }
+  const catArgs = row?.category_id ? [`--cat=${row.category_id}`] : []
+  console.log(`  ↪ 옵션 반려(수량 ${qty}) → 수량 1개(세트)로 재등록 (기존 ${p.tossId} 삭제)`)
+  const dry = await dryCheck(p.spid, [...catArgs, '--force'])
+  if (!dry.ok) { console.log(`  ↪ 재등록 보류(${dry.reason}) — 기존 상품 유지`); log({ spid: p.spid, name: p.name, step: 'requant', ok: false, prevQty: qty, error: dry.reason }); return false }
+  const rm = await tossRemoveProduct(p.tossId)
+  if (!rm.ok) { console.log(`  ↪ 기존 상품 삭제 실패: ${JSON.stringify(rm.error).slice(0, 120)}`); log({ spid: p.spid, name: p.name, step: 'requant', ok: false, prevQty: qty, error: 'remove failed' }); return false }
+  const { error: dbErr } = await sb.from('jimscanner_toss_listings').update({ inspection_status: 'REMOVED', exposure_status: 'REMOVED', updated_at: new Date().toISOString() }).eq('toss_product_id', p.tossId)
+  if (dbErr) console.log(`  ↪ (DB REMOVED 표시 실패: ${dbErr.message} — 토스에선 삭제됨)`)
+  const reg = await runRegister(p.spid, [...catArgs, '--force'])
+  log({ spid: p.spid, name: p.name, source: p.source, step: 'requant', ok: reg.ok, removedTossId: p.tossId, prevQty: qty, tossId: reg.tossId ?? null, error: reg.ok ? null : reg.error })
+  if (!reg.ok) {
+    // 기존 상품은 이미 삭제됨(되돌릴 수 없음, tryRecat 과 같은 설계: dryCheck 로 사전 확인) — 사람이 보도록 RECAT_FAILED 로 남긴다(후보 중복 제외 유지)
+    const { error: markErr } = await sb.from('jimscanner_toss_listings').update({ inspection_status: 'RECAT_FAILED', updated_at: new Date().toISOString() }).eq('toss_product_id', p.tossId)
+    console.log(`  ↪ 재등록 실패(기존 ${p.tossId} 는 삭제됨, DB ${markErr ? 'REMOVED 그대로 — RECAT_FAILED 표시 실패: ' + markErr.message : 'RECAT_FAILED'}): ${reg.error} → 수동: node scripts/toss-register.mjs --spid=${p.spid} ${catArgs.join(' ')} --force --show`)
+    return false
+  }
+  console.log(`  ↪ 재등록 OK id=${reg.tossId} | ${reg.category} | ${reg.options}`)
+  pending.push({ spid: p.spid, name: p.name, source: p.source, tossId: reg.tossId, t0: Date.now(), category: reg.category, options: reg.options, requant: true })
+  return true
+}
+
 const cands = await candidates()
 const plan = cands.slice(0, LIMIT)
 console.log(`후보 ${cands.length}건 (sources=${SOURCES.join(',')}, min-sold=${MIN_SOLD}) → 이번 실행 ${plan.length}건${LIST ? ' [계획만]' : ''} · 검수 창 ${PARALLEL}건 · 대기 최대 ${WAIT_MAX_MIN}분`)
@@ -231,7 +268,7 @@ const pending = await resumePending()
 if (pending.length) console.log(`이전 실행의 검수 대기 ${pending.length}건 이어서 추적: ${pending.map((p) => p.tossId).join(', ')}`)
 for (const r of await pastRejects()) {
   console.log(`\n이전 반려 ${r.tossId} ${String(r.name || '').slice(0, 36)} — ${JSON.stringify((r.reasons ?? []).map((x) => x?.title)).slice(0, 60)}`)
-  if (!(await tryRecat(r, r.reasons))) await tryRethumb(r, r.reasons)
+  if (!(await tryRecat(r, r.reasons)) && !(await tryRethumb(r, r.reasons))) await tryRequant(r, r.reasons)
 }
 let idx = 0
 const settle = (p, insp) => {
@@ -283,8 +320,8 @@ while (idx < plan.length || pending.length) {
     const insp = await checkInspection(p.tossId)
     if (insp.inspection && insp.inspection !== 'LLM_INSPECTION_READY') {
       pending.splice(pending.indexOf(p), 1)
-      // 카테고리 불일치 → 추천 카테고리로 재등록(1회), 썸네일 "여백" → strict 패키지샷 교체 재검수(1회) — 둘 다 실패 streak 에 안 셈
-      if (insp.inspection === 'REJECT' && (await tryRecat(p, insp.reasons) || await tryRethumb(p, insp.reasons))) continue
+      // 카테고리 불일치 → 추천 카테고리로 재등록(1회), 썸네일 "여백" → strict 패키지샷 교체 재검수(1회), 옵션(수량>1) → 수량 1개로 재등록(1회) — 모두 실패 streak 에 안 셈
+      if (insp.inspection === 'REJECT' && (await tryRecat(p, insp.reasons) || await tryRethumb(p, insp.reasons) || await tryRequant(p, insp.reasons))) continue
       settle(p, insp)
     }
     else if (Date.now() - p.t0 > WAIT_MAX_MIN * 60_000) {

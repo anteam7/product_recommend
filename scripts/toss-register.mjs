@@ -31,6 +31,10 @@ const env = Object.fromEntries(readFileSync(path.join(__dirname, '..', '.env.loc
 const sb = createClient(env.NEXT_PUBLIC_SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY)
 const arg = (k, d) => { const a = process.argv.find((x) => x.startsWith(`--${k}=`)); return a ? a.split('=').slice(1).join('=') : d }
 const has = (k) => process.argv.includes(`--${k}`)
+// 묶음 수를 토스 '수량' 옵션에 그대로 올리면(2개·6개…) 검수가 "옵션 수량 또는 가격 정보" 반려나 수동 검수(90분+)로 돌린다 —
+// 2026-10-14 실측: 수량>1 29건 중 통과 3건(반려 11·90분 초과 15), 수량=1 은 79건 중 56건 통과. 기본은 수량 1개(세트)로 올리고 구성은 제목에 남긴다.
+// 묶음 수를 수량에 쓰려면 --pack-qty(또는 --opts="수량=N개").
+const PACK_QTY = has('pack-qty')
 const DRY = has('dry'), SHOW = has('show')
 const PREP_DAYS = parseInt(arg('prep-days', '3'), 10)
 const ORIGIN_MODE = arg('origin', 'ggsan') // ggsan | sale
@@ -122,6 +126,9 @@ function parseUnits(title, itemName, attrs, extra) {
   // 제목 자체에 "x 10포" 가 있으면 그 낱개 단위가 진짜다 — 쿠팡 itemName 은 "10정 1박스" 처럼 정으로 적힌 경우가 많다(2026-10-13 다이어트 카페·석류젤리)
   const perTitle = (title || '').match(/(\d+)\s*(포|스틱|개입|매|팩)/)
   const cap = t.match(/(\d+)\s*(정|캡슐|환)/)
+  // 병·통·캔으로만 세는 상품(알부민 25ml x 30병, 아토셀 500ml x 3병): 정/캡슐/포 토큰이 없으면 병 수를 낱개 수(N개)로 본다 —
+  // 2026-10-14 "25ml x 30병"이 수량 30개 + 캡슐/정 30정으로 올라가 반려·수동검수
+  const bottles = !per && !cap ? t.match(/(\d+)\s*(병|통|캔)(?![가-힣])/) : null
   const vol = t.match(/(\d+(?:\.\d+)?)\s*(ml|mL|ML|l|L)\b/)
   // g/kg 는 "10g x 30포"(식품 스틱) 처럼 x 앞에 와도 낱개 중량이다. mg 만 "1,000mg x 120정"(함량)이라 x 앞이면 제외 (2026-10-13 일반 식품 확장)
   // 경계: 끝/비영문/"x숫자"("15gx30포" 처럼 붙여 쓴 경우) — 영단어 안의 g(gram 등)는 제외
@@ -138,7 +145,7 @@ function parseUnits(title, itemName, attrs, extra) {
   const attrQty = attrs?.find((a) => a.attributeTypeName === '수량')?.attributeValueName?.match(/(\d+)/)?.[1]
   const volM = vol || attrVol, wtM = wt || attrWt
   const liquid = /즙|주스|진액|액상|음료|오일|시럽|식초|드링크|워터|에센스/.test(title || '') // g→ml 대체 허용 여부(가루·정제는 제외)
-  return { liquid, qty: pack ? pack[1] : (attrQty || '1'), per: per ? per[1] : null, perUnit: per ? (per[2] === '개입' ? '개' : per[2]) : null, perTitle: perTitle ? perTitle[1] : null, perTitleUnit: perTitle ? (perTitle[2] === '개입' ? '개' : perTitle[2]) : null, cap: cap ? cap[1] : null, capUnit: cap ? cap[2] : null, vol: volM ? volM[1] : null, volUnit: volM ? volM[2].toLowerCase() : null, wt: wtM ? wtM[1] : null, wtUnit: wtM ? wtM[2].toLowerCase() : null }
+  return { liquid, qty: pack ? pack[1] : (attrQty || '1'), per: per ? per[1] : (bottles ? bottles[1] : null), perUnit: per ? (per[2] === '개입' ? '개' : per[2]) : (bottles ? '개' : null), perTitle: perTitle ? perTitle[1] : null, perTitleUnit: perTitle ? (perTitle[2] === '개입' ? '개' : perTitle[2]) : null, cap: cap ? cap[1] : null, capUnit: cap ? cap[2] : null, vol: volM ? volM[1] : null, volUnit: volM ? volM[2].toLowerCase() : null, wt: wtM ? wtM[1] : null, wtUnit: wtM ? wtM[2].toLowerCase() : null }
 }
 function forceUnit(value, unitValues) {
   if (!unitValues?.length) return value
@@ -168,7 +175,7 @@ function buildOptions(template, ctx, optsArg) {
   }
   const u = parseUnits(ctx.title, ctx.itemName, ctx.attrs, ctx.extra)
   const auto = (key) => {
-    if (/^수량$/.test(key)) return `${u.qty}개`
+    if (/^수량$/.test(key)) { if (!PACK_QTY && u.qty !== '1') console.log(`  ℹ 묶음 ${u.qty}개 구성 → 수량 1개(세트)로 등록 (묶음 수를 쓰려면 --pack-qty)`); return PACK_QTY ? `${u.qty}개` : '1개' }
     // 액상(즙·주스 키워드)인데 제목이 g 로만 적힌 경우(푸룬주스 20g x 14포) 템플릿이 용량만 받으면 g≈ml 로 넣는다. 가루·정제는 제외.
     if (/용량/.test(key)) return u.vol ? `${u.vol}${u.volUnit}` : (u.liquid && u.wt && u.wtUnit === 'g' ? `${u.wt}ml` : null)
     if (/중량/.test(key)) return u.wt ? `${u.wt}${u.wtUnit}` : null
