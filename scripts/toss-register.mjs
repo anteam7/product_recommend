@@ -12,7 +12,7 @@
  * 규칙(실측 기준):
  *  - 상품명 1~100자 [0-9a-zA-Z가-힣 ()\-·\[\]/&+,~.*_#] — 등록 후 변경 불가(반려 시만) → 쿠팡 registered_title 사용
  *  - 썸네일 1:1 600px 이상 → 미달 시 sharp 로 800x800 contain 변환 후 Supabase site-assets 업로드(toss/{spid}/thumb.jpg)
- *  - 상세 = 쿠팡 contents 이미지(IMAGE*) 순서대로 DESCRIPTION, HTML 이면 DESCRIPTION_HTML
+ *  - 상세 = 쿠팡 contents 이미지(IMAGE*) 순서대로 DESCRIPTION, HTML 이면 DESCRIPTION_HTML. 가로 600px 미만은 확대해 site-assets 에 올린 URL 로 교체(토스 검수 기준)
  *  - 고시 = PROCESSED_FOOD(가공식품, 쿠팡과 동일 전략) 항목 id 매핑. 건기식 판매업 신고 전까지 HEALTH_FUNCTIONAL_FOOD 미사용
  *  - 판매옵션 = 카테고리 제약 템플릿(수량 + (택1) 개당 수량|개당 캡슐/정) 자동 파싱, --opt-qty/--opt-unit 로 강제
  *  - 가격: salePrice = 쿠팡 list_price_krw 에 수수료 차이 보정(토스 11% vs 쿠팡 10.6% → 같은 순이익, 약 +0.5%, lib/toss-price.mjs; --no-fee-adjust 로 끔),
@@ -277,6 +277,30 @@ Pure white background (#FFFFFF). The ENTIRE product must be fully visible — no
   return null
 }
 // strict=true(재검수용): 풀블리드 프롬프트 + 최대 3회 생성 중 가장 정사각에 가까운 결과 채택 → 근사 정사각이면 cover(중앙 크롭)로 여백 0, 아니면 100% fit
+// ── 상세 이미지 가로 600px 미만 → 확대 후 site-assets 업로드 (토스 "상세 이미지 검증 실패: N번 상세 이미지 가로 크기가 최소 600 이상", 2026-10-14 7건 전부 이 사유) ──
+const DETAIL_MIN_W = 600
+async function ensureDetailWidth(images, spid) {
+  let fixed = 0, failed = 0
+  for (const im of images) {
+    if (im.type !== 'DESCRIPTION' || !im.url) continue
+    try {
+      const r = await fetch(im.url, { signal: AbortSignal.timeout(60_000) })
+      if (!r.ok) { failed++; console.log(`  ⚠ 상세 ${im.order} 다운로드 ${r.status} — 원본 URL 유지`); continue }
+      const b = Buffer.from(await r.arrayBuffer())
+      const m = await sharp(b, { limitInputPixels: false }).metadata()
+      if (!m.width || m.width >= DETAIL_MIN_W) continue
+      const out = await sharp(b, { limitInputPixels: false }).resize({ width: DETAIL_MIN_W, withoutEnlargement: false }).jpeg({ quality: 90 }).toBuffer() // 세로는 비율 유지
+      const key = `toss/${spid}/detail_${im.order}_${Date.now()}.jpg`
+      const { error } = await sb.storage.from('site-assets').upload(key, out, { contentType: 'image/jpeg', upsert: true })
+      if (error) { failed++; console.log(`  ⚠ 상세 ${im.order} 업로드 실패: ${error.message} — 원본 유지`); continue }
+      im.url = sb.storage.from('site-assets').getPublicUrl(key).data.publicUrl
+      fixed++
+      console.log(`  ℹ 상세 ${im.order} 가로 ${m.width}px < ${DETAIL_MIN_W} → ${DETAIL_MIN_W}px 로 확대 업로드`)
+    } catch (e) { failed++; console.log(`  ⚠ 상세 ${im.order} 확인 실패: ${String(e.message).slice(0, 80)} — 원본 유지`) }
+  }
+  return { fixed, failed }
+}
+
 async function ensureThumb(url, spid, { clean = true, strict = false } = {}) {
   // url 은 문자열 또는 후보 배열. 쿠팡 payload 에 저장된 ggsan CDN 경로가 나중에 404 가 되는 경우(2026-10-14 포스파티딜세린·NMN 3건, 공급처 이미지 교체)가
   // 있어 대표 → 쿠팡 CDN 사본 → ggsan 현재 페이지 대표 → 나머지 payload 이미지 순으로 받아지는 첫 이미지를 쓴다.
@@ -425,6 +449,7 @@ async function buildPayload(listing, refs) {
   }
   if (images.length === 1 && htmlParts.length) images.push({ type: 'DESCRIPTION_HTML', order: 1, html: htmlParts.join('\n') })
   if (images.length === 1) throw new Error('상세 이미지/HTML 없음 (DESCRIPTION 필수)')
+  if (!DRY) await ensureDetailWidth(images, listing.seller_product_id) // 600px 미만 상세컷은 확대 업로드로 교체(실패 시 원본 유지 — 반려되면 러너가 1회 재등록)
 
   // 고시 (PROCESSED_FOOD)
   const byId = new Map()

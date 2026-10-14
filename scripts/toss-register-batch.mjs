@@ -156,7 +156,7 @@ async function resumePending() {
   return (data ?? []).map((r) => ({ spid: r.coupang_seller_product_id, name: r.name, source: r.source, tossId: r.toss_product_id, t0: Date.parse(r.registered_at) || Date.now(), resumed: true, rethumb: !!r.last_response?.lastInspectionRequestedAt }))
 }
 
-/** 최근 24h 반려분(이전 실행에서 자동 조치 안 된 것) — 시작 시 tryRecat(카테고리 불일치) / tryRethumb(여백) / tryRequant(옵션 수량) / tryRetag(검색태그 금칙어) 대상 */
+/** 최근 24h 반려분(이전 실행에서 자동 조치 안 된 것) — 시작 시 tryRecat(카테고리 불일치) / tryRethumb(여백) / tryRequant(옵션 수량) / tryRetag(검색태그 금칙어) / tryRedetail(상세 이미지 폭) 대상 */
 async function pastRejects() {
   if (has('no-resume')) return []
   const since = new Date(Date.now() - 24 * 3600_000).toISOString()
@@ -294,6 +294,36 @@ async function tryRetag(p, reasons) {
   return true
 }
 
+const isDetailReject = (reasons) => (Array.isArray(reasons) ? reasons : []).some((r) => /상세 이미지 검증 실패/.test(`${r?.title ?? ''}`) && /가로 크기/.test(`${r?.message ?? ''}`))
+
+/**
+ * "상세 이미지 검증 실패 — N번 상세 이미지 가로 크기가 최소 600 이상" 반려(2026-10-14 7건) → 등록기가 이제 600px 미만 상세컷을 확대 업로드로 교체하므로
+ * 기존 상품을 삭제하고 같은 카테고리로 재등록(1회). 토스 상품 이미지는 등록 후 PUT 으로 못 바꾸는 상세컷이라 재등록이 유일한 경로. spid 당 1회.
+ */
+async function tryRedetail(p, reasons) {
+  if (!isDetailReject(reasons) || p.redetail) return false
+  const { data: row, error: rowErr } = await sb.from('jimscanner_toss_listings').select('category_id').eq('toss_product_id', p.tossId).maybeSingle()
+  if (rowErr) { console.log(`  ↪ 상세 이미지 반려 자동 조치 보류 — DB 조회 실패: ${rowErr.message}`); return false }
+  const extra = [...(row?.category_id ? [`--cat=${row.category_id}`] : []), '--force']
+  console.log(`  ↪ 상세 이미지 가로 600px 미만 → 확대 업로드로 재등록 (기존 ${p.tossId} 삭제)`)
+  const dry = await dryCheck(p.spid, extra)
+  if (!dry.ok) { console.log(`  ↪ 재등록 보류(${dry.reason}) — 기존 상품 유지`); log({ spid: p.spid, name: p.name, step: 'redetail', ok: false, error: dry.reason }); return false }
+  const rm = await tossRemoveProduct(p.tossId)
+  if (!rm.ok) { console.log(`  ↪ 기존 상품 삭제 실패: ${JSON.stringify(rm.error).slice(0, 120)}`); log({ spid: p.spid, name: p.name, step: 'redetail', ok: false, error: 'remove failed' }); return false }
+  const { error: dbErr } = await sb.from('jimscanner_toss_listings').update({ inspection_status: 'REMOVED', exposure_status: 'REMOVED', updated_at: new Date().toISOString() }).eq('toss_product_id', p.tossId)
+  if (dbErr) console.log(`  ↪ (DB REMOVED 표시 실패: ${dbErr.message} — 토스에선 삭제됨)`)
+  const reg = await runRegister(p.spid, extra)
+  log({ spid: p.spid, name: p.name, source: p.source, step: 'redetail', ok: reg.ok, removedTossId: p.tossId, tossId: reg.tossId ?? null, error: reg.ok ? null : reg.error })
+  if (!reg.ok) {
+    const { error: markErr } = await sb.from('jimscanner_toss_listings').update({ inspection_status: 'RECAT_FAILED', updated_at: new Date().toISOString() }).eq('toss_product_id', p.tossId)
+    console.log(`  ↪ 재등록 실패(기존 ${p.tossId} 는 삭제됨, DB ${markErr ? 'REMOVED 그대로 — RECAT_FAILED 표시 실패: ' + markErr.message : 'RECAT_FAILED'}): ${reg.error} → 수동: node scripts/toss-register.mjs --spid=${p.spid} ${extra.join(' ')} --show`)
+    return false
+  }
+  console.log(`  ↪ 재등록 OK id=${reg.tossId} | ${reg.category} | ${reg.options}`)
+  pending.push({ spid: p.spid, name: p.name, source: p.source, tossId: reg.tossId, t0: Date.now(), category: reg.category, options: reg.options, redetail: true })
+  return true
+}
+
 const cands = await candidates()
 const plan = cands.slice(0, LIMIT)
 console.log(`후보 ${cands.length}건 (sources=${SOURCES.join(',')}, min-sold=${MIN_SOLD}) → 이번 실행 ${plan.length}건${LIST ? ' [계획만]' : ''} · 검수 창 ${PARALLEL}건 · 대기 최대 ${WAIT_MAX_MIN}분`)
@@ -306,7 +336,7 @@ const pending = await resumePending()
 if (pending.length) console.log(`이전 실행의 검수 대기 ${pending.length}건 이어서 추적: ${pending.map((p) => p.tossId).join(', ')}`)
 for (const r of await pastRejects()) {
   console.log(`\n이전 반려 ${r.tossId} ${String(r.name || '').slice(0, 36)} — ${JSON.stringify((r.reasons ?? []).map((x) => x?.title)).slice(0, 60)}`)
-  if (!(await tryRecat(r, r.reasons)) && !(await tryRethumb(r, r.reasons)) && !(await tryRequant(r, r.reasons))) await tryRetag(r, r.reasons)
+  if (!(await tryRecat(r, r.reasons)) && !(await tryRethumb(r, r.reasons)) && !(await tryRequant(r, r.reasons)) && !(await tryRetag(r, r.reasons))) await tryRedetail(r, r.reasons)
 }
 let idx = 0
 const settle = (p, insp) => {
@@ -360,8 +390,8 @@ while (idx < plan.length || pending.length) {
     const insp = await checkInspection(p.tossId)
     if (insp.inspection && insp.inspection !== 'LLM_INSPECTION_READY') {
       pending.splice(pending.indexOf(p), 1)
-      // 카테고리 불일치 → 추천 카테고리로 재등록(1회), 썸네일 "여백" → strict 패키지샷 교체 재검수(1회), 옵션(수량>1) → 수량 1개로 재등록(1회), 검색태그 금칙어 → 금칙어 제외 재등록(1회) — 모두 실패 streak 에 안 셈
-      if (insp.inspection === 'REJECT' && (await tryRecat(p, insp.reasons) || await tryRethumb(p, insp.reasons) || await tryRequant(p, insp.reasons) || await tryRetag(p, insp.reasons))) continue
+      // 카테고리 불일치 → 추천 카테고리로 재등록(1회), 썸네일 "여백" → strict 패키지샷 교체 재검수(1회), 옵션(수량>1) → 수량 1개로 재등록(1회), 검색태그 금칙어 → 금칙어 제외 재등록(1회), 상세 이미지 600px 미만 → 확대 업로드 재등록(1회) — 모두 실패 streak 에 안 셈
+      if (insp.inspection === 'REJECT' && (await tryRecat(p, insp.reasons) || await tryRethumb(p, insp.reasons) || await tryRequant(p, insp.reasons) || await tryRetag(p, insp.reasons) || await tryRedetail(p, insp.reasons))) continue
       settle(p, insp)
     }
     else if (Date.now() - p.t0 > WAIT_MAX_MIN * 60_000) {
