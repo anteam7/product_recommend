@@ -20,6 +20,7 @@
  *  - 배송: NORMAL/NORMAL, preparationDays 3(영업일=발송기한·페널티 기준), FREE, 제주/도서산간 미배송(쿠팡 remoteAreaDeliverable N 미러), CJ
  */
 import { readFileSync } from 'node:fs'
+import { loadFoodLeaves } from './lib/toss-categories.mjs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createClient } from '@supabase/supabase-js'
@@ -101,7 +102,16 @@ const CAT_RULES = [
   [/건강환|침환|\d+\s*환(?![경장])/, 60007], [/분말|파우더|가루/, 60005], [/영양식|환자식|성인분유|연하식/, 59931], [/허브|추출물|추출분말|잎(?![가-힣])/, 59885],
 ]
 const DEFAULT_CAT = 59807 // 기타영양제
-const mapCategory = (t) => { for (const [re, id] of CAT_RULES) if (re.test(t || '')) return id; return DEFAULT_CAT }
+let _leafByName = null
+// 쿠팡 노출 카테고리 leaf 이름(기타소금·혼합곡/기타곡류·톳·채소가루…)이 토스 식품 leaf 이름과 정확히 하나로 일치하면 그 leaf — 규칙에 안 걸린 일반 식품이
+// 전부 기타영양제로 가 "카테고리 불일치" 재등록을 거치던 것(2026-10-14 실측: 등록 대상 616건의 노출 카테고리 중 512건이 토스 leaf 이름과 일치)
+const leafByDisplay = (display) => {
+  const last = String(display || '').replace(/s*(.*?)s*/g, '').split('>').pop().trim()
+  if (!last || last === '기타영양제') return null
+  if (!_leafByName) { _leafByName = new Map(); for (const l of loadFoodLeaves()) { const k = String(l.path || '').split('>').pop().trim(); _leafByName.set(k, _leafByName.has(k) ? null : l.id) } } // 같은 이름이 둘이면 null(모호)
+  return _leafByName.get(last) || null
+}
+const mapCategory = (t, display) => { for (const [re, id] of CAT_RULES) if (re.test(t || '')) return id; return leafByDisplay(display) || DEFAULT_CAT }
 
 // ── 고시: 쿠팡 가공식품 detailName → 토스 PROCESSED_FOOD item id (GET /notices?categoryCode=PROCESSED_FOOD 실측) ──
 const PF_MAP = [
@@ -429,10 +439,17 @@ async function buildPayload(listing, refs) {
   const name = stripBanned(cleanName(arg('name') || listing.registered_title || p.sellerProductName))
   const brand = (listing.brand || p.brand || '').replace(/[^0-9a-zA-Z가-힣 *()\-_+/.,]/g, '').trim().slice(0, 50) || null
   if (brand && /없음|중국|기타|OEM|협력사/i.test(brand)) throw new Error(`브랜드 금지어: ${brand}`)
-  let categoryId = parseInt(arg('cat', ''), 10) || mapCategory(`${name} ${listing.display_category_name || ''}`)
+  let categoryId = parseInt(arg('cat', ''), 10) || mapCategory(`${name} ${listing.display_category_name || ''}`, listing.display_category_name)
   let tpl = await tossConstraintTemplate(categoryId)
   if (!tpl.ok) throw new Error(`제약 템플릿 조회 실패 ${JSON.stringify(tpl.error)}`)
-  if (!(tpl.data?.productNoticeInfoTemplateTypes ?? []).includes('PROCESSED_FOOD')) throw new Error(`카테고리 ${categoryId}(${tpl.data?.categoryName})는 PROCESSED_FOOD 고시 불가: ${JSON.stringify(tpl.data?.productNoticeInfoTemplateTypes)}`)
+  if (!(tpl.data?.productNoticeInfoTemplateTypes ?? []).includes('PROCESSED_FOOD')) {
+    // 규칙·leaf 이름으로 고른 카테고리가 가공식품 고시를 안 받으면(신선식품 leaf 등) 기타영양제로 물러난다 — --cat 명시면 그대로 오류
+    if (arg('cat') || categoryId === DEFAULT_CAT) throw new Error(`카테고리 ${categoryId}(${tpl.data?.categoryName})는 PROCESSED_FOOD 고시 불가: ${JSON.stringify(tpl.data?.productNoticeInfoTemplateTypes)}`)
+    console.log(`  ℹ 카테고리 ${categoryId}(${tpl.data?.categoryName})는 PROCESSED_FOOD 고시 불가 → 기타영양제(${DEFAULT_CAT})`)
+    categoryId = DEFAULT_CAT; tpl = await tossConstraintTemplate(categoryId)
+    if (!tpl.ok) throw new Error(`제약 템플릿 조회 실패 ${JSON.stringify(tpl.error)}`)
+    if (!(tpl.data?.productNoticeInfoTemplateTypes ?? []).includes('PROCESSED_FOOD')) throw new Error(`기타영양제도 PROCESSED_FOOD 고시 불가: ${JSON.stringify(tpl.data?.productNoticeInfoTemplateTypes)}`)
+  }
   const g = gPre || (listing.source === 'ggsan' ? await ggsanInfo(listing.source_goods_no) : null)
   if (g && g.in_stock === false) throw new Error('ggsan 품절 — 등록 중단')
 
