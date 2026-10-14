@@ -19,8 +19,8 @@
  *          MSP 이상 검사. originPrice = ggsan 정가(있고 ≥ sale) / --origin=sale 이면 동일. 기등록분 가격 동기화는 scripts/toss-reprice.mjs
  *  - 배송: NORMAL/NORMAL, preparationDays 3(영업일=발송기한·페널티 기준), FREE, 제주/도서산간 미배송(쿠팡 remoteAreaDeliverable N 미러), CJ
  */
-import { readFileSync } from 'node:fs'
-import { loadFoodLeaves } from './lib/toss-categories.mjs'
+import { readFileSync, existsSync } from 'node:fs'
+import { loadFoodLeaves, loadBeautyLeaves } from './lib/toss-categories.mjs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createClient } from '@supabase/supabase-js'
@@ -112,6 +112,48 @@ const leafByDisplay = (display) => {
   return _leafByName.get(last) || null
 }
 const mapCategory = (t, display) => { for (const [re, id] of CAT_RULES) if (re.test(t || '')) return id; return leafByDisplay(display) || DEFAULT_CAT }
+
+// ── 화장품(화장품스토리, 2026-10-14) 카테고리: 쿠팡 노출 leaf 이름이 토스 뷰티 leaf 이름과 그대로 일치(146건 중 142건 실측) → 이름 매칭이 1순위, 노출 카테고리가 없거나
+//    이름이 다른 것(스칼프/두피/비듬샴푸·오 드 퍼퓸)은 별칭·제목 규칙. 식품 규칙(CAT_RULES 의 알로에·마늘·석류…)이 화장품 제목에 걸리면 안 되므로 완전히 분리한다. 못 찾으면 null(등록 중단, --cat).
+const BEAUTY_ALIAS = { '스칼프/두피/비듬샴푸': '기능성샴푸', '오 드 퍼퓸': '뷰티 > 향수 > 액체향수 > 남녀공용향수 > 오 드 퍼퓸' }
+const BEAUTY_RULES = [
+  [/트리트먼트|헤어\s*팩|헤어\s*마스크/, '일반헤어트리트먼트'], [/(스캘프|스칼프|두피|비듬|탈모).*샴푸|샴푸.*(스캘프|스칼프|두피|비듬|탈모)/, '기능성샴푸'], [/샴푸/, '일반샴푸'], [/린스|컨디셔너/, '일반린스/컨디셔너'],
+  [/헤어\s*에센스/, '헤어에센스'], [/헤어\s*오일/, '헤어오일'], [/헤어\s*미스트/, '헤어미스트'], [/왁스/, '헤어왁스'],
+  [/수딩\s*젤|알로에|애프터\s*선/, '알로에/수딩/애프터선'], [/선\s*스틱/, '선스틱'], [/선크림|선블록|썬크림|선로션|선\s*크림|자외선/, '선블록/선크림/선로션'],
+  [/클렌징\s*폼|폼\s*클렌저|팩투폼|포밍/, '클렌징 폼'], [/클렌징\s*젤/, '클렌징 젤'], [/클렌징\s*오일/, '클렌징 오일'], [/클렌징\s*워터/, '클렌징 워터'], [/클렌징\s*티슈|클렌징\s*시트/, '클렌징 티슈/시트'], [/클렌징\s*밤|클렌징\s*크림/, '클렌징 크림/밤'],
+  [/아이\s*패치/, '아이 패치'], [/시트\s*마스크|마스크\s*팩|마스크팩|마스크\s*시트/, '시트 마스크/팩'], [/필\s*오프/, '필오프 마스크/팩'], [/슬리핑\s*(마스크|팩)/, '슬리핑 마스크/팩'], [/워시\s*오프/, '워시오프 마스크/팩'],
+  [/토너\s*패드|스킨\s*패드/, '스킨/토너 패드'], [/필링\s*패드/, '필링 패드'], [/필링\s*토너/, '필링 토너'], [/토너|화장수|스킨(?!\s*케어)/, '스킨/토너/화장수'], [/미스트/, '미스트'], [/앰플/, '앰플'], [/세럼|에센스/, '에센스/세럼'],
+  [/아이\s*크림/, '아이크림'], [/핸드\s*크림/, '핸드크림'], [/풋\s*크림/, '풋크림'], [/나이트\s*크림/, '나이트크림'], [/마사지\s*크림/, '마사지크림'], [/크림/, '데이크림'],
+  [/바디\s*로션/, '바디로션'], [/바디\s*워시/, '바디워시'], [/바디\s*오일/, '바디오일'], [/바디\s*스크럽/, '바디스크럽'], [/바디\s*미스트/, '바디미스트'], [/청결제/, '여성청결제'],
+  [/퍼퓸|향수|오\s*드\s*/, '뷰티 > 향수 > 액체향수 > 남녀공용향수 > 오 드 퍼퓸'], [/오일/, '일반오일'], [/3종/, '3종 세트'], [/2종/, '2종 세트'], [/화장솜/, '화장솜'],
+]
+let _beautyByName = null
+const beautyLeaf = (nameOrPath) => {
+  if (!_beautyByName) { _beautyByName = new Map(); for (const l of loadBeautyLeaves()) { _beautyByName.set(l.path, l.id); const k = String(l.path || '').split('>').pop().trim(); _beautyByName.set(k, _beautyByName.has(k) ? null : l.id) } } // 같은 이름이 둘이면 null(모호) — 경로로만
+  return _beautyByName.get(nameOrPath) || null
+}
+const mapBeautyCategory = (t, display) => {
+  const last = String(display || '').split('>').pop().trim()
+  if (last && BEAUTY_ALIAS[last]) return beautyLeaf(BEAUTY_ALIAS[last])
+  if (last && beautyLeaf(last)) return beautyLeaf(last)
+  for (const [re, name] of BEAUTY_RULES) if (re.test(t || '')) return beautyLeaf(name)
+  return null
+}
+// ── 고시: 쿠팡 화장품 detailName → 토스 COSMETICS item id (GET /notices?categoryCode=COSMETICS 2026-10-14 실측, 11항목 전부 필수로 채움) ──
+const COS_MAP = [
+  [/용량|중량/, 271], [/주요 사양/, 273], [/사용기한|개봉 후/, 275], [/사용방법/, 276], [/제조업자|책임판매업자/, 277], [/제조국/, 279], [/모든 성분|성분/, 281], [/기능성/, 283], [/주의사항/, 285], [/품질보증/, 287], [/전화번호|상담/, 289],
+]
+const COS_ALL = [271, 273, 275, 276, 277, 279, 281, 283, 285, 287, 289]
+// 판매옵션 '성분'·'향'(뷰티 템플릿의 자유 입력 칸): 제목 키워드 → 쿠팡 속성 → '상세페이지참조'. 없는 성분·향을 지어내지 않는다.
+const INGREDIENTS = ['콜라겐', '히알루론산', '히알루론', '세라마이드', '나이아신아마이드', '레티놀', '비타민C', '비타민', '펩타이드', '병풀', '시카', '마데카소사이드', '티트리', '어성초', '녹차', '프로폴리스', '알로에', '판테놀', '스쿠알란', '아르간', '케라틴', '단백질', '쌀', '흑미', '유자', '감초', '흑설탕', '꿀', '로즈', '라벤더', '녹두', '숯', '머드', '진주', '캐비어', '글루타치온', '아데노신', '달팽이', '마린', '해양', '미네랄', '콜라겐', '카카두플럼', '동백', '살구', '올리브', '코코넛', '시어버터', '허브', '카모마일', '장미', '연꽃', '인삼', '홍삼', '발효']
+const SCENTS = ['라벤더', '로즈', '장미', '시트러스', '플로럴', '허브', '머스크', '우디', '그린', '프레쉬', '민트', '레몬', '유자', '자몽', '베르가못', '바닐라', '코튼', '파우더리', '아쿠아', '피치', '체리블라썸', '무향']
+const attrVal = (attrs, names) => { for (const n of names) { const v = attrs?.find((a) => a.attributeTypeName === n)?.attributeValueName; if (v && v.trim() && !/없음|해당없음|기타/.test(v)) return v.trim() } return null }
+const beautyIngredient = (title, attrs) => INGREDIENTS.find((k) => (title || '').includes(k)) || attrVal(attrs, ['주성분', '스킨케어 특별성분', '뷰티오일 성분', '트리트먼트/팩/앰플 성분']) || '상세페이지참조'
+const beautyScent = (title, attrs) => SCENTS.find((k) => (title || '').includes(k)) || /([가-힣a-zA-Z]{2,10})향(?![가-힣])/.exec(title || '')?.[1] || attrVal(attrs, ['향기', '뷰티 향', '스킨케어 향']) || '상세페이지참조' // "베이비파우더향" → 베이비파우더
+
+// ── 옵션 오버라이드 파일: scripts/toss-opts-vision.mjs(상세 이미지 비전 판독)가 만든 _workspace/toss-opts-overrides.json { spid: { opts } } — --opts 가 없을 때 자동값 대신 쓴다 ──
+const OV_FILE = path.join(__dirname, '..', '_workspace', 'toss-opts-overrides.json')
+const fileOpts = (spid) => { try { return existsSync(OV_FILE) ? (JSON.parse(readFileSync(OV_FILE, 'utf8'))[String(spid)]?.opts || null) : null } catch { return null } }
 
 // ── 고시: 쿠팡 가공식품 detailName → 토스 PROCESSED_FOOD item id (GET /notices?categoryCode=PROCESSED_FOOD 실측) ──
 const PF_MAP = [
@@ -219,11 +261,24 @@ function buildOptions(template, ctx, optsArg) {
   const auto = (key) => {
     if (/^수량$/.test(key)) { if (!PACK_QTY && u.qty !== '1') console.log(`  ℹ 묶음 ${u.qty}개 구성 → 수량 1개(세트)로 등록 (묶음 수를 쓰려면 --pack-qty)`); return PACK_QTY ? `${u.qty}개` : '1개' }
     // 액상(즙·주스 키워드)인데 제목이 g 로만 적힌 경우(푸룬주스 20g x 14포) 템플릿이 용량만 받으면 g≈ml 로 넣는다. 가루·정제는 제외.
-    if (/용량/.test(key)) return u.vol ? `${u.vol}${u.volUnit}` : (u.liquid && u.wt && u.wtUnit === 'g' ? `${u.wt}ml` : null)
+    // 화장품(바디로션 500g 등)은 밀도≈1 로 g→ml 허용 — 뷰티 템플릿 일부(바디로션·토너)는 용량만 받는다
+    if (/용량/.test(key)) return u.vol ? `${u.vol}${u.volUnit}` : ((u.liquid || ctx.cosmetic) && u.wt && u.wtUnit === 'g' ? `${u.wt}ml` : null)
     if (/중량/.test(key)) return u.wt ? `${u.wt}${u.wtUnit}` : null
     // 템플릿에 '개당 수량' 이 없는 카테고리(다이어트식품 등)는 '개당 캡슐/정' 에 낱개(포/스틱)를 넣는다 — 단위는 forceUnit 이 템플릿 허용값으로 맞춤
     if (/캡슐|정/.test(key)) return u.perTitle ? `${u.perTitle}${u.perTitleUnit}` : (u.cap ? `${u.cap}${u.capUnit}` : null)
-    if (/개당 수량|수량/.test(key)) { if (u.per) return `${u.per}${u.perUnit}`; if (u.single) { console.log('  ℹ 단일 용기 상품(분말·청·꿀 등) → 개당 수량 1개'); return '1개' } return null }
+    if (/개당 수량|수량/.test(key)) {
+      if (u.per) return `${u.per}${u.perUnit}`
+      if (u.single) { console.log('  ℹ 단일 용기 상품(분말·청·꿀 등) → 개당 수량 1개'); return '1개' }
+      if (ctx.cosmetic) {
+        // 화장품: 쿠팡 속성 '개당 수량'(마스크팩 10매 등) → 용량/중량이 있는 단일 용기(크림 50ml, 시트 마스크 25ml 1매)면 1개. 둘 다 없으면 자리값(러너가 OPTS_UNKNOWN 으로 건너뜀)
+        const a = /(\d+)/.exec(ctx.attrs?.find((x) => x.attributeTypeName === '개당 수량')?.attributeValueName || '')?.[1]
+        if (a && Number(a) > 0) return `${a}개`
+        if (u.vol || u.wt) { console.log('  ℹ 화장품 단일 용기 → 개당 수량 1개'); return '1개' }
+      }
+      return null
+    }
+    if (ctx.cosmetic && /성분/.test(key)) return beautyIngredient(ctx.title, ctx.attrs)
+    if (ctx.cosmetic && /^향|향기/.test(key)) return beautyScent(ctx.title, ctx.attrs)
     return null
   }
   const out = []
@@ -241,7 +296,8 @@ function buildOptions(template, ctx, optsArg) {
     // 템플릿 순서(캡슐/정 먼저) 때문에 "15정"으로 등록되던 문제(2026-10-13 석류젤리 dry-run)
     // 낱개(포/스틱)가 있으면 '개당 수량' → '개당 캡슐/정'(포 단위 허용) → 중량/용량 순으로 본다: 홍삼차 3g x 100포 는 "100포"가 "3g"보다 정보가 많다
     const rank = (o) => (/개당 수량/.test(o.key) ? 0 : /캡슐|정/.test(o.key) ? 1 : 2)
-    const ordered = u.per ? [...oneOf].sort((a, b) => rank(a) - rank(b)) : oneOf
+    // 화장품은 용량이 없고 중량(선크림 50g)만 있으면 '개당 중량' 을 먼저 본다 — g→ml 대체가 템플릿 순서(용량 먼저) 때문에 고시(50g)와 어긋나지 않게
+    const ordered = u.per ? [...oneOf].sort((a, b) => rank(a) - rank(b)) : (ctx.cosmetic && !u.vol && u.wt ? [...oneOf].sort((a, b) => (/중량/.test(a.key) ? 0 : 1) - (/중량/.test(b.key) ? 0 : 1)) : oneOf)
     if (!chosen) for (const o of ordered) { const a = auto(o.key); if (a) { chosen = o; value = a; break } }
     if (!chosen && u.single) { const o = oneOf.find((x) => /개당 수량/.test(x.key)); if (o) { chosen = o; value = '1개'; console.log('  ℹ 단일 용기 상품(분말·청·꿀 등) → 개당 수량 1개') } }
     if (!chosen) { chosen = oneOf.find((o) => /개당 수량/.test(o.key)) || oneOf[0]; value = '1' + (chosen.unitValues?.[0] || '개'); console.log(`  ⚠ 택1 옵션 자동값 없음 → ${chosen.key}=${value}`); OPT_WARN.push(`${chosen.key}→${value}`) }
@@ -439,12 +495,16 @@ async function buildPayload(listing, refs) {
   const name = stripBanned(cleanName(arg('name') || listing.registered_title || p.sellerProductName))
   const brand = (listing.brand || p.brand || '').replace(/[^0-9a-zA-Z가-힣 *()\-_+/.,]/g, '').trim().slice(0, 50) || null
   if (brand && /없음|중국|기타|OEM|협력사/i.test(brand)) throw new Error(`브랜드 금지어: ${brand}`)
-  let categoryId = parseInt(arg('cat', ''), 10) || mapCategory(`${name} ${listing.display_category_name || ''}`, listing.display_category_name)
+  // 화장품(쿠팡 고시 '화장품' 또는 화장품스토리 매입분) → 뷰티 카테고리 + COSMETICS 고시. 식품 규칙·기타영양제 폴백은 쓰지 않는다 (2026-10-14)
+  const isCosmetic = arg('domain') ? arg('domain') === 'beauty' : ((it.notices || []).some((n) => n.noticeCategoryName === '화장품') || listing.source === 'cmtstory')
+  const NOTICE_CODE = isCosmetic ? 'COSMETICS' : 'PROCESSED_FOOD'
+  let categoryId = parseInt(arg('cat', ''), 10) || (isCosmetic ? mapBeautyCategory(name, listing.display_category_name) : mapCategory(`${name} ${listing.display_category_name || ''}`, listing.display_category_name))
+  if (!categoryId) throw new Error(`화장품 카테고리 매핑 없음(노출 카테고리 ${listing.display_category_name || '없음'}) — --cat=<뷰티 leaf id> 지정`)
   let tpl = await tossConstraintTemplate(categoryId)
   if (!tpl.ok) throw new Error(`제약 템플릿 조회 실패 ${JSON.stringify(tpl.error)}`)
-  if (!(tpl.data?.productNoticeInfoTemplateTypes ?? []).includes('PROCESSED_FOOD')) {
+  if (!(tpl.data?.productNoticeInfoTemplateTypes ?? []).includes(NOTICE_CODE)) {
     // 규칙·leaf 이름으로 고른 카테고리가 가공식품 고시를 안 받으면(신선식품 leaf 등) 기타영양제로 물러난다 — --cat 명시면 그대로 오류
-    if (arg('cat') || categoryId === DEFAULT_CAT) throw new Error(`카테고리 ${categoryId}(${tpl.data?.categoryName})는 PROCESSED_FOOD 고시 불가: ${JSON.stringify(tpl.data?.productNoticeInfoTemplateTypes)}`)
+    if (isCosmetic || arg('cat') || categoryId === DEFAULT_CAT) throw new Error(`카테고리 ${categoryId}(${tpl.data?.categoryName})는 ${NOTICE_CODE} 고시 불가: ${JSON.stringify(tpl.data?.productNoticeInfoTemplateTypes)}`)
     console.log(`  ℹ 카테고리 ${categoryId}(${tpl.data?.categoryName})는 PROCESSED_FOOD 고시 불가 → 기타영양제(${DEFAULT_CAT})`)
     categoryId = DEFAULT_CAT; tpl = await tossConstraintTemplate(categoryId)
     if (!tpl.ok) throw new Error(`제약 템플릿 조회 실패 ${JSON.stringify(tpl.error)}`)
@@ -466,10 +526,12 @@ async function buildPayload(listing, refs) {
   const legacy = [arg('opt-qty') ? `수량=${arg('opt-qty')}` : null, arg('opt-unit') ? `개당 수량=${arg('opt-unit')}` : null].filter(Boolean).join(';')
   OPT_WARN.length = 0
   const noticeText = (it.notices || []).filter((n) => /제품명|포장단위/.test(n.noticeCategoryDetailName || '')).map((n) => n.content).filter((c) => c && !/참조/.test(c)).join(' ')
-  const optCtx = { title: listing.registered_title, itemName: it.itemName, attrs: it.attributes, extra: noticeText }, optArg = [arg('opts'), legacy].filter(Boolean).join(';')
+  const ovOpts = arg('opts') || fileOpts(listing.seller_product_id)
+  if (!arg('opts') && ovOpts) console.log(`  ℹ 옵션 오버라이드 파일(비전 판독): ${ovOpts}`)
+  const optCtx = { title: listing.registered_title, itemName: it.itemName, attrs: it.attributes, extra: noticeText, cosmetic: isCosmetic }, optArg = [ovOpts, legacy].filter(Boolean).join(';')
   let options = buildOptions(tpl.data, optCtx, optArg)
   // 제형 안전망: 제목에 N정/캡슐이 있는데 템플릿에 캡슐/정 옵션이 없으면(양배추정 90정 → 양배추즙 leaf 의 용량 템플릿, 2026-10-14) 기타영양제(59807)로 바꿔 다시 짠다 — --cat 지정 시 제외
-  if (OPT_WARN.length && !arg('cat') && categoryId !== 59807 && /\d\s*(정|캡슐)(?![가-힣])/.test(listing.registered_title || '') && !(tpl.data?.categorySalesOptions ?? []).some((o) => /캡슐|정/.test(o.key))) {
+  if (!isCosmetic && OPT_WARN.length && !arg('cat') && categoryId !== 59807 && /\d\s*(정|캡슐)(?![가-힣])/.test(listing.registered_title || '') && !(tpl.data?.categorySalesOptions ?? []).some((o) => /캡슐|정/.test(o.key))) {
     const alt = await tossConstraintTemplate(59807)
     if (alt.ok) { console.log('  ℹ 제형(정/캡슐) ≠ 카테고리 템플릿(' + (tpl.data?.categoryName || categoryId) + ') → 기타영양제(59807)로 변경'); categoryId = 59807; tpl = alt; OPT_WARN.length = 0; options = buildOptions(alt.data, optCtx, optArg) }
   }
@@ -495,10 +557,17 @@ async function buildPayload(listing, refs) {
   if (images.length === 1) throw new Error('상세 이미지/HTML 없음 (DESCRIPTION 필수)')
   if (!DRY) await ensureDetailWidth(images, listing.seller_product_id) // 600px 미만 상세컷은 확대 업로드로 교체(실패 시 원본 유지 — 반려되면 러너가 1회 재등록)
 
-  // 고시 (PROCESSED_FOOD)
+  // 고시 (PROCESSED_FOOD | COSMETICS)
   const byId = new Map()
+  const comp = [...options.filter((o) => !/^수량$|성분|^향/.test(o.groupName)).map((o) => o.valueName), options.find((o) => o.groupName === '수량')?.valueName].filter(Boolean).join(' x ')
+  let noticeItems
+  if (isCosmetic) {
+    for (const n of it.notices || []) { const hit = COS_MAP.find(([re]) => re.test(n.noticeCategoryDetailName || '')); if (hit && n.content && !byId.has(hit[1])) byId.set(hit[1], n.content) }
+    if (!/\d/.test(byId.get(271) || '')) byId.set(271, comp || '상품 상세페이지 참조') // 용량 칸이 비었거나 글자뿐이면 옵션 구성(100ml x 1개)
+    byId.set(289, byId.get(289) || CONTACT)
+    noticeItems = COS_ALL.map((id) => ({ id, content: (byId.get(id) || '상품 상세페이지 참조').replace(/상세설명 참조/g, '상품 상세페이지 참조').slice(0, 4000) }))
+  } else {
   for (const n of it.notices || []) { const hit = PF_MAP.find(([re]) => re.test(n.noticeCategoryDetailName || '')); if (hit && n.content) byId.set(hit[1], n.content) }
-  const comp = [...options.filter((o) => o.groupName !== '수량').map((o) => o.valueName), options.find((o) => o.groupName === '수량')?.valueName].filter(Boolean).join(' x ')
   if (!byId.get(321) || /참조/.test(byId.get(321))) byId.set(321, name)
   if (g?.maker) byId.set(325, `${g.maker} (원산지 ${g.origin || '상품 상세페이지 참조'})`)
   // 쿠팡 고시의 용량/수량 칸은 상품명을 그대로 넣은 경우가 많음 → 숫자 없는 값이면 파싱한 구성(예: 30포 x 3개)으로 교체
@@ -507,7 +576,8 @@ async function buildPayload(listing, refs) {
   if (looksLikeName) byId.set(329, comp ? `${comp} (상세페이지 참조)` : '상품 상세페이지 참조')
   byId.set(341, byId.get(341) || CONTACT)
   byId.set(319, '「식품등의 표시·광고에 관한 법률」 및 「식품등의 표시기준」에 따른 표시사항은 아래 세부 항목 및 상품 상세페이지 참조')
-  const noticeItems = PF_ALL.map((id) => ({ id, content: (byId.get(id) || '상품 상세페이지 참조').replace(/상세설명 참조/g, '상품 상세페이지 참조').slice(0, 4000) }))
+  noticeItems = PF_ALL.map((id) => ({ id, content: (byId.get(id) || '상품 상세페이지 참조').replace(/상세설명 참조/g, '상품 상세페이지 참조').slice(0, 4000) }))
+  }
 
   const payload = {
     partnerName: PARTNER_NAME,
@@ -515,7 +585,7 @@ async function buildPayload(listing, refs) {
     managementCode: `cp${listing.seller_product_id}`,
     images,
     stocks: [{ options, remainingCount: 99, isHide: false, isMainPrice: true, originPrice, salePrice, managementCode: `${listing.source}:${listing.source_goods_no}` }],
-    notice: { categoryCode: 'PROCESSED_FOOD', items: noticeItems },
+    notice: { categoryCode: NOTICE_CODE, items: noticeItems },
     exposure: { searchKeywords: keywords(name, brand, tpl.data?.categoryName), description: `${name}. 구성 ${comp || '상세페이지 참조'}. 상세 설명 이미지를 참고해 주세요.`.slice(0, 1500) },
     deliveryPolicy: {
       deliveryType: 'NORMAL', deliveryMethod: 'NORMAL', preparationDays: PREP_DAYS,
@@ -527,7 +597,7 @@ async function buildPayload(listing, refs) {
       exchangeRefundLocationId: refs.exchangeRefundLocationId,
       refundOneWayDeliveryFee: p.returnCharge || RETURN_ONEWAY, exchangeRoundTripDeliveryFee: (p.returnCharge || RETURN_ONEWAY) * 2 || EXCHANGE_ROUNDTRIP,
       applicationMethodDescription: '토스쇼핑 주문 상세에서 교환/반품 신청. 단순변심 교환/반품은 상품 수령 후 7일 이내, 미개봉 상태에서 가능합니다.',
-      applicationTermDescription: '상품 수령 후 7일 이내 (상품 하자·오배송은 수령 후 3개월 이내, 안 날로부터 30일 이내). 식품 특성상 개봉·섭취 후에는 단순변심 반품이 어렵습니다.',
+      applicationTermDescription: `상품 수령 후 7일 이내 (상품 하자·오배송은 수령 후 3개월 이내, 안 날로부터 30일 이내). ${isCosmetic ? '화장품 특성상 개봉·사용 후에는' : '식품 특성상 개봉·섭취 후에는'} 단순변심 반품이 어렵습니다.`,
     },
   }
   return { payload, meta: { thumb: thumb.note, categoryName: tpl.data?.categoryName, ggsan: g, msp, salePrice, originPrice } }

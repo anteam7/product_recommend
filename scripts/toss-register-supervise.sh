@@ -7,7 +7,7 @@
 #   2026-10-14 새벽 ✗ 만 세어 "진전 있음"으로 오판, 2분 간격으로 38회 공회전.) 진전 없는 회차는 10분 쉬고, 연속 6회면 사람 확인이 필요하니 종료.
 set -u
 cd "$(dirname "$0")/.."
-MAX=${1:-40}; PAR=${2:-8}; SRC=${3:-ggsan,upickb2b,bio77,kwholesale,wellroot}
+MAX=${1:-40}; PAR=${2:-8}; SRC=${3:-ggsan,upickb2b,bio77,kwholesale,wellroot,cmtstory}
 case "$MAX$PAR" in *[!0-9]*) echo "사용법: $0 [최대 반복(숫자)] [검수 창(숫자)] [sources]" >&2; exit 2;; esac
 DAY=$(date +%Y%m%d); mkdir -p _workspace   # 이 PC 로컬 시각(KST). TZ=Asia/Seoul 은 Git Bash 에서 UTC 로 떨어짐(10-13 파일명 실측)
 SUM="_workspace/toss-supervise-$DAY.log"

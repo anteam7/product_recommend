@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 /**
- * 토스쇼핑 식품(50995) 카테고리 트리 전체를 BFS 로 받아 leaf 목록을 캐시한다 → scripts/lib/toss-food-leaves.json
- *   node scripts/toss-dump-food-leaves.mjs            # 전체(건강식품 59787 포함)
+ * 토스쇼핑 카테고리 트리를 BFS 로 받아 leaf 목록을 캐시한다 → scripts/lib/toss-<name>-leaves.json
+ *   node scripts/toss-dump-food-leaves.mjs                              # 식품(50995) → toss-food-leaves.json (건강식품 59787 포함)
+ *   node scripts/toss-dump-food-leaves.mjs --root=50997 --name=beauty   # 뷰티(50997) → toss-beauty-leaves.json (2026-10-14 화장품스토리 토스 등록)
  * 결과: [{ id, name, path, parentId, level }] — toss-register.mjs CAT_RULES / 카테고리 불일치 반려 자동 재등록(추천 경로 → id) 에 사용.
  */
 import { writeFileSync } from 'node:fs'
@@ -9,7 +10,12 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { tossCategoryChildren } from './lib/toss-api.mjs'
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
-const ROOT = { id: 50995, name: '식품', path: '식품' }
+const arg = (k, d) => { const a = process.argv.find((x) => x.startsWith(`--${k}=`)); return a ? a.split('=').slice(1).join('=') : d }
+const ROOTS = { food: { id: 50995, name: '식품' }, beauty: { id: 50997, name: '뷰티' } }
+const NAME = arg('name', 'food'), rootId = parseInt(arg('root', ''), 10) || ROOTS[NAME]?.id
+if (!rootId) { console.error('--root=<id> 또는 --name=food|beauty'); process.exit(1) }
+const ROOT = { id: rootId, name: ROOTS[NAME]?.name || String(rootId), path: ROOTS[NAME]?.name || String(rootId) }
+const OUT = `toss-${NAME}-leaves.json`
 const queue = [ROOT], leaves = [], seen = new Set([ROOT.id])
 let calls = 0
 while (queue.length) {
@@ -25,5 +31,5 @@ while (queue.length) {
   if (calls % 50 === 0) console.log(`  ${calls} calls, leaves ${leaves.length}, queue ${queue.length}`)
 }
 leaves.sort((a, b) => a.path.localeCompare(b.path, 'ko'))
-writeFileSync(path.join(__dirname, 'lib', 'toss-food-leaves.json'), JSON.stringify(leaves, null, 1))
-console.log(`완료: leaf ${leaves.length}개, API ${calls}회 → scripts/lib/toss-food-leaves.json`)
+writeFileSync(path.join(__dirname, 'lib', OUT), JSON.stringify(leaves, null, 1))
+console.log(`완료: leaf ${leaves.length}개, API ${calls}회 → scripts/lib/${OUT}`)

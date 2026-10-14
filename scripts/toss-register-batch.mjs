@@ -4,12 +4,12 @@
  * (한 번에 대량 등록하지 말고 1건씩 검수 확인 후 다음 — 사장님 지시 2026-08-19. 2026-10-13 자동화)
  *
  *   node scripts/toss-register-batch.mjs --list [--limit=20]                       # 계획만 출력(등록 안 함)
- *   node scripts/toss-register-batch.mjs --limit=20 [--min-sold=0] [--sources=ggsan,upickb2b,bio77,kwholesale]
+ *   node scripts/toss-register-batch.mjs --limit=20 [--min-sold=0] [--sources=ggsan,upickb2b,bio77,kwholesale,wellroot,cmtstory]
  *                                        [--parallel=1] [--wait-max=90] [--skip=spid,spid] [--max-fail=3] [--no-resume]
  *   --parallel=N : 검수 결과를 기다리는 동안 최대 N건까지 미리 등록(창). 1이면 엄격한 1건씩. 연속 실패 3건이면 등록을 멈추고 대기분만 끝까지 추적.
  *   --no-resume  : 이전 실행에서 검수 대기로 남은(최근 24h) 건을 이어서 추적하지 않음
  *
- * 후보 규칙: 쿠팡 status APPROVED · auto_paused=false · request_payload 있음 · 매입처 ∈ --sources(식품·영양제) · MSP>0(MSP 구멍 제외)
+ * 후보 규칙: 쿠팡 status APPROVED · auto_paused=false · request_payload 있음 · 매입처 ∈ --sources(식품·영양제 + 화장품스토리(2026-10-14, 뷰티 카테고리·COSMETICS 고시)) · MSP>0(MSP 구멍 제외)
  *          · 토스 미등록(spid 기준) · 토스에 같은 상품명 없음(중복 리스팅 방지)
  * 우선순위: 최근 90일 쿠팡 판매수량 desc → 매입처 순서(--sources 순) → 쿠팡 판매가 desc
  * 각 건: toss-register.mjs --spid --show 로 등록 → --check 를 60초마다 폴링(최대 --wait-max 분) → COMPLETE/REJECT 기록
@@ -36,7 +36,7 @@ const has = (k) => process.argv.includes(`--${k}`)
 const LIST = has('list')
 const LIMIT = Math.max(1, parseInt(arg('limit', '20'), 10) || 20)
 const MIN_SOLD = parseInt(arg('min-sold', '0'), 10) || 0
-const SOURCES = arg('sources', 'ggsan,upickb2b,bio77,kwholesale').split(',').map((s) => s.trim()).filter(Boolean)
+const SOURCES = arg('sources', 'ggsan,upickb2b,bio77,kwholesale,wellroot,cmtstory').split(',').map((s) => s.trim()).filter(Boolean)
 const WAIT_MAX_MIN = Math.max(1, parseInt(arg('wait-max', '90'), 10) || 90)
 // 자동(LLM) 검수는 1~17분에 끝난다(2026-10-14 실측 100여 건). 이보다 오래 걸리면 수동 검수로 넘어간 것(수 시간, 결과는 대개 반려) —
 // 창(--parallel)을 붙잡고 있으면 러너가 1.5시간씩 논다. 이 시간이 지나면 창에서 빼고 계속 추적만 한다(다음 실행도 7일 창으로 이어받음).

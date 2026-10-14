@@ -1,6 +1,6 @@
 /**
- * 토스쇼핑 식품 카테고리 leaf 캐시 헬퍼 — scripts/toss-dump-food-leaves.mjs 가 만든 lib/toss-food-leaves.json(1,280 leaf) 사용.
- *   resolveLeafByPath('식품 > 장/소스 > 식용유/오일/참기름 > 올리브유 > 엑스트라버진') → { id, path } | null
+ * 토스쇼핑 카테고리 leaf 캐시 헬퍼 — scripts/toss-dump-food-leaves.mjs 가 만든 lib/toss-food-leaves.json(식품 1,280 leaf)·toss-beauty-leaves.json(뷰티 442 leaf, 2026-10-14 화장품스토리) 사용.
+ *   resolveLeafByPath('식품 > 장/소스 > 식용유/오일/참기름 > 올리브유 > 엑스트라버진') → { id, path } | null   (식품·뷰티 전체에서 찾음)
  *   parseRecommendedCategory(rejectReasons) → '식품 > …' | null   (검수 반려 "카테고리 불일치" 메시지의 추천 경로)
  */
 import { readFileSync } from 'node:fs'
@@ -8,11 +8,11 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
-let _leaves = null
-export function loadFoodLeaves() {
-  if (!_leaves) _leaves = JSON.parse(readFileSync(path.join(__dirname, 'toss-food-leaves.json'), 'utf8'))
-  return _leaves
-}
+const _cache = {}
+const loadLeaves = (name) => (_cache[name] ??= JSON.parse(readFileSync(path.join(__dirname, `toss-${name}-leaves.json`), 'utf8')))
+export function loadFoodLeaves() { return loadLeaves('food') }
+export function loadBeautyLeaves() { return loadLeaves('beauty') }
+export function loadAllLeaves() { return (_cache.all ??= [...loadFoodLeaves(), ...loadBeautyLeaves()]) }
 const norm = (s) => String(s || '').replace(/\s*>\s*/g, ' > ').replace(/\s+/g, ' ').trim()
 
 /**
@@ -22,7 +22,7 @@ const norm = (s) => String(s || '').replace(/\s*>\s*/g, ' > ').replace(/\s+/g, '
 export function resolveLeafByPath(p) {
   const want = norm(p)
   if (!want) return null
-  const leaves = loadFoodLeaves()
+  const leaves = loadAllLeaves()
   const exact = leaves.find((l) => norm(l.path) === want)
   if (exact) return exact
   const segs = want.split(' > ')
