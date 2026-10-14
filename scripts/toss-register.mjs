@@ -308,6 +308,8 @@ function buildOptions(template, ctx, optsArg) {
       if (/사이즈|크기/.test(key)) return (attr(/사이즈|크기/) || 'FREE').slice(0, 30)
       if (/인원/.test(key)) { const m = /(\d+)\s*(?:~\s*\d+\s*)?인/.exec(ctx.title || ''); return m ? `${m[1]}인` : '상세페이지참조' }
       if (/^수량$/.test(key)) return `${ctx.packQty || 1}개`
+      // '단 수'(캠핑소품 템플릿, 허용 단위에 '단' 포함): 선반·테이블처럼 제목에 'N단'이 있으면 N단, 아니면 단일 구조 1단 — 장갑·집게 같은 비(非)단 상품이 OPTS_UNKNOWN 으로 매 회차 건너뛰던 것(2026-10-15 모낙불 장갑)
+      if (/단\s*수/.test(key)) { const m = /(\d+)\s*단(?![가-힣])/.exec(ctx.title || ''); if (!m) console.log("  ℹ 옵션 '단 수' 제목에 없음 → 1단(단일 구조)"); return `${m ? m[1] : 1}단` }
     }
     return null
   }
