@@ -45,7 +45,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
 // ── 카테고리 매핑 (토스 식품>건강식품 leaf, 2026-08-19 실측 id) ──
 const CAT_RULES = [
-  [/유산균|프로바이오|락토|바이오틱스|포스트바이오|낙산균/, 59849],
+  [/유산균|프로바이오|락토(?!페린)|바이오틱스|포스트바이오|낙산균/, 59849],
   [/오메가\s*3|오메가3|알티지|epa\b|rtg/i, 59847], [/dha/i, 59793],
   [/루테인|지아잔틴/, 59817], [/밀크씨슬|밀크시슬|실리마린/, 59823],
   [/콜라겐|히알루론/, 59863], [/글루코사민|콘드로이친|관절/, 59805], [/msm|식이유황/i, 59797],
@@ -63,6 +63,8 @@ const CAT_RULES = [
   // 기타건강식품
   [/프로폴리스/, 59881], [/효소/, 59887], [/폴리코사놀/, 59879], [/트리뷸러스/, 59875], [/sam-?e|메티오닌/i, 59799],
   // 홍삼 (형태별 leaf) — 젤리/캡슐/환/절편/농축액 순, 나머지는 진액/파우치
+  // 정제형 삼: 산양삼 60정이 홍삼진액/파우치(59995)로 가 '개당 중량 0g' + 카테고리 불일치 반려(2026-10-14) → 홍삼 아닌 삼 정제는 기타영양제, 홍삼 N정은 홍삼캡슐
+  [/(산양삼|장뇌삼|산삼|인삼|수삼)(?!.*홍삼).*\d\s*(정|캡슐|환)(?![가-힣])/, 59807], [/홍삼.*\d\s*(정|캡슐)(?![가-힣])/, 59999],
   [/홍삼.*(젤리|캔디)|(젤리|캔디).*홍삼/, 59997], [/홍삼.*캡슐/, 59999], [/홍삼.*환(?![경장])/, 60001], [/홍삼.*(절편|정과)/, 59993], [/홍삼.*(농축|홍삼정(?!과))/, 59991], [/홍삼|인삼|고려삼/, 59995],
   // 건강즙 (종류별)
   [/흑마늘|마늘.*(즙|진액)/, 59949], [/양배추/, 59971], [/도라지|배즙/, 59953], [/흑염소|녹용|장어/, 59947], [/사과즙|사과.*즙/, 59963], [/비트/, 59961], [/칡/, 59977],
@@ -112,13 +114,19 @@ const NAME_BANNED = new Set(['명품', ...String(arg('ban', '')).split(/[,\s/]+/
 const TAG_BANNED = new Set([...NAME_BANNED, '최고', '최저가', '1위', '1등', '베스트', '특가', '할인', '무료배송', '정품', '추천', '인기'])
 const stripBanned = (name) => { const toks = name.split(' '); const out = toks.filter((t) => !NAME_BANNED.has(t)); if (out.length !== toks.length) console.log(`  ℹ 상품명 금칙어 제거: ${toks.filter((t) => NAME_BANNED.has(t)).join(', ')} → ${out.join(' ')}`); return out.join(' ').trim() || name }
 const cleanName = (t) => (t || '').replace(/\s*-\s*(수량별 판매가[^()]*|쿠팡[^()]*|오픈마켓[^()]*|본사[^()]*|노출가[^()]*)$/g, '').replace(/[^0-9A-Za-z가-힣 ()\-·\[\]/&+,~.*_#]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 100)
-function keywords(title, brand) {
+function keywords(title, brand, catName) {
   const stop = /^(\d|x$|mg|kg|ml|g$|정$|캡슐$|포$|개입|박스|병|슈퍼|프리미엄|골드|플러스|함유|선물세트|세트|정품|본사|상시|모니터링|노출가|준수|반드시)/i
   const toks = (title || '').replace(/[^0-9A-Za-z가-힣\s]/g, ' ').split(/\s+/).map((t) => t.replace(/\s/g, '')).filter((t) => t.length >= 2 && t.length <= 10 && !stop.test(t) && !/^\d/.test(t))
   const out = new Set(toks.slice(0, 6))
   if (brand && /^[0-9A-Za-z가-힣]{1,10}$/.test(brand)) out.add(brand)
   for (const [re, kw] of [[/유산균|프로바이오/, '유산균'], [/낙산균/, '낙산균'], [/오메가\s*3/i, '오메가3'], [/루테인/, '루테인'], [/콜라겐/, '콜라겐'], [/밀크씨슬|밀크시슬/, '밀크씨슬'], [/홍삼/, '홍삼'], [/비타민/, '비타민'], [/커큐민/, '커큐민'], [/msm/i, 'MSM'], [/징코|은행잎/, '은행잎'], [/프로폴리스/, '프로폴리스'], [/멀티비타민|종합비타민/, '멀티비타민'], [/선물세트/, '선물세트'], [/젤리/, '젤리'], [/스틱/, '스틱']]) if (re.test(title || '')) out.add(kw)
-  return [...out].filter((k) => /^[0-9a-zA-Z가-힣]{1,10}$/.test(k) && !TAG_BANNED.has(k)).slice(0, 10)
+  const ok = (k) => /^[0-9a-zA-Z가-힣]{1,10}$/.test(k) && ![...TAG_BANNED].some((b) => k.includes(b)) // 부분일치: 토스는 "호로파" 태그를 금칙어 "호로" 로 반려(2026-10-14)
+  const tags = [...out].filter(ok).slice(0, 10)
+  if (tags.length) return tags
+  // 제목 토큰이 전부 금칙어·불용어면(호로파 60정 → 빈 태그) 카테고리 leaf 이름으로 대체 — 토스 자신의 분류명이라 금칙어일 리 없다
+  const leaf = [...new Set(String(catName || '').split(/\s*>\s*/).slice(-2).flatMap((x) => x.split(/[\/,\s]+/)).map((x) => x.replace(/[^0-9a-zA-Z가-힣]/g, '')).filter(ok))]
+  if (leaf.length) console.log('  ℹ 검색태그가 비어 카테고리명으로 대체: ' + leaf.join(','))
+  return leaf.slice(0, 10)
 }
 
 // ── 판매옵션: 카테고리 제약 템플릿의 모든 옵션을 채움 (2025.06.16~ salesOption 전부 필수, 택1 그룹은 1개) ──
@@ -128,21 +136,22 @@ function parseUnits(title, itemName, attrs, extra) {
   // 쿠팡 속성("3 회분")에서 만들어져 "3정 1박스"처럼 틀릴 수 있다(2026-10-14 홍삼분말세트 "상품 정보 불일치" 반려). 제목에 정보가 있으면 종전과 동일.
   const titleHasUnits = /\d\s*(kg|g|mg|ml|l|정|캡슐|환|포|스틱|매|팩|개입|박스|병|통|세트)(?![a-z가-힣])/i.test(title || '')
   const t = `${title || ''} ${!titleHasUnits && extra ? extra : ''} ${itemName || ''}`
-  const per = t.match(/(\d+)\s*(포|스틱|개입|매|팩)/)
+  const nz = (m) => (m && Number(m[1]) > 0 ? m : null) // '0g'·'0정' 은 값이 아니라 빈칸이다 — 2026-10-14 산양삼 60정이 '개당 중량 0g' 으로 올라가 반려
+  const per = nz(t.match(/(\d+)\s*(포|스틱|개입|매|팩)/))
   // 제목 자체에 "x 10포" 가 있으면 그 낱개 단위가 진짜다 — 쿠팡 itemName 은 "10정 1박스" 처럼 정으로 적힌 경우가 많다(2026-10-13 다이어트 카페·석류젤리)
-  const perTitle = (title || '').match(/(\d+)\s*(포|스틱|개입|매|팩)/)
-  const cap = t.match(/(\d+)\s*(정|캡슐|환)/)
+  const perTitle = nz((title || '').match(/(\d+)\s*(포|스틱|개입|매|팩)/))
+  const cap = nz(t.match(/(\d+)\s*(정|캡슐|환)/))
   // 병·통·캔으로만 세는 상품(알부민 25ml x 30병, 아토셀 500ml x 3병): 정/캡슐/포 토큰이 없으면 병 수를 낱개 수(N개)로 본다 —
   // 2026-10-14 "25ml x 30병"이 수량 30개 + 캡슐/정 30정으로 올라가 반려·수동검수
   // 제목에 병·통·캔이 있고 정/캡슐/포 토큰이 없으면 제목이 진짜다 — 쿠팡 itemName '2정 1박스'(속성 '2 회분'에서 생성)가 정 수로 잡혀 '1L x 2병'의 병 수를 못 세던 문제(2026-10-14 오미자 진액)
-  const capTitle = (title || '').match(/(\d+)\s*(정|캡슐|환)/)
-  const bottlesTitle = !perTitle && !capTitle ? (title || '').match(/(\d+)\s*(병|통|캔)(?![가-힣])/) : null
-  const bottles = bottlesTitle || (!per && !cap ? t.match(/(\d+)\s*(병|통|캔)(?![가-힣])/) : null)
+  const capTitle = nz((title || '').match(/(\d+)\s*(정|캡슐|환)/))
+  const bottlesTitle = !perTitle && !capTitle ? nz((title || '').match(/(\d+)\s*(병|통|캔)(?![가-힣])/)) : null
+  const bottles = bottlesTitle || (!per && !cap ? nz(t.match(/(\d+)\s*(병|통|캔)(?![가-힣])/)) : null)
   const capEff = bottlesTitle ? null : cap
-  const vol = t.match(/(\d+(?:\.\d+)?)\s*(ml|mL|ML|l|L)\b/)
+  const vol = nz(t.match(/(\d+(?:\.\d+)?)\s*(ml|mL|ML|l|L)\b/))
   // g/kg 는 "10g x 30포"(식품 스틱) 처럼 x 앞에 와도 낱개 중량이다. mg 만 "1,000mg x 120정"(함량)이라 x 앞이면 제외 (2026-10-13 일반 식품 확장)
   // 경계: 끝/비영문/"x숫자"("15gx30포" 처럼 붙여 쓴 경우) — 영단어 안의 g(gram 등)는 제외
-  const wt = t.match(/(\d+(?:\.\d+)?)\s*(kg|g)(?=$|[^a-z]|x\d)/i) || t.match(/(\d+(?:\.\d+)?)\s*(mg)\b(?!\s*[x×])/)
+  const wt = nz(t.match(/(\d+(?:\.\d+)?)\s*(kg|g)(?=$|[^a-z]|x\d)/i)) || nz(t.match(/(\d+(?:\.\d+)?)\s*(mg)\b(?!\s*[x×])/))
   // 제목에 용량/중량이 없으면 쿠팡 속성(개당 용량/개당 중량, 0 이 아닐 때)으로 보충
   const attrNum = (type) => { const v = attrs?.find((a) => a.attributeTypeName === type)?.attributeValueName; const m = /(\d+(?:\.\d+)?)\s*([a-zA-Z]+)/.exec(v || ''); return m && Number(m[1]) > 0 ? m : null }
   const attrVol = attrNum('개당 용량'), attrWt = attrNum('개당 중량')
@@ -279,6 +288,8 @@ Pure white background (#FFFFFF). The ENTIRE product must be fully visible — no
 // strict=true(재검수용): 풀블리드 프롬프트 + 최대 3회 생성 중 가장 정사각에 가까운 결과 채택 → 근사 정사각이면 cover(중앙 크롭)로 여백 0, 아니면 100% fit
 // ── 상세 이미지 가로 600px 미만 → 확대 후 site-assets 업로드 (토스 "상세 이미지 검증 실패: N번 상세 이미지 가로 크기가 최소 600 이상", 2026-10-14 7건 전부 이 사유) ──
 const DETAIL_MIN_W = 600
+// 토스 이미지 URL 은 255자 제한 — 웰루트(cafe24 NNEditor, 한글 파일명 인코딩) 상세컷이 넘어 2026-10-14 2건이 'DESCRIPTION 필수'로 등록 실패. 스킵하지 않고 site-assets 에 재업로드해 짧은 URL 로 바꾼다.
+const LONG_URLS = new Set()
 async function ensureDetailWidth(images, spid) {
   let fixed = 0, failed = 0
   for (const im of images) {
@@ -288,14 +299,16 @@ async function ensureDetailWidth(images, spid) {
       if (!r.ok) { failed++; console.log(`  ⚠ 상세 ${im.order} 다운로드 ${r.status} — 원본 URL 유지`); continue }
       const b = Buffer.from(await r.arrayBuffer())
       const m = await sharp(b, { limitInputPixels: false }).metadata()
-      if (!m.width || m.width >= DETAIL_MIN_W) continue
-      const out = await sharp(b, { limitInputPixels: false }).resize({ width: DETAIL_MIN_W, withoutEnlargement: false }).jpeg({ quality: 90 }).toBuffer() // 세로는 비율 유지
+      const narrow = !m.width || m.width < DETAIL_MIN_W, long = LONG_URLS.has(im.url)
+      if (!narrow && !long) continue
+      let pipe = sharp(b, { limitInputPixels: false }); if (narrow) pipe = pipe.resize({ width: DETAIL_MIN_W, withoutEnlargement: false }) // 세로는 비율 유지, 255자 초과만이면 크기 그대로
+      const out = await pipe.jpeg({ quality: 90 }).toBuffer()
       const key = `toss/${spid}/detail_${im.order}_${Date.now()}.jpg`
       const { error } = await sb.storage.from('site-assets').upload(key, out, { contentType: 'image/jpeg', upsert: true })
       if (error) { failed++; console.log(`  ⚠ 상세 ${im.order} 업로드 실패: ${error.message} — 원본 유지`); continue }
       im.url = sb.storage.from('site-assets').getPublicUrl(key).data.publicUrl
       fixed++
-      console.log(`  ℹ 상세 ${im.order} 가로 ${m.width}px < ${DETAIL_MIN_W} → ${DETAIL_MIN_W}px 로 확대 업로드`)
+      console.log(narrow ? `  ℹ 상세 ${im.order} 가로 ${m.width}px < ${DETAIL_MIN_W} → ${DETAIL_MIN_W}px 로 확대 업로드` : `  ℹ 상세 ${im.order} URL 255자 초과 → site-assets 재업로드`)
     } catch (e) { failed++; console.log(`  ⚠ 상세 ${im.order} 확인 실패: ${String(e.message).slice(0, 80)} — 원본 유지`) }
   }
   return { fixed, failed }
@@ -444,7 +457,7 @@ async function buildPayload(listing, refs) {
   let order = 1
   const htmlParts = []
   for (const c of it.contents || []) for (const d of c.contentDetails || []) {
-    if (d.detailType === 'IMAGE' && d.content) { if (d.content.length > 255) { console.log('  ⚠ 255자 초과 이미지 URL 스킵'); continue } images.push({ type: 'DESCRIPTION', order: order++, url: d.content }) }
+    if (d.detailType === 'IMAGE' && d.content) { if (d.content.length > 255) { LONG_URLS.add(d.content); console.log(`  ℹ 상세 ${order} URL ${d.content.length}자 > 255 → 등록 시 site-assets 재업로드(짧은 URL)`) } images.push({ type: 'DESCRIPTION', order: order++, url: d.content }) }
     else if (d.detailType === 'TEXT' && d.content) htmlParts.push(d.content)
   }
   if (images.length === 1 && htmlParts.length) images.push({ type: 'DESCRIPTION_HTML', order: 1, html: htmlParts.join('\n') })
@@ -472,7 +485,7 @@ async function buildPayload(listing, refs) {
     images,
     stocks: [{ options, remainingCount: 99, isHide: false, isMainPrice: true, originPrice, salePrice, managementCode: `${listing.source}:${listing.source_goods_no}` }],
     notice: { categoryCode: 'PROCESSED_FOOD', items: noticeItems },
-    exposure: { searchKeywords: keywords(name, brand), description: `${name}. 구성 ${comp || '상세페이지 참조'}. 상세 설명 이미지를 참고해 주세요.`.slice(0, 1500) },
+    exposure: { searchKeywords: keywords(name, brand, tpl.data?.categoryName), description: `${name}. 구성 ${comp || '상세페이지 참조'}. 상세 설명 이미지를 참고해 주세요.`.slice(0, 1500) },
     deliveryPolicy: {
       deliveryType: 'NORMAL', deliveryMethod: 'NORMAL', preparationDays: PREP_DAYS,
       deliveryLocationId: refs.deliveryLocationId, deliveryCompanyId: refs.deliveryCompanyId,

@@ -157,13 +157,31 @@ async function resumePending() {
 }
 
 /** 최근 24h 반려분(이전 실행에서 자동 조치 안 된 것) — 시작 시 tryRecat(카테고리 불일치) / tryRethumb(여백) / tryRequant(옵션 수량) / tryRetag(검색태그 금칙어) / tryRedetail(상세 이미지 폭) 대상 */
+/** 이전 회차 자동 조치가 만든 상품(재등록 tossId / 썸네일 PUT 한 tossId)과 그 단계 — 로그 jsonl 에서. 24h 창이라 어제 파일까지 본다 */
+function priorSteps() {
+  const map = new Map()
+  for (const d of [0, 1]) {
+    const day = new Date(Date.now() + 9 * 3600_000 - d * 86400_000).toISOString().slice(0, 10).replace(/-/g, '')
+    let txt = ''; try { txt = readFileSync(path.join(LOG_DIR, `toss-batch-${day}.jsonl`), 'utf8') } catch { continue }
+    for (const line of txt.split(/\r?\n/)) {
+      if (!line.trim()) continue
+      let r; try { r = JSON.parse(line) } catch { continue }
+      if (!r.ok || !r.tossId || !/^(recat|requant|retag|redetail|rethumb)$/.test(r.step)) continue
+      const k = String(r.tossId); if (!map.has(k)) map.set(k, new Set()); map.get(k).add(r.step)
+    }
+  }
+  return map
+}
 async function pastRejects() {
   if (has('no-resume')) return []
   const since = new Date(Date.now() - 24 * 3600_000).toISOString()
   const { data, error } = await sb.from('jimscanner_toss_listings').select('toss_product_id, coupang_seller_product_id, name, source, registered_at, rejection_reasons, last_response').eq('inspection_status', 'REJECT').gte('registered_at', since)
   if (error) { console.log(`(반려분 조회 실패: ${error.message})`); return [] }
-  // 이미 썸네일 교체(PUT) 한 건은 last_response.lastInspectionRequestedAt 이 남는다 → 재시도 1회 제한
-  return (data ?? []).map((r) => ({ spid: r.coupang_seller_product_id, name: r.name, source: r.source, tossId: r.toss_product_id, t0: Date.parse(r.registered_at) || Date.now(), reasons: r.rejection_reasons, rethumb: !!r.last_response?.lastInspectionRequestedAt }))
+  // 이미 썸네일 교체(PUT) 한 건은 last_response.lastInspectionRequestedAt 이 남는다 → 재시도 1회 제한.
+  // 이전 회차 자동 조치(재등록·PUT)로 생긴 상품이 또 같은 유형으로 반려된 것이면 그 단계는 반복하지 않는다 — 2세대 반려는 사람 몫
+  // (2026-10-14 호로파: 금칙어 재등록이 같은 금칙어로 다시 반려 → 매 회차 삭제·재등록을 반복할 뻔)
+  const prior = priorSteps()
+  return (data ?? []).map((r) => { const ps = prior.get(String(r.toss_product_id)); return { spid: r.coupang_seller_product_id, name: r.name, source: r.source, tossId: r.toss_product_id, t0: Date.parse(r.registered_at) || Date.now(), reasons: r.rejection_reasons, recat: !!ps?.has('recat'), requant: !!ps?.has('requant'), retag: !!ps?.has('retag'), redetail: !!ps?.has('redetail'), rethumb: !!r.last_response?.lastInspectionRequestedAt || !!ps?.has('rethumb') } })
 }
 
 const isMarginReject = (reasons) => (Array.isArray(reasons) ? reasons : []).some((r) => /여백/.test(`${r?.title ?? ''}`))
