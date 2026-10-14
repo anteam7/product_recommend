@@ -24,6 +24,9 @@ for i in $(seq 1 "$MAX"); do
   elif [ "$tgt" -eq 0 ]; then
     crash=0; empty=$((empty + 1)); if [ "$empty" -ge 3 ]; then echo "$(date +%H:%M:%S) 대상 0건 연속 3회 → 종료(미조회 상품 소진)" | tee -a "$SUM"; break; fi
   else crash=0; empty=0; fi
+  # 시세가 새로 들어왔으니 등록가 재계산 — 시세 없이 목표가로 먼저 올린 상품(드립 --allow-nomatch, 2026-10-15)을 천장(시세−1%)까지 내린다. 하한 아래 금지·STRUCTURAL 은 보고만(campingmoon-reprice.mjs)
+  RLOG="_workspace/campingmoon-market-reprice-$DAY-$i.log"; node scripts/campingmoon-reprice.mjs > "$RLOG" 2>&1
+  rsum=$(grep -E '^변경 ' "$RLOG" | tail -1 | cut -c1-100); echo "$(date +%H:%M:%S)   리프라이스: ${rsum:-실패($(tail -1 "$RLOG" | cut -c1-80))}" | tee -a "$SUM"
   [ "$i" -lt "$MAX" ] && sleep $((REST * 60))
 done
 echo "$(date +%H:%M:%S) 시세 루프 종료" | tee -a "$SUM"

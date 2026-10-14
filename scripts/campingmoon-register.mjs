@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * 캠핑문 → 쿠팡 등록 — **옵션(색상/사이즈) 1개 = item 1개**, 묶음(pack) 전략 포함. docs/plan-campingmoon.md §3·P2 (2026-10-14)
- *   node scripts/campingmoon-register.mjs --dry [--only=4385,4472] [--limit=N] [--allow-kc] [--allow-nomatch] [--no-approval] [--show-payload]
+ *   node scripts/campingmoon-register.mjs --dry [--only=4385,4472] [--limit=N] [--allow-kc] [--allow-nomatch] [--allow-structural] [--no-approval] [--show-payload]
  *
  *  - 대상: jimscanner_campingmoon_products active·판매가능·register_excluded=false·시세 조회됨(market_checked_at) — 시세 미조회는 --allow-nomatch 로만.
  *  - 가격: lib/campingmoon-price.mjs decide(옵션가, 시세 최저) → 1개가 STRUCTURAL 이면 OK 인 가장 작은 묶음 n(2·3)으로 등록(배송비 1회라 단가 개선). 전부 STRUCTURAL 이면 보류.
@@ -34,6 +34,9 @@ const PRIVACY_NOTICE = '[개인정보 처리 위탁 안내] 이 상품은 공급
 
 const args = process.argv.slice(2)
 const DRY = args.includes('--dry'), NO_APPROVAL = args.includes('--no-approval'), ALLOW_KC = args.includes('--allow-kc'), ALLOW_NOMATCH = args.includes('--allow-nomatch')
+// --allow-structural: 시세가 하한 아래(STRUCTURAL)여도 1개를 목표가(순마진 10%, ≥하한)로 등록 — 사장님 2026-10-15 "캠핑문 900여개 전부 등록". 묶음이 OK 면 묶음이 우선(pickPack).
+// 시세보다 높게 올라갈 수 있으므로 시세가 들어오면 campingmoon-reprice.mjs 가 천장(시세−1%)까지만 내린다(하한 아래 금지).
+const ALLOW_STRUCTURAL = args.includes('--allow-structural'), DOPT = ALLOW_STRUCTURAL ? { structural: 'target' } : {}
 const argOf = (k) => args.find((a) => a.startsWith(`--${k}=`))?.split('=').slice(1).join('=')
 const LIMIT = +(argOf('limit') || 0) || 0
 const ONLY = (argOf('only') || '').split(',').map((s) => s.trim()).filter((s) => /^\d{1,7}$/.test(s))
@@ -120,7 +123,11 @@ function buildAttributes(meta, row, item, n, title) {
     if (a.dataType === 'NUMBER' && a.usableUnits?.length) {
       const unitAlt = a.usableUnits.map((u) => u.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')
       const m = `${item.option_value || ''} ${title}`.match(new RegExp(`(\\d+(?:\\.\\d+)?)\\s*(${unitAlt})(?![a-z가-힣])`, 'i'))
-      if (!m) return { error: `필수 수치 속성 '${nm}'(${a.usableUnits.join('/')}) 값을 제목/옵션에서 못 읽음` }
+      if (!m) {
+        // '단 수'(선반·테이블 쪽 필수 수치): 제목에 N단이 없으면 단일 구조 1단 — 채망·삼각플레이트·캐리백 같은 비(非)단 상품이 제외되던 것(2026-10-15, 토스 쪽과 같은 규칙)
+        if (/단\s*수/.test(nm) && a.usableUnits.includes('단')) { out.push({ attributeTypeName: nm, attributeValueName: '1단', exposed }); continue }
+        return { error: `필수 수치 속성 '${nm}'(${a.usableUnits.join('/')}) 값을 제목/옵션에서 못 읽음` }
+      }
       out.push({ attributeTypeName: nm, attributeValueName: `${m[1]}${a.usableUnits.find((u) => u.toLowerCase() === m[2].toLowerCase()) || m[2]}`, exposed })
       continue
     }
@@ -141,7 +148,8 @@ async function buildPayload(row, items, meta, cat) {
   if (!(await downloadable(rep))) throw new Error(`대표 이미지 다운로드 실패: ${rep}`)
   const contentImgs = []
   for (const u of (row.detail_image_src || []).slice(0, 10)) if (await downloadable(u)) contentImgs.push(u)
-  if (!contentImgs.length) throw new Error('상세 이미지 없음/다운로드 실패 — 보류')
+  // 상세 이미지가 아예 없는 옛 잡화(자전거벨·스티커 등 22건, 2026-10-15)는 대표 이미지를 상세로 쓴다 — 쿠팡은 상세 이미지 1장 이상 필수
+  if (!contentImgs.length) { console.log('  ℹ 상세 이미지 없음 → 대표 이미지를 상세로 사용'); contentImgs.push(rep) }
   const contents = [...contentImgs.map((u) => ({ contentsType: 'IMAGE_NO_SPACE', contentDetails: [{ content: u, detailType: 'IMAGE' }] })), { contentsType: 'TEXT', contentDetails: [{ content: PRIVACY_NOTICE, detailType: 'TEXT' }] }]
   const built = []
   for (const it of items) {
@@ -216,11 +224,13 @@ console.log('')
 const summary = { success: 0, fail: 0, approved: 0, skip: 0, errors: [] }
 const logDir = path.join(__dirname, '..', '_tmp_campingmoon_register'); if (!DRY && !existsSync(logDir)) mkdirSync(logDir, { recursive: true })
 // 등록 전 단계의 결정적 실패(필수 수치 속성·고시·이미지)는 상품에 제외 사유를 남겨 다음 회차 후보에서 빠지게 한다(원인 고치면 /admin 또는 DB 에서 해제)
-const DETERMINISTIC = /필수 수치 속성|처리 규칙 없음|고시만 있는 카테고리|상세 이미지 없음|대표 이미지 (없음|다운로드 실패)|옵션 조합 중복/
+// 이미지 '다운로드 실패'는 일시 장애일 수 있어 제외 사유에서 뺐다(2026-10-15 전량 등록 전) — 아래 연속 오류 차단기가 한 회차에서 대량 제외되는 것도 막는다
+const DETERMINISTIC = /필수 수치 속성|처리 규칙 없음|고시만 있는 카테고리|대표 이미지 없음|옵션 조합 중복/
 const excludeProduct = async (row, reason) => { if (DRY) return; await sb.from(TABLE).update({ register_excluded: true, exclude_reason: `자동: ${reason}`.slice(0, 200), updated_at: new Date().toISOString() }).eq('product_no', row.product_no) }
-let done = 0
+let done = 0, streak = 0 // 연속 오류(예외·쿠팡 거절) 6건이면 이번 회차 중단 — 사이트/API 일시 장애 때 후보 수백 건을 훑으며 실패·제외를 쌓지 않게
 for (let i = 0; i < targets.length; i++) {
   if (LIMIT > 0 && done >= LIMIT) break
+  if (streak >= 6) { console.log(`연속 오류 ${streak}건 → 이번 회차 중단(일시 장애 의심, 다음 회차에 재시도)`); break }
   const row = targets[i]; const idx = `[${i + 1}/${targets.length}]`
   try {
     const title = cleanTitle(row)
@@ -229,16 +239,17 @@ for (let i = 0; i < targets.length; i++) {
     // 옵션별 가격·묶음 결정: 상품 단위로 묶음 n 을 고르고(최저 옵션가 기준), 옵션마다 그 n 의 가격. STRUCTURAL 옵션은 뺀다
     const selling = (itemsBy.get(row.product_no) || []).filter((it) => it.is_selling)
     const priceOf = (it) => it.option_price || (row.sale_price + (it.add_price || 0))
-    const pick = pickPack(decide(Math.min(...selling.map(priceOf)), row.market_low))
+    const pick = pickPack(decide(Math.min(...selling.map(priceOf)), row.market_low, DOPT))
     if (!pick) { console.log(`${idx} ⏭ ${row.product_no} ${title.slice(0, 30)} | 1·2·3개 전부 시세(${row.market_low}) < 하한 — STRUCTURAL 보류`); summary.skip++; continue }
+    if (pick.verdict === 'STRUCTURAL') console.log(`${idx} ℹ ${row.product_no} 시세 ${row.market_low} < 하한 ${pick.floor} → 목표가 ${pick.price} 로 등록(--allow-structural)`)
     let n = pick.n
-    let items = selling.map((it) => { const d = decide(priceOf(it), row.market_low)[n - 1]; return d && d.price ? { ...it, _n: n, _price: d.price, _cost: d.cost, _net: d.net } : null }).filter(Boolean)
+    let items = selling.map((it) => { const d = decide(priceOf(it), row.market_low, DOPT)[n - 1]; return d && d.price ? { ...it, _n: n, _price: d.price, _cost: d.cost, _net: d.net } : null }).filter(Boolean)
     const hasQtyAxis = (meta.attributes ?? []).some((a) => a.required === 'MANDATORY' && /수량/.test(a.attributeTypeName))
     if (meta.isAllowSingleItem === false && items.length < 2) {
-      if (!hasQtyAxis) { console.log(`${idx} ⏭ ${row.product_no} ${title.slice(0, 30)} | 옵션 필수 카테고리(${cat.code})인데 변형 1개·수량 축 없음 — 보류`); summary.skip++; continue }
-      const extra = selling.map((it) => { const d = decide(priceOf(it), row.market_low)[n] /* n+1 */; return d && d.price ? { ...it, _n: n + 1, _price: d.price, _cost: d.cost, _net: d.net } : null }).filter(Boolean)
-      items = [...items, ...extra]
-      if (items.length < 2) { console.log(`${idx} ⏭ ${row.product_no} | 수량 변형도 못 만듦(묶음가 STRUCTURAL) — 보류`); summary.skip++; continue }
+      // 수량 축이 있으면 1·2개 변형으로 2 item 을 만든다(묶음 전략과도 맞음). 못 만들면 변형 1개를 속성만 채워 그대로 시도 —
+      // isAllowSingleItem=false 는 '속성 없는 단일상품 불가'이지 'item 2개 이상'이 아니다(Wing 도 옵션값 1개 등록 허용, 2026-10-15 해석 변경). 거절되면 FAILED 로 남으니 그때 보류로 되돌린다
+      if (hasQtyAxis) { const extra = selling.map((it) => { const d = decide(priceOf(it), row.market_low, DOPT)[n] /* n+1 */; return d && d.price ? { ...it, _n: n + 1, _price: d.price, _cost: d.cost, _net: d.net } : null }).filter(Boolean); items = [...items, ...extra] }
+      if (items.length < 2) console.log(`${idx} ℹ ${row.product_no} 옵션 필수 카테고리(${cat.code}) 변형 1개 — 속성만 채워 등록 시도`)
     }
     if (!items.length) { console.log(`${idx} ⏭ ${row.product_no} | 가격 가능한 옵션 없음`); summary.skip++; continue }
     const built = await buildPayload(row, items, meta, cat)
@@ -265,13 +276,14 @@ for (let i = 0; i < targets.length; i++) {
       request_payload: built.payload, last_response: r.body, registered_at: success ? new Date().toISOString() : null, last_synced_at: new Date().toISOString(),
     }
     const { data: inserted, error: insertErr } = await sb.from('jimscanner_coupang_listings').insert(listingRow).select('id').single()
-    if (insertErr) { summary.fail++; summary.errors.push({ no: row.product_no, title: built.title.slice(0, 36), reason: `listings insert 실패: ${insertErr.message}` }); console.log(`${idx} ⚠ ${row.product_no} 등록 success=${success} 이나 DB insert 실패: ${insertErr.message}`); await sleep(500); continue }
-    if (!success) { summary.fail++; const reason = String(r.body?.message ?? JSON.stringify(r.body)).slice(0, 160); summary.errors.push({ no: row.product_no, title: built.title.slice(0, 36), cat: cat.code, reason }); console.log(`${idx} ✗ ${row.product_no} [${cat.code}] ${built.title.slice(0, 30)} | ${reason}`); await sleep(500); continue }
+    // DB 기록 실패는 쿠팡엔 올라갔는데 추적이 안 되는 상태(다음 회차 중복 등록 위험) → 이번 회차 즉시 중단(streak 6). 복구는 _tmp_campingmoon_register/<no>.json 으로(2026-10-14 msp NOT NULL 때 절차)
+    if (insertErr) { summary.fail++; streak += 6; summary.errors.push({ no: row.product_no, title: built.title.slice(0, 36), reason: `listings insert 실패: ${insertErr.message}` }); console.log(`${idx} ⚠ ${row.product_no} 등록 success=${success} 이나 DB insert 실패: ${insertErr.message} — 회차 중단`); await sleep(500); continue }
+    if (!success) { summary.fail++; streak++; const reason = String(r.body?.message ?? JSON.stringify(r.body)).slice(0, 160); summary.errors.push({ no: row.product_no, title: built.title.slice(0, 36), cat: cat.code, reason }); console.log(`${idx} ✗ ${row.product_no} [${cat.code}] ${built.title.slice(0, 30)} | ${reason}`); await sleep(500); continue }
     // 옵션 매핑 행(vendorItemId 는 승인 후 followup 이 채움)
     const liRows = items.map((it) => ({ market: 'coupang', listing_key: String(sellerProductId), external_sku: `${SOURCE}:${row.product_no}:${it.item_code}:${it._n}`, source: SOURCE, goods_no: row.product_no, item_code: it.item_code, option_value: it.option_value, pack_qty: it._n, sale_price: it._price, cost_price: it._cost, status: 'ACTIVE' }))
     const { error: liErr } = await sb.from('jimscanner_listing_items').upsert(liRows, { onConflict: 'market,listing_key,external_sku' })
     if (liErr) console.log(`      ⚠ listing_items 기록 실패: ${liErr.message}`)
-    summary.success++; done++
+    summary.success++; done++; streak = 0
     console.log(`${idx} ✓ ${row.product_no} ${built.title.slice(0, 30).padEnd(30)} | ${items.length}옵션 ${first._price.toLocaleString()}원~ sellerPID ${sellerProductId}`)
     if (!NO_APPROVAL && sellerProductId) {
       let appr
@@ -288,6 +300,7 @@ for (let i = 0; i < targets.length; i++) {
   } catch (e) {
     summary.fail++; summary.errors.push({ no: row.product_no, title: String(row.name_clean || '').slice(0, 36), reason: e.message }); console.log(`${idx} ✗ ${row.product_no} ERROR: ${e.message}`)
     if (DETERMINISTIC.test(e.message)) await excludeProduct(row, e.message)
+    else streak++ // 결정적 오류(상품 자체 문제, 제외 처리됨)는 장애 신호가 아니라 연속 오류에 안 센다
   }
   await sleep(400)
 }

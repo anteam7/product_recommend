@@ -43,7 +43,8 @@ export function targetPrice(cost, fee = COUPANG_FEE) { return priceAtMargin(cost
  * 묶음 n(1..maxN) 별 판정. marketLow = 쿠팡 매칭 최저가(1개 기준, null = 매칭 없음).
  * @returns {{n, cost, floor, target, ceiling, price, net, margin, verdict:'OK'|'STRUCTURAL'|'NO_MATCH'}[]}
  */
-export function decide(optionPrice, marketLow, { maxN = 3, fee = COUPANG_FEE, base = DISCOUNT_BASE } = {}) {
+export function decide(optionPrice, marketLow, { maxN = 3, fee = COUPANG_FEE, base = DISCOUNT_BASE, structural = 'hold' } = {}) {
+  if (!['hold', 'target'].includes(structural)) throw new Error(`decide: structural 은 hold|target: ${structural}`)
   const out = []
   for (let n = 1; n <= maxN; n++) {
     const cost = costFor(optionPrice, n, base)
@@ -51,16 +52,17 @@ export function decide(optionPrice, marketLow, { maxN = 3, fee = COUPANG_FEE, ba
     const floor = floorPrice(cost, fee), target = targetPrice(cost, fee)
     const ceiling = marketLow ? ceil10(marketLow * n * (1 - UNDERCUT)) : null
     // target 은 보통 floor 위지만 원가가 아주 작으면(배송비만 한 상품) 절대 하한(2,000원) 쪽 floor 가 더 높다 → 항상 floor 로 받친다
+    // structural='target': 시세가 하한 아래여도 목표가(≥하한)를 낸다 — 전량 등록 지시(2026-10-15). 판정은 STRUCTURAL 그대로라 리포트·리프라이스는 계속 표시한다
     let price, verdict
     if (ceiling == null) { price = Math.max(floor, target); verdict = 'NO_MATCH' }
-    else if (ceiling < floor) { price = null; verdict = 'STRUCTURAL' }
+    else if (ceiling < floor) { price = structural === 'target' ? Math.max(floor, target) : null; verdict = 'STRUCTURAL' }
     else { price = Math.max(floor, Math.min(target, ceiling)); verdict = 'OK' }
     const net = price ? Math.round(netProfit(price, cost, fee)) : null
     out.push({ n, cost, floor, target, ceiling, price, net, margin: price ? +(net / price).toFixed(3) : null, verdict })
   }
   return out
 }
-/** 등록할 묶음 선택: 1개가 OK/NO_MATCH 면 1개, 아니면 OK 인 가장 작은 n. 전부 STRUCTURAL 이면 null */
+/** 등록할 묶음 선택: 1개가 OK/NO_MATCH 면 1개, 아니면 OK 인 가장 작은 n. 전부 STRUCTURAL 이면 null — 단 decide(…, {structural:'target'}) 로 가격이 있으면 1개(목표가) */
 export function pickPack(rows) {
-  return rows.find((r) => r.n === 1 && r.verdict !== 'STRUCTURAL') || rows.find((r) => r.verdict === 'OK') || rows.find((r) => r.verdict === 'NO_MATCH') || null
+  return rows.find((r) => r.n === 1 && r.verdict !== 'STRUCTURAL') || rows.find((r) => r.verdict === 'OK') || rows.find((r) => r.verdict === 'NO_MATCH') || rows.find((r) => r.n === 1 && r.price) || null
 }
