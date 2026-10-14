@@ -39,7 +39,7 @@ function sim(a, b) {
   return i / Math.min(ta.size, tb.size)
 }
 const median = (arr) => { const a = arr.filter((n) => n > 0).sort((x, y) => x - y); return a.length ? a[Math.floor(a.length / 2)] : null }
-const kwOf = (p) => `캠핑문 ${p.name_clean.replace(/\[[^\]]*\]|\([^)]*\)/g, ' ').replace(/\s+/g, ' ').trim().split(' ').slice(0, 6).join(' ')}`.slice(0, 40)
+const kwOf = (p) => `캠핑문 ${p.name_clean.replace(/\[[^\]]*\]|\([^)]*\)/g, ' ').replace(/캠핑문|campingmoon/gi, ' ').replace(/\s+/g, ' ').trim().split(' ').slice(0, 6).join(' ')}`.slice(0, 40)
 
 async function fetchAll(build) { const PAGE = 1000, out = []; for (let from = 0; ; from += PAGE) { const { data, error } = await build().range(from, from + PAGE - 1); if (error) throw new Error(error.message); out.push(...(data ?? [])); if ((data ?? []).length < PAGE) return out } }
 
@@ -60,7 +60,7 @@ if (!targets.length) process.exit(0)
 const session = await openCoupangSession({ backend: arg('backend', 'auto') })
 if (!session) { console.error('쿠팡 세션 불가(aside/cdp) — Aside 브라우저 실행·쿠팡 탭 확인'); process.exit(2) }
 const rows = []
-let i = 0, dbFail = 0, blocked = 0
+let i = 0, dbFail = 0, blocked = 0, totalBlocked = 0
 try {
 for (const p of targets) {
   i++
@@ -69,13 +69,17 @@ for (const p of targets) {
   let failed = false
   for (const kw of kws) {
     let r = null
-    try { r = await session.search(kw) } catch (e) { console.log(`  ⚠ ${p.product_no} 검색 예외: ${String(e.message).slice(0, 100)}`) }
-    if (!r) { blocked++; failed = true; console.log(`  ⚠ ${p.product_no} 검색 실패/차단: ${kw} — DB 갱신 건너뜀(다음 실행에서 재조회)`); break }
+    for (let t = 1; t <= 2 && !r; t++) { // Aside repl 타임아웃·일시 차단은 1회 재시도
+      try { r = await session.search(kw) } catch (e) { console.log(`  ⚠ ${p.product_no} 검색 예외: ${String(e.message).slice(0, 100)}`) }
+      if (!r && t === 1) await sleep(4000)
+    }
+    if (!r) { blocked++; totalBlocked++; failed = true; console.log(`  ⚠ ${p.product_no} 검색 실패/차단: ${kw} — DB 갱신 건너뜀(다음 실행에서 재조회)`); break }
+    blocked = 0 // 중단 판정은 연속 실패만(간헐 실패로 전체가 멈추지 않게), 요약은 totalBlocked
     for (const it of r.items || []) {
       const s = Math.max(sim(p.name_clean, it.title), p.model_code && p.model_code.length >= 5 && String(it.title).toUpperCase().includes(p.model_code.toUpperCase()) ? 0.9 : 0)
       if (s >= 0.4 && it.price > 0) { const k = `${it.title}|${it.price}`; if (!found.has(k)) found.set(k, { ...it, sim: +s.toFixed(2) }) }
     }
-    await sleep(800)
+    await sleep(3000 + Math.floor(Math.random() * 2500)) // 사람처럼 — 0.8초 간격으론 30여 회 만에 차단(2026-10-14 실측)
   }
   const matched = [...found.values()].sort((a, b) => b.sim - a.sim || a.price - b.price)
   const prices = matched.map((m) => m.price)
@@ -92,13 +96,13 @@ for (const p of targets) {
     const { error } = await sb.from('jimscanner_campingmoon_products').update({ market_low: low, market_median: median(prices), market_count: prices.length, market_top3: matched.slice(0, 3).map((m) => ({ title: m.title, price: m.price, sim: m.sim })), market_checked_at: new Date().toISOString(), updated_at: new Date().toISOString() }).eq('product_no', p.product_no)
     if (error) { dbFail++; console.log(`  ✗ DB ${p.product_no} ${error.message}`) }
   }
-  if (blocked >= 5) { console.log('  ⚠ 검색 실패 누적 5회 — 차단으로 보고 중단(실패 건·나머지는 다음 실행에서 미조회로 다시 잡힘)'); break }
+  if (blocked >= 5) { console.log('  ⚠ 검색 연속 실패 5회 — 차단으로 보고 중단(실패 건·나머지는 다음 실행에서 미조회로 다시 잡힘)'); break }
 }
 } finally { await session.close() }
 if (dbFail) process.exitCode = 1
 
 const tally = rows.reduce((m, r) => { const k = r.pick ? (r.pick.n === 1 ? r.pick.verdict : `BUNDLE${r.pick.n}`) : 'STRUCTURAL'; m[k] = (m[k] || 0) + 1; return m }, {})
-console.log(`\n판정: ${Object.entries(tally).map(([k, v]) => `${k} ${v}`).join(' · ')}${blocked ? ` · 검색 실패 ${blocked}` : ''}${dbFail ? ` · DB 실패 ${dbFail}` : ''}`)
+console.log(`\n판정: ${Object.entries(tally).map(([k, v]) => `${k} ${v}`).join(' · ')}${totalBlocked ? ` · 검색 실패 ${totalBlocked}(재조회 대상)` : ''}${dbFail ? ` · DB 실패 ${dbFail}` : ''}`)
 const cell = (s) => String(s ?? '').replace(/\|/g, '/').replace(/\n/g, ' ')
 const md = [`# 캠핑문 등록 선별 리포트 ${KST}`, '',
   `가정: 할인 기준 **${DISCOUNT_BASE}**(${DISCOUNT_BASE === 'total' ? '(상품+배송비 3,000)×0.65' : '상품×0.65+배송비 3,000 — 보수안, 첫 주문으로 확정'}) · 쿠팡 수수료 ${(COUPANG_FEE * 100).toFixed(1)}% · 목표 순마진 ${TARGET_MARGIN * 100}% · 하한 ${MIN_MARGIN * 100}% 또는 ${MIN_ABS}원 · 시세 대비 −1%`,

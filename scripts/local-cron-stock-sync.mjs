@@ -25,9 +25,11 @@ import { fileURLToPath } from 'node:url'
 import path from 'node:path'
 import { createClient } from '@supabase/supabase-js'
 import { makeSession, cafe24Login, cafe24BuildStockMap, mallLogin, mallCheckStock } from './lib/supplier-stock.mjs'
+import { tossSetStock } from './lib/toss-api.mjs'
 import { coupangClient, repriceCoupangListing, fetchNaverChannelProducts, syncNaverUpickListing, refreshUpickCatalog, loadUpickProducts } from './lib/upick-price-sync.mjs'
 import { naverApi } from './lib/naver-api.mjs'
 import { logExecution } from './lib/execution-log.mjs'
+import { beatOnce } from './lib/heartbeat.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const env = Object.fromEntries(
@@ -63,6 +65,8 @@ const SUPPLIERS = {
   wellroot: { kind: 'cafe24',  base: env.WELLROOT_BASE_URL  || 'https://wellrootb2b.com', user: env.WELLROOT_USER, pass: env.WELLROOT_PASS,  label: '웰루트',  table: 'jimscanner_wellroot_products',  key: 'product_no', cateCol: 'cate_nos' },
   // K-홀세일(2026-09-27): Cafe24 AuthSSL — 목록 품절아이콘 판정이 수집기(상세 품절박스)와 155/155 일치 실측
   kwholesale: { kind: 'cafe24', base: env.KWHOLESALE_BASE_URL || 'https://kwholesale.co.kr', user: env.KWHOLESALE_USER, pass: env.KWHOLESALE_PASS, label: 'K홀세일', table: 'jimscanner_kwholesale_products', key: 'product_no', cateCol: 'cate_nos' },
+  // 캠핑문(2026-10-14): Cafe24 AuthSSL — 목록 품절아이콘(icon_sellout)은 상품 단위. 옵션 단위(is_selling)는 아래 캠핑문 옵션 단계가 상세 option_stock_data 로 본다
+  campingmoon: { kind: 'cafe24', base: env.CAMPINGMOON_BASE_URL || 'https://campingmoon.co.kr', user: env.CAMPINGMOON_USER, pass: env.CAMPINGMOON_PASS, label: '캠핑문', table: 'jimscanner_campingmoon_products', key: 'product_no', cateCol: 'cate_nos' },
   // 화장품스토리 = 건강산 화장품 서브몰(고도몰5, 회원 공유) — 건강산 자격증명으로 로그인, 판정은 상용몰 분기(goods_view 라이브) 그대로
   cmtstory: { kind: 'mall',    base: env.CMTSTORY_BASE_URL || 'https://www.cmtstory.com', user: env.CMTSTORY_USER || env.GGSAN_USER, pass: env.CMTSTORY_PASS || env.GGSAN_PASS, label: '화장품스토리' },
 }
@@ -97,6 +101,55 @@ async function setVendorSale(spid, action) {
 }
 const stopCoupangSale = (spid) => DRY ? { status: 200 } : setVendorSale(spid, 'stop')
 const resumeCoupangSale = (spid) => DRY ? { status: 200 } : setVendorSale(spid, 'resume')
+
+/**
+ * 5-a) 캠핑문 옵션 단위 재고(2026-10-14, docs/plan-campingmoon.md P5) — 목록 품절 아이콘은 상품 단위라 옵션 품절(option_stock_data.is_selling "F")을 못 본다.
+ * 등록된 캠핑문 리스팅(jimscanner_listing_items)만 로그인 세션으로 상세를 읽어 옵션(vendorItem / 토스 stock) 단위로 정지·재개한다.
+ * 상품 전체 품절·재입고는 위 메인 루프(목록 아이콘)가 처리하므로 여기선 옵션만 본다. 토스는 remainingCount 0/99 로 품절·재개(토스 전용 숨김 API 와 별개).
+ */
+async function campingmoonOptionStage(session, conf) {
+  const { data: lis, error } = await sb.from('jimscanner_listing_items').select('*').eq('source', 'campingmoon').in('market', ['coupang', 'toss']).neq('status', 'REMOVED')
+  if (error) throw new Error(error.message)
+  if (!lis?.length) return
+  const byGoods = new Map()
+  for (const li of lis) { if (!byGoods.has(li.goods_no)) byGoods.set(li.goods_no, []); byGoods.get(li.goods_no).push(li) }
+  const V = '/v2/providers/seller_api/apis/api/v1/marketplace/vendor-items'
+  let checked = 0, stopped = 0, resumed = 0, failed = 0
+  for (const [no, rows] of byGoods) {
+    const r = await session.fx(`${conf.base}/product/detail.html?product_no=${no}`)
+    if (!r.ok) { failed++; continue }
+    const html = await r.text()
+    const raw = (html.match(/var\s+(?:option_stock_data|single_option_stock_data)\s*=\s*'((?:\\.|[^'])*)'/) || [])[1]
+    let selling = null
+    if (raw) { try { const obj = JSON.parse(raw.replace(/\\'/g, "'").replace(/\\\//g, '/').replace(/&quot;/g, '"').replace(/&amp;/g, '&')); selling = new Map(Object.entries(obj).filter(([, v]) => v && typeof v === 'object').map(([code, v]) => [code, String(v.is_selling ?? 'T') !== 'F'])) } catch { /* 파싱 실패 → 이 상품은 건너뜀 */ } }
+    const productSoldout = /var\s+is_soldout_icon\s*=\s*'T'/.test(html)
+    checked++
+    for (const li of rows) {
+      const isSelling = productSoldout ? false : (selling && li.item_code && selling.has(li.item_code) ? selling.get(li.item_code) : null)
+      if (isSelling == null || !li.market_item_id) continue
+      const now = new Date().toISOString()
+      if (!isSelling && li.status === 'ACTIVE') {
+        let ok = true
+        if (!DRY) {
+          if (li.market === 'coupang') { ok = (await coupangApi('PUT', `${V}/${li.market_item_id}/sales/stop`)).status === 200; if (ok) await coupangApi('PUT', `${V}/${li.market_item_id}/quantities/0`) }
+          else ok = (await tossSetStock(Number(li.listing_key), Number(li.market_item_id), 0)).ok
+        }
+        if (ok) { stopped++; if (!DRY) await sb.from('jimscanner_listing_items').update({ status: 'STOPPED', updated_at: now }).eq('id', li.id) } else failed++
+      } else if (isSelling && li.status === 'STOPPED') {
+        let ok = true
+        if (!DRY) {
+          if (li.market === 'coupang') { ok = (await coupangApi('PUT', `${V}/${li.market_item_id}/sales/resume`)).status === 200; if (ok) await coupangApi('PUT', `${V}/${li.market_item_id}/quantities/${TARGET_QTY}`) }
+          else ok = (await tossSetStock(Number(li.listing_key), Number(li.market_item_id), 99)).ok
+        }
+        if (ok) { resumed++; if (!DRY) await sb.from('jimscanner_listing_items').update({ status: 'ACTIVE', updated_at: now }).eq('id', li.id) } else failed++
+      }
+      await sleep(150)
+    }
+    if (selling && !DRY) for (const [code, s] of selling) await sb.from('jimscanner_campingmoon_items').update({ is_selling: s, soldout_at: s ? null : new Date().toISOString(), updated_at: new Date().toISOString() }).eq('item_code', code).neq('is_selling', s)
+    await sleep(300)
+  }
+  console.log(`[local-cron-stock] 캠핑문 옵션 재고: 상품 ${checked} · 옵션 정지 ${stopped} · 재개 ${resumed}${failed ? ` · 실패 ${failed}` : ''}`)
+}
 
 /**
  * 매입처 재고가 있는 상품의 쿠팡 판매가능수량을 MIN_QTY 이상으로 유지한다.
@@ -274,6 +327,7 @@ try {
         await mallLogin(session, conf)
         sessions[src] = session
         console.log(`[local-cron-stock] ${conf.label} 로그인 OK (${srcRows.length}건 라이브 조회)`)
+        await beatOnce(sb, `supplier:${src}`, 'ok', { kind: 'mall', targets: srcRows.length })
       } else {
         await cafe24Login(session, conf)
         sessions[src] = session  // 유픽은 5) 가격반영에서 상세 재조회에 다시 쓴다
@@ -289,10 +343,15 @@ try {
         const hit = nos.filter((n) => map.has(n)).length
         console.log(`[local-cron-stock] ${conf.label} 재고맵 ${map.size}건(품절 ${soldN}) · 대상 ${nos.length}건 중 ${hit}건 매칭`)
         if (hit === 0) skipped.push(`${conf.label}(스캔 결과 0건 매칭)`)
+        // 오케스트레이터 supplier_session_ok 감시: 0건 매칭 = 세션이 조용히 깨진 징후(유픽 AuthSSL 403 사고 패턴)
+        await beatOnce(sb, `supplier:${src}`, hit === 0 ? 'fail' : 'ok', {
+          kind: 'cafe24', mapSize: map.size, soldOut: soldN, targets: nos.length, hit,
+        })
       }
     } catch (e) {
       skipped.push(`${conf.label}(${e instanceof Error ? e.message : e})`)
       console.log(`[local-cron-stock] ⚠ ${conf.label} 재고추적 불가 — 해당 공급처는 이번 회차 건너뜀`)
+      await beatOnce(sb, `supplier:${src}`, 'fail', { error: String(e instanceof Error ? e.message : e).slice(0, 300) })
     }
   }
   if (skipped.length) console.log(`[local-cron-stock] ⚠ 추적 실패: ${skipped.join(' · ')}`)
@@ -333,6 +392,10 @@ try {
     } catch (e) { errors++; if (errors <= 3) console.log(`  row ${row.source_goods_no} error: ${e instanceof Error ? e.message : e}`) }
   }
 
+  // 5-a) 캠핑문 옵션 단위 재고 — 3) 에서 로그인한 세션 재사용. 실패해도 나머지 단계는 진행
+  if (sessions.campingmoon) {
+    try { await campingmoonOptionStage(sessions.campingmoon, SUPPLIERS.campingmoon) } catch (e) { console.log(`[local-cron-stock] ⚠ 캠핑문 옵션 재고 단계 실패: ${e instanceof Error ? e.message : e}`) }
+  }
   // 5) 유픽 가격 반영(쿠팡·네이버) + 네이버 재고 — 실패해도 재고싱크 결과는 그대로 기록한다
   if (sessions.upickb2b) {
     try { await upickPriceStage(sessions.upickb2b, stockMaps.upickb2b, upickMeta, naverUpick ?? []) }

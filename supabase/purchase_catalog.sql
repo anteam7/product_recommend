@@ -128,6 +128,28 @@ with base as (
          c.coupang_category_code,
          c.updated_at
   from public.jimscanner_cmtstory_products c
+
+  union all
+  -- ── campingmoon (캠핑문, (주)소리 · Campingmoon 한국 총판 · Cafe24) ───────────────
+  --   공급가 = 판매가 × 0.65 + 배송비 3,000(사업자 35% 할인, 보수안 — 배송비 포함 할인이면 (판매가+3,000)×0.65. docs/plan-campingmoon.md §2.1)
+  --   MSP 없음(총판 가격 준수 조건 없음) → 판매가는 lib/campingmoon-price.mjs(순마진 10%, 쿠팡 시세 천장). 옵션은 jimscanner_campingmoon_items.
+  --   쿠팡 등록기 campingmoon-register.mjs (2026-10-14, 옵션별 item)
+  select 'campingmoon', m.product_no::text, coalesce(m.name_clean, m.name_raw), '캠핑문'::text, m.thumb_url, m.detail_url,
+         (round(m.sale_price * 0.65) + 3000)::integer, m.consumer_price,
+         3000,
+         '3,000원(15만원 이상 무료) · 35% 할인 후'::text,
+         null::integer, null::jsonb,
+         case when m.soldout then 'soldout' else m.status end, (m.status = 'active' and not m.soldout), true,
+         (m.status = 'active' and not m.soldout and not m.register_excluded and not m.kc_suspect),
+         nullif(concat_ws(' · ',
+           case when m.has_option then '옵션(' || coalesce(m.option_title, '') || ')' end,
+           case when m.kc_suspect then 'KC 의심' end,
+           case when m.market_low is not null then '시세 ' || m.market_low || '(' || coalesce(m.market_count, 0) || ')' end,
+           case when m.register_excluded then '등록제외: ' || coalesce(m.exclude_reason, '') end,
+           m.note), ''),
+         nullif(m.coupang_category_code, '')::integer,
+         m.updated_at
+  from public.jimscanner_campingmoon_products m
 ),
 calc as (
   -- 수수료율은 등록 카테고리로 정해진다(영양제 7.6% vs 그 외 식품 10.6%) — 고정 상수를 쓰면 마진 순위가 뒤바뀐다.

@@ -20,7 +20,7 @@
  *  - 배송: NORMAL/NORMAL, preparationDays 3(영업일=발송기한·페널티 기준), FREE, 제주/도서산간 미배송(쿠팡 remoteAreaDeliverable N 미러), CJ
  */
 import { readFileSync, existsSync } from 'node:fs'
-import { loadFoodLeaves, loadBeautyLeaves } from './lib/toss-categories.mjs'
+import { loadFoodLeaves, loadBeautyLeaves, loadSportsLeaves } from './lib/toss-categories.mjs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createClient } from '@supabase/supabase-js'
@@ -106,7 +106,7 @@ let _leafByName = null
 // 쿠팡 노출 카테고리 leaf 이름(기타소금·혼합곡/기타곡류·톳·채소가루…)이 토스 식품 leaf 이름과 정확히 하나로 일치하면 그 leaf — 규칙에 안 걸린 일반 식품이
 // 전부 기타영양제로 가 "카테고리 불일치" 재등록을 거치던 것(2026-10-14 실측: 등록 대상 616건의 노출 카테고리 중 512건이 토스 leaf 이름과 일치)
 const leafByDisplay = (display) => {
-  const last = String(display || '').replace(/s*(.*?)s*/g, '').split('>').pop().trim()
+  const last = String(display || '').replace(/\s*\([^)]*\)\s*/g, '').split('>').pop().trim() // 괄호 설명 제거 — 종전 /s*(.*?)s*/ 는 백슬래시가 빠져 's' 글자만 지우던 오타(2026-10-14 리뷰)
   if (!last || last === '기타영양제') return null
   if (!_leafByName) { _leafByName = new Map(); for (const l of loadFoodLeaves()) { const k = String(l.path || '').split('>').pop().trim(); _leafByName.set(k, _leafByName.has(k) ? null : l.id) } } // 같은 이름이 둘이면 null(모호)
   return _leafByName.get(last) || null
@@ -150,6 +150,28 @@ const SCENTS = ['라벤더', '로즈', '장미', '시트러스', '플로럴', '�
 const attrVal = (attrs, names) => { for (const n of names) { const v = attrs?.find((a) => a.attributeTypeName === n)?.attributeValueName; if (v && v.trim() && !/없음|해당없음|기타/.test(v)) return v.trim() } return null }
 const beautyIngredient = (title, attrs) => INGREDIENTS.find((k) => (title || '').includes(k)) || attrVal(attrs, ['주성분', '스킨케어 특별성분', '뷰티오일 성분', '트리트먼트/팩/앰플 성분']) || '상세페이지참조'
 const beautyScent = (title, attrs) => SCENTS.find((k) => (title || '').includes(k)) || /([가-힣a-zA-Z]{2,10})향(?![가-힣])/.exec(title || '')?.[1] || attrVal(attrs, ['향기', '뷰티 향', '스킨케어 향']) || '상세페이지참조' // "베이비파우더향" → 베이비파우더
+
+// ── 캠핑/스포츠(캠핑문, 2026-10-14): 토스 스포츠/레져 > 캠핑 leaf. 쿠팡 노출 leaf 이름 일치 → 제목 규칙 → 캠핑소품(26013). 고시 ETC_GOODS(5항목, 캠핑 leaf 전부 허용 실측) ──
+let _sportsByName = null
+const sportsLeaf = (name) => {
+  if (!_sportsByName) { _sportsByName = new Map(); for (const l of loadSportsLeaves()) { const k = String(l.path || '').split('>').pop().trim(); _sportsByName.set(k, _sportsByName.has(k) ? null : l.id) } }
+  return _sportsByName.get(name) || null
+}
+const SPORTS_RULES = [
+  [/화로대|파이어\s*링|화로(?!가방)/, '화로대'], [/바베큐\s*그릴|bbq|그릴(?!스탠드|\s*소품)/i, '가스그릴'], [/더치\s*오븐/, '더치오븐'], [/코펠|냄비|프라이팬|후라이팬|웍/, '냄비/프라이팬'],
+  [/토치/, '가스토치'], [/버너|스토브/, '버너/스토브'], [/바람막이/, '버너 바람막이'], [/숯집게|집게|주걱|뒤집개|바베큐\s*도구/, '바베큐 도구'], [/수저|커트러리|젓가락|포크/, '수저/커트러리'],
+  [/물통|워터\s*저그/, '물통'], [/시에라\s*컵|컵|머그|텀블러/, '컵/텀블러'], [/숯|장작/, '숯/장작'], [/난로|히터|난방/, '캠핑난방용품'],
+  [/캠핑\s*의자|체어|의자/, '캠핑의자'], [/테이블/, '캠핑 테이블'], [/랜턴/, '랜턴'], [/침낭/, '침낭'], [/해먹/, '해먹'], [/매트/, '캠핑매트'],
+  [/텐트/, '알파인/돔형 텐트'], [/타프/, '타프'], [/폴대|폴/, '폴대'], [/팩(?!\s*가방)|스토퍼/, '팩/스토퍼'], [/가방|파우치|케이스/, '캠핑소품'],
+]
+const mapSportsCategory = (t, display) => {
+  const last = String(display || '').split('>').pop().trim()
+  if (last && sportsLeaf(last)) return sportsLeaf(last)
+  for (const [re, name] of SPORTS_RULES) { if (re.test(t || '')) { const id = sportsLeaf(name); if (id) return id } }
+  return 26013 // 캠핑 > 수납/정리소품 > 캠핑소품 — 불일치 반려 시 러너가 추천 경로로 재등록
+}
+const ETC_ALL = [397, 399, 401, 403, 405]
+const ETC_MAP = [[/품명|모델/, 397], [/인증|허가/, 399], [/제조국|원산지/, 401], [/제조자|수입자/, 403], [/전화|상담/, 405]]
 
 // ── 옵션 오버라이드 파일: scripts/toss-opts-vision.mjs(상세 이미지 비전 판독)가 만든 _workspace/toss-opts-overrides.json { spid: { opts } } — --opts 가 없을 때 자동값 대신 쓴다 ──
 const OV_FILE = path.join(__dirname, '..', '_workspace', 'toss-opts-overrides.json')
@@ -279,12 +301,22 @@ function buildOptions(template, ctx, optsArg) {
     }
     if (ctx.cosmetic && /성분/.test(key)) return beautyIngredient(ctx.title, ctx.attrs)
     if (ctx.cosmetic && /^향|향기/.test(key)) return beautyScent(ctx.title, ctx.attrs)
+    if (ctx.sports) {
+      // 캠핑 템플릿: 색상[]·사이즈[]·사용 인원[]·수량 — 쿠팡 item 속성(옵션 축)에서 읽는다. 없으면 정직한 기본값
+      const attr = (re) => ctx.attrs?.find((a) => re.test(a.attributeTypeName || '') && a.attributeValueName)?.attributeValueName?.trim() || null
+      if (/색상|컬러/.test(key)) return (attr(/색상|컬러/) || '단일색상').slice(0, 30)
+      if (/사이즈|크기/.test(key)) return (attr(/사이즈|크기/) || 'FREE').slice(0, 30)
+      if (/인원/.test(key)) { const m = /(\d+)\s*(?:~\s*\d+\s*)?인/.exec(ctx.title || ''); return m ? `${m[1]}인` : '상세페이지참조' }
+      if (/^수량$/.test(key)) return `${ctx.packQty || 1}개`
+    }
     return null
   }
   const out = []
   // 1) 택1 아닌 옵션: 전부 채움 (오버라이드 > 자동 > '1'+첫단위)
   for (const o of opts.filter((x) => !x.isOneOfRequiredGroup)) {
     let v = override(o.key) ?? auto(o.key) ?? (/^수량$/.test(o.key) ? '1개' : null)
+    // 캠핑 템플릿의 자유 입력 칸('단 수'·'재질' 등, 단위 없음)은 수치 자리값 대신 '상세페이지참조' — 거짓 수치를 올리지 않는다
+    if (!v && ctx.sports && !(o.unitValues?.length)) v = '상세페이지참조'
     if (!v) { v = '1' + (o.unitValues?.[0] || '개'); console.log(`  ⚠ 옵션 '${o.key}' 자동값 없음 → ${v} (필요시 --opts 로 지정)`); OPT_WARN.push(`${o.key}→${v}`) }
     out.push({ groupName: o.key, valueName: forceUnit(v, o.unitValues) })
   }
@@ -497,14 +529,16 @@ async function buildPayload(listing, refs) {
   if (brand && /없음|중국|기타|OEM|협력사/i.test(brand)) throw new Error(`브랜드 금지어: ${brand}`)
   // 화장품(쿠팡 고시 '화장품' 또는 화장품스토리 매입분) → 뷰티 카테고리 + COSMETICS 고시. 식품 규칙·기타영양제 폴백은 쓰지 않는다 (2026-10-14)
   const isCosmetic = arg('domain') ? arg('domain') === 'beauty' : ((it.notices || []).some((n) => n.noticeCategoryName === '화장품') || listing.source === 'cmtstory')
-  const NOTICE_CODE = isCosmetic ? 'COSMETICS' : 'PROCESSED_FOOD'
-  let categoryId = parseInt(arg('cat', ''), 10) || (isCosmetic ? mapBeautyCategory(name, listing.display_category_name) : mapCategory(`${name} ${listing.display_category_name || ''}`, listing.display_category_name))
+  // 캠핑/스포츠(캠핑문 매입분 또는 쿠팡 고시 '기타 재화'/'스포츠용품'/'주방용품') → 스포츠/레져 leaf + ETC_GOODS 고시, 옵션(색상)별 다중 stock (2026-10-14)
+  const isSports = arg('domain') ? arg('domain') === 'sports' : (!isCosmetic && (listing.source === 'campingmoon' || (it.notices || []).some((n) => /기타 재화|스포츠용품|주방용품/.test(n.noticeCategoryName || ''))))
+  const NOTICE_CODE = isCosmetic ? 'COSMETICS' : isSports ? 'ETC_GOODS' : 'PROCESSED_FOOD'
+  let categoryId = parseInt(arg('cat', ''), 10) || (isCosmetic ? mapBeautyCategory(name, listing.display_category_name) : isSports ? mapSportsCategory(name, listing.display_category_name) : mapCategory(`${name} ${listing.display_category_name || ''}`, listing.display_category_name))
   if (!categoryId) throw new Error(`화장품 카테고리 매핑 없음(노출 카테고리 ${listing.display_category_name || '없음'}) — --cat=<뷰티 leaf id> 지정`)
   let tpl = await tossConstraintTemplate(categoryId)
   if (!tpl.ok) throw new Error(`제약 템플릿 조회 실패 ${JSON.stringify(tpl.error)}`)
   if (!(tpl.data?.productNoticeInfoTemplateTypes ?? []).includes(NOTICE_CODE)) {
     // 규칙·leaf 이름으로 고른 카테고리가 가공식품 고시를 안 받으면(신선식품 leaf 등) 기타영양제로 물러난다 — --cat 명시면 그대로 오류
-    if (isCosmetic || arg('cat') || categoryId === DEFAULT_CAT) throw new Error(`카테고리 ${categoryId}(${tpl.data?.categoryName})는 ${NOTICE_CODE} 고시 불가: ${JSON.stringify(tpl.data?.productNoticeInfoTemplateTypes)}`)
+    if (isCosmetic || isSports || arg('cat') || categoryId === DEFAULT_CAT) throw new Error(`카테고리 ${categoryId}(${tpl.data?.categoryName})는 ${NOTICE_CODE} 고시 불가: ${JSON.stringify(tpl.data?.productNoticeInfoTemplateTypes)}`)
     console.log(`  ℹ 카테고리 ${categoryId}(${tpl.data?.categoryName})는 PROCESSED_FOOD 고시 불가 → 기타영양제(${DEFAULT_CAT})`)
     categoryId = DEFAULT_CAT; tpl = await tossConstraintTemplate(categoryId)
     if (!tpl.ok) throw new Error(`제약 템플릿 조회 실패 ${JSON.stringify(tpl.error)}`)
@@ -521,6 +555,8 @@ async function buildPayload(listing, refs) {
   if (msp && salePrice < msp) throw new Error(`판매가 ${salePrice} < MSP ${msp}`)
   let originPrice = salePrice
   if (ORIGIN_MODE !== 'sale') { const cand = g?.list || it.originalPrice || 0; if (cand >= salePrice) originPrice = cand }
+  // 옵션별 가격(캠핑문: 쿠팡 items[] 마다 salePrice 가 다름) — 쿠팡 리스팅의 list_price_krw 대신 item.salePrice 로 stock 별 가격
+  const priceOfItem = (item) => has('no-fee-adjust') ? (item.salePrice || listing.list_price_krw) : tossPriceFromCoupang(item.salePrice || listing.list_price_krw, listing.source)
 
   // 옵션
   const legacy = [arg('opt-qty') ? `수량=${arg('opt-qty')}` : null, arg('opt-unit') ? `개당 수량=${arg('opt-unit')}` : null].filter(Boolean).join(';')
@@ -528,10 +564,11 @@ async function buildPayload(listing, refs) {
   const noticeText = (it.notices || []).filter((n) => /제품명|포장단위/.test(n.noticeCategoryDetailName || '')).map((n) => n.content).filter((c) => c && !/참조/.test(c)).join(' ')
   const ovOpts = arg('opts') || fileOpts(listing.seller_product_id)
   if (!arg('opts') && ovOpts) console.log(`  ℹ 옵션 오버라이드 파일(비전 판독): ${ovOpts}`)
-  const optCtx = { title: listing.registered_title, itemName: it.itemName, attrs: it.attributes, extra: noticeText, cosmetic: isCosmetic }, optArg = [ovOpts, legacy].filter(Boolean).join(';')
+  const packOf = (item) => Number((String(item?.externalVendorSku || '').match(/:(\d+)$/) || [])[1]) || item?.unitCount || 1 // campingmoon:{no}:{code}:{n}
+  const optCtx = { title: listing.registered_title, itemName: it.itemName, attrs: it.attributes, extra: noticeText, cosmetic: isCosmetic, sports: isSports, packQty: packOf(it) }, optArg = [ovOpts, legacy].filter(Boolean).join(';')
   let options = buildOptions(tpl.data, optCtx, optArg)
   // 제형 안전망: 제목에 N정/캡슐이 있는데 템플릿에 캡슐/정 옵션이 없으면(양배추정 90정 → 양배추즙 leaf 의 용량 템플릿, 2026-10-14) 기타영양제(59807)로 바꿔 다시 짠다 — --cat 지정 시 제외
-  if (!isCosmetic && OPT_WARN.length && !arg('cat') && categoryId !== 59807 && /\d\s*(정|캡슐)(?![가-힣])/.test(listing.registered_title || '') && !(tpl.data?.categorySalesOptions ?? []).some((o) => /캡슐|정/.test(o.key))) {
+  if (!isCosmetic && !isSports && OPT_WARN.length && !arg('cat') && categoryId !== 59807 && /\d\s*(정|캡슐)(?![가-힣])/.test(listing.registered_title || '') && !(tpl.data?.categorySalesOptions ?? []).some((o) => /캡슐|정/.test(o.key))) {
     const alt = await tossConstraintTemplate(59807)
     if (alt.ok) { console.log('  ℹ 제형(정/캡슐) ≠ 카테고리 템플릿(' + (tpl.data?.categoryName || categoryId) + ') → 기타영양제(59807)로 변경'); categoryId = 59807; tpl = alt; OPT_WARN.length = 0; options = buildOptions(alt.data, optCtx, optArg) }
   }
@@ -566,6 +603,14 @@ async function buildPayload(listing, refs) {
     if (!/\d/.test(byId.get(271) || '')) byId.set(271, comp || '상품 상세페이지 참조') // 용량 칸이 비었거나 글자뿐이면 옵션 구성(100ml x 1개)
     byId.set(289, byId.get(289) || CONTACT)
     noticeItems = COS_ALL.map((id) => ({ id, content: (byId.get(id) || '상품 상세페이지 참조').replace(/상세설명 참조/g, '상품 상세페이지 참조').slice(0, 4000) }))
+  } else if (isSports) {
+    // ETC_GOODS 5항목: 쿠팡 '기타 재화'/'스포츠용품' 고시 값 → 없으면 품명=상품명, 인증=비대상, 제조자=쿠팡 manufacture, 전화=우리 번호
+    for (const n of it.notices || []) { const hit = ETC_MAP.find(([re]) => re.test(n.noticeCategoryDetailName || '')); if (hit && n.content && !byId.has(hit[1])) byId.set(hit[1], n.content) }
+    if (!byId.get(397) || /참조/.test(byId.get(397))) byId.set(397, name)
+    byId.set(399, byId.get(399) || '안전기준 비대상 생활용품 (해당없음)')
+    byId.set(403, byId.get(403) || p.manufacture || '상품 상세페이지 참조')
+    byId.set(405, CONTACT)
+    noticeItems = ETC_ALL.map((id) => ({ id, content: (byId.get(id) || '상품 상세페이지 참조').replace(/상세설명 참조/g, '상품 상세페이지 참조').slice(0, 4000) }))
   } else {
   for (const n of it.notices || []) { const hit = PF_MAP.find(([re]) => re.test(n.noticeCategoryDetailName || '')); if (hit && n.content) byId.set(hit[1], n.content) }
   if (!byId.get(321) || /참조/.test(byId.get(321))) byId.set(321, name)
@@ -579,12 +624,38 @@ async function buildPayload(listing, refs) {
   noticeItems = PF_ALL.map((id) => ({ id, content: (byId.get(id) || '상품 상세페이지 참조').replace(/상세설명 참조/g, '상품 상세페이지 참조').slice(0, 4000) }))
   }
 
+  // stocks — 옵션(색상 등)별 다중 stock(2026-10-14 캠핑문): 쿠팡 items[] 가 여러 개인 스포츠/캠핑문 리스팅은 item 마다 stock(옵션 = item 속성, 가격 = item.salePrice 보정,
+  // managementCode = externalVendorSku campingmoon:{no}:{item_code}:{n}). 옵션 세트가 같은 item 은 토스가 거절하므로 첫 것만 남긴다. 그 외 매입처는 종전대로 stock 1개.
+  const stockMeta = []
+  function buildStocks() {
+    const multi = (p.items || []).length > 1 && (isSports || listing.source === 'campingmoon')
+    const items = multi ? p.items : [it]
+    const out = [], seen = new Set()
+    for (const item of items) {
+      let opts = options
+      if (item !== it) { OPT_WARN.length = 0; opts = buildOptions(tpl.data, { ...optCtx, itemName: item.itemName, attrs: item.attributes, packQty: packOf(item) }, optArg) }
+      const key = JSON.stringify(opts)
+      if (seen.has(key)) { console.log(`  ⚠ 옵션 세트 중복(${item.itemName}) — 템플릿에 구분 옵션이 없어 이 item 은 뺀다`); continue }
+      seen.add(key)
+      const sp = multi ? priceOfItem(item) : salePrice
+      const op = multi ? Math.max(sp, item.originalPrice || 0) : originPrice
+      // 캠핑문은 단일 옵션이라도 SKU(campingmoon:{no}:{item_code}:{n})를 managementCode 로 — 옵션 재고 싱크(listing_items)가 토스 stock 까지 보게
+      const useSku = (multi || listing.source === 'campingmoon') && item.externalVendorSku
+      const mc = useSku ? String(item.externalVendorSku).slice(0, 50) : `${listing.source}:${listing.source_goods_no}`
+      out.push({ options: opts, remainingCount: 99, isHide: false, isMainPrice: false, originPrice: op, salePrice: sp, managementCode: mc })
+      stockMeta.push({ managementCode: mc, sku: useSku ? item.externalVendorSku : null, pack: packOf(item), salePrice: sp, optionLabel: opts.filter((o) => !/^수량$/.test(o.groupName)).map((o) => o.valueName).join('/') || null })
+    }
+    if (!out.length) throw new Error('stock 0개 — 옵션 구성 실패')
+    out[out.reduce((m, s, i) => (s.salePrice < out[m].salePrice ? i : m), 0)].isMainPrice = true
+    return out
+  }
+
   const payload = {
     partnerName: PARTNER_NAME,
     name, brandName: brand || undefined, categoryId, isTaxFree: it.taxType === 'FREE',
     managementCode: `cp${listing.seller_product_id}`,
     images,
-    stocks: [{ options, remainingCount: 99, isHide: false, isMainPrice: true, originPrice, salePrice, managementCode: `${listing.source}:${listing.source_goods_no}` }],
+    stocks: buildStocks(),
     notice: { categoryCode: NOTICE_CODE, items: noticeItems },
     exposure: { searchKeywords: keywords(name, brand, tpl.data?.categoryName), description: `${name}. 구성 ${comp || '상세페이지 참조'}. 상세 설명 이미지를 참고해 주세요.`.slice(0, 1500) },
     deliveryPolicy: {
@@ -597,10 +668,10 @@ async function buildPayload(listing, refs) {
       exchangeRefundLocationId: refs.exchangeRefundLocationId,
       refundOneWayDeliveryFee: p.returnCharge || RETURN_ONEWAY, exchangeRoundTripDeliveryFee: (p.returnCharge || RETURN_ONEWAY) * 2 || EXCHANGE_ROUNDTRIP,
       applicationMethodDescription: '토스쇼핑 주문 상세에서 교환/반품 신청. 단순변심 교환/반품은 상품 수령 후 7일 이내, 미개봉 상태에서 가능합니다.',
-      applicationTermDescription: `상품 수령 후 7일 이내 (상품 하자·오배송은 수령 후 3개월 이내, 안 날로부터 30일 이내). ${isCosmetic ? '화장품 특성상 개봉·사용 후에는' : '식품 특성상 개봉·섭취 후에는'} 단순변심 반품이 어렵습니다.`,
+      applicationTermDescription: `상품 수령 후 7일 이내 (상품 하자·오배송은 수령 후 3개월 이내, 안 날로부터 30일 이내). ${isCosmetic ? '화장품 특성상 개봉·사용 후에는' : isSports ? '사용 흔적이 있는 상품은' : '식품 특성상 개봉·섭취 후에는'} 단순변심 반품이 어렵습니다.`,
     },
   }
-  return { payload, meta: { thumb: thumb.note, categoryName: tpl.data?.categoryName, ggsan: g, msp, salePrice, originPrice } }
+  return { payload, meta: { thumb: thumb.note, categoryName: tpl.data?.categoryName, ggsan: g, msp, salePrice, originPrice, stockMeta } }
 }
 
 async function upsertListing(row) {
@@ -700,6 +771,12 @@ await upsertListing({
   inspection_status: d.inspectionStatus ?? null, exposure_status: d.exposureStatus ?? null, rejection_reasons: d.rejectionReasons ?? null, hidden,
   request_payload: payload, last_response: g.raw, registered_at: new Date().toISOString(), last_synced_at: new Date().toISOString(), updated_at: new Date().toISOString(),
 })
+// 옵션별 stock 매핑(jimscanner_listing_items, market=toss) — 캠핑문처럼 externalVendorSku 가 있는 다중 stock 만. 주문 해석(order-server)·옵션 재고 싱크가 이 표를 본다
+if ((meta.stockMeta || []).some((m) => m.sku)) {
+  const rows = meta.stockMeta.filter((m) => m.sku).map((m) => { const st = (d.stocks || []).find((s) => s.managementCode === m.managementCode); const parts = String(m.sku || '').split(':'); return { market: 'toss', listing_key: String(productId), market_item_id: st?.itemId ? String(st.itemId) : null, external_sku: m.managementCode, source: listing.source, goods_no: listing.source_goods_no, item_code: parts.length >= 3 ? parts[2] : null, option_value: m.optionLabel, pack_qty: m.pack || 1, sale_price: m.salePrice, status: 'ACTIVE' } })
+  const { error: liErr } = await sb.from('jimscanner_listing_items').upsert(rows, { onConflict: 'market,listing_key,external_sku' })
+  if (liErr) console.log(`  ⚠ listing_items 기록 실패: ${liErr.message}`); else console.log(`  옵션 매핑 ${rows.length}건 기록(listing_items)`)
+}
 // 이전 실패 기록(FAILED, 토스에 없는 행)은 성공했으니 정리 — 남겨두면 일괄 러너 후보 선별·가격 동기화가 같은 spid 를 두 행으로 본다
 { const { error: delErr } = await sb.from('jimscanner_toss_listings').delete().eq('coupang_seller_product_id', listing.seller_product_id).eq('inspection_status', 'FAILED'); if (delErr) console.log(`  (FAILED 행 정리 실패: ${delErr.message})`) }
 console.log(`✓ 토스 상품 ${productId} 등록 | inspection=${d.inspectionStatus} exposure=${d.exposureStatus} | itemId ${d.stocks?.[0]?.itemId}`)

@@ -12,7 +12,8 @@ const _cache = {}
 const loadLeaves = (name) => (_cache[name] ??= JSON.parse(readFileSync(path.join(__dirname, `toss-${name}-leaves.json`), 'utf8')))
 export function loadFoodLeaves() { return loadLeaves('food') }
 export function loadBeautyLeaves() { return loadLeaves('beauty') }
-export function loadAllLeaves() { return (_cache.all ??= [...loadFoodLeaves(), ...loadBeautyLeaves()]) }
+export function loadSportsLeaves() { return loadLeaves('sports') } // 스포츠/레져 24215 (908 leaf, 2026-10-14 캠핑문) — 경로 접두가 '24215 > …'
+export function loadAllLeaves() { return (_cache.all ??= [...loadFoodLeaves(), ...loadBeautyLeaves(), ...loadSportsLeaves()]) }
 const norm = (s) => String(s || '').replace(/\s*>\s*/g, ' > ').replace(/\s+/g, ' ').trim()
 
 /**

@@ -245,7 +245,8 @@ for (let i = 0; i < targets.length; i++) {
     const listingRow = {
       seller_product_id: sellerProductId, vendor_id: VENDOR_ID, source: SOURCE, source_goods_no: row.product_no, source_detail_url: row.detail_url, registered_title: built.title,
       display_category_code: cat.code, display_category_name: cat.name, brand: built.payload.brand ?? null,
-      dome_price_krw: costFor(priceOf(first), 1), source_shipping_fee_krw: 3000, outbound_shipping_fee_krw: 0, msp_price_krw: null, list_price_krw: first._price,
+      // msp_price_krw(NOT NULL) = 우리 하한가(floor) — 캠핑문엔 공급사 MSP 가 없으니 리프라이스·pricewatch 가 이 아래로 못 내리게 하는 값
+      dome_price_krw: costFor(priceOf(first), first._n), source_shipping_fee_krw: 3000, outbound_shipping_fee_krw: 0, msp_price_krw: decide(priceOf(first), row.market_low)[first._n - 1].floor, list_price_krw: first._price,
       estimated_fee_krw: Math.round(first._price * COUPANG_FEE), estimated_margin_krw: first._net, estimated_margin_pct: +(first._net / first._price * 100).toFixed(2),
       status: success ? 'TEMPORARY_SAVE' : 'FAILED', displayable: false, rejection_reason: success ? null : (r.body?.message ?? String(r.body).slice(0, 500)),
       request_payload: built.payload, last_response: r.body, registered_at: success ? new Date().toISOString() : null, last_synced_at: new Date().toISOString(),

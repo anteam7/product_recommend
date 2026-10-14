@@ -107,6 +107,9 @@ for (let i = 0; i < rows.length; i++) {
       sum.waiting++; await sleep(400); continue
     }
 
+    // ③-b 옵션 매핑(jimscanner_listing_items) — externalVendorSku ↔ vendorItemId (캠핑문처럼 옵션별 item 을 쓰는 매입처, 2026-10-14). 행이 없는 매입처는 아무 일도 없다
+    if (!DRY) for (const it of d.items ?? []) { if (!it.vendorItemId || !it.externalVendorSku) continue; await sb.from('jimscanner_listing_items').update({ market_item_id: String(it.vendorItemId), updated_at: new Date().toISOString() }).eq('market', 'coupang').eq('listing_key', String(r.seller_product_id)).eq('external_sku', it.externalVendorSku).is('market_item_id', null) }
+
     // ④ 승인 완료 — DB 상태 정정
     const approved = /승인완료/.test(statusName)
     if (approved && r.status !== 'APPROVED' && !DRY) {

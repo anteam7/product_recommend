@@ -90,11 +90,12 @@ export const SUPPLIER_LABELS: Record<string, string> = {
   wellroot: '웰루트',
   kwholesale: 'K홀세일',
   cmtstory: '화장품스토리',
+  campingmoon: '캠핑문',
   manual: '수동',
 }
 // order-server.mjs의 SUPPORTED_SOURCES와 반드시 동기화 — 여기 없으면 결제진행 버튼 자체가 안 그려짐
 // (2026-09-02: bio77 추가 시 order-server.mjs만 고치고 여기를 안 고쳐서 버튼이 안 보이던 버그 재발 방지 메모)
-export const PURCHASE_AUTOMATED_SOURCES: readonly string[] = ['ggsan', 'upickb2b', 'bio77', 'wellroot', 'kwholesale', 'cmtstory']
+export const PURCHASE_AUTOMATED_SOURCES: readonly string[] = ['ggsan', 'upickb2b', 'bio77', 'wellroot', 'kwholesale', 'cmtstory', 'campingmoon']
 
 /** 매입처 상세 URL (listing.source_detail_url 없거나 주문별 오버라이드일 때) */
 export function supplierUrl(source: string | null | undefined, goodsNo: string | null | undefined): string | null {
@@ -104,6 +105,7 @@ export function supplierUrl(source: string | null | undefined, goodsNo: string |
   if (source === 'upickb2b') return `https://upickb2b.com/product/x/${g}/category/1/display/1/`
   if (source === 'bio77') return `https://77bio.co.kr/goods/goods_view.php?goodsNo=${g}`
   if (source === 'wellroot') return `https://wellrootb2b.com/product/detail.html?product_no=${g}`
+  if (source === 'campingmoon') return `https://campingmoon.co.kr/product/detail.html?product_no=${g}`
   if (source === 'kwholesale') return `https://kwholesale.co.kr/product/detail.html?product_no=${g}`
   if (source === 'cmtstory') return `https://www.cmtstory.com/goods/goods_view.php?goodsNo=${g}`
   return null

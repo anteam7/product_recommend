@@ -13,6 +13,7 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
 import { createClient } from '@supabase/supabase-js'
+import { makeBeater } from './lib/heartbeat.mjs'
 import { createCoupangInvoiceOps } from './lib/coupang-invoice.mjs'
 import { createCoupangOrdersSyncOps } from './lib/coupang-orders-sync.mjs'
 import { createNaverOrderOps } from './lib/naver-order-ops.mjs'
@@ -23,6 +24,7 @@ const env = Object.fromEntries(
     .map((l) => { const i = l.indexOf('='); let v = l.slice(i + 1).trim(); if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) v = v.slice(1, -1); return [l.slice(0, i).trim(), v] }),
 )
 const sb = createClient(env.NEXT_PUBLIC_SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY)
+const beat = makeBeater(sb, 'order-server') // 오케스트레이터 process_alive 감시용 (≤60초 1회)
 const PORT = Number(env.ORDER_SERVER_PORT || 39201)
 const BASE = env.GGSAN_BASE_URL || 'https://www.ggsan.com'
 const esc = (s) => String(s ?? '').replace(/[<>&"]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;' }[c]))
@@ -58,9 +60,9 @@ function adminCors(req) {
 
 // 자동주문 지원 매입처 (listings.source → 표시명)
 // ⚠ 새 매입처를 넣으면 execPurchase의 RUN_FLOWS 분기와 coupang-orders/page.tsx PURCHASE_AUTOMATED_SOURCES도 같이 고칠 것
-const SUPPORTED_SOURCES = { ggsan: '건강산', upickb2b: '유픽B2B', bio77: '77바이오', wellroot: '웰루트', kwholesale: 'K홀세일', cmtstory: '화장품스토리' }
+const SUPPORTED_SOURCES = { ggsan: '건강산', upickb2b: '유픽B2B', bio77: '77바이오', wellroot: '웰루트', kwholesale: 'K홀세일', cmtstory: '화장품스토리', campingmoon: '캠핑문' }
 // 무통장 완주 후 이체할 곳 안내(결과 화면) — 매입처마다 입금 계좌 은행이 다르다(계좌번호는 주문서 드롭다운 기준, 소스 미저장)
-const DEPOSIT_BANK_LABEL = { ggsan: '국민은행(건강산)', upickb2b: '국민은행(유픽B2B)', kwholesale: '농협((주)다인내추럴)', cmtstory: '기업은행((주)건강산)' }
+const DEPOSIT_BANK_LABEL = { ggsan: '국민은행(건강산)', upickb2b: '국민은행(유픽B2B)', kwholesale: '농협((주)다인내추럴)', cmtstory: '기업은행((주)건강산)', campingmoon: '우리은행((주)소리)' }
 // 화장품스토리 = 건강산의 화장품 서브몰(같은 고도몰5·같은 회원 계정) → 건강산 무통장 흐름을 호스트만 바꿔 재사용(사용자 결정 2026-10-09: 예치금 아님)
 // 입금은행 드롭다운은 기업은행 하나뿐(건강산의 국민은행과 다름, 2026-10-09 주문서 실측) — 은행명 키워드만 저장(계좌번호는 드롭다운에서 선택)
 const CMTSTORY = { base: env.CMTSTORY_BASE_URL || 'https://www.cmtstory.com', user: env.CMTSTORY_USER || env.GGSAN_USER, pass: env.CMTSTORY_PASS || env.GGSAN_PASS, label: '화장품스토리', bankKeyword: '기업은행' }
@@ -90,14 +92,44 @@ async function resolveOrder(orderId) {
   // 묶음 옵션(웰루트·K홀세일 1·2·3개 변형, 건강산 register-bundle)은 쿠팡 주문 수량이 "N개 묶음 1세트"라
   // 매입 수량 = 주문 수량 × 묶음 수. 묶음 수는 업체상품코드 접미사("450-2" → 2, "1000001234-B3" → 3)로 읽는다.
   // (2026-09-28 류신 프리미엄 정 "2개" 옵션 주문이 매입 1개로 잡힌 사고) 주문별 매입처 오버라이드는 사람이 고른 상품이라 배수 미적용.
-  const bundle = override ? 1 : coupangBundleSize(o, goodsNo)
+  // 옵션 매핑(jimscanner_listing_items, 2026-10-14 캠핑문): 주문의 vendorItemId → 매입처 옵션(item_code)·묶음 수. 행이 없으면 종전(상품 단위) 경로
+  const li = override ? null : await resolveListingItem('coupang', o)
+  const bundle = override ? 1 : (li?.pack_qty || coupangBundleSize(o, goodsNo))
   const qty = (o.shipping_count || 1) * bundle
+  const optionInfo = li ? await supplierOptionInfo(src, li, qty) : {}
   return {
     order: o, source: src, sourceLabel: SUPPORTED_SOURCES[src], goodsNo, detailUrl: L?.[0]?.source_detail_url || null, recipient,
-    kind: 'coupang', dbKey: o.order_id, bundle, purchaseQty: qty,
+    kind: 'coupang', dbKey: o.order_id, bundle, purchaseQty: qty, ...optionInfo,
     paidAmount: o.paid_amount ?? o.order_price ?? null,                       // 고객 결제액(금액 가드 기준)
-    domeCost: L?.[0]?.dome_price_krw ? L[0].dome_price_krw * qty : null,      // 예상 공급가 합(매입 수량 기준)
+    domeCost: optionInfo.domeCost ?? (L?.[0]?.dome_price_krw ? L[0].dome_price_krw * qty : null),      // 예상 공급가 합(매입 수량 기준)
   }
+}
+
+// 주문의 마켓 옵션 id → jimscanner_listing_items 행(캠핑문처럼 옵션별 item 을 쓰는 매입처). coupang: vendor_item_id 우선, 없으면 raw_payload 의 externalVendorSkuCode
+async function resolveListingItem(market, o) {
+  try {
+    if (market === 'coupang') {
+      if (o.vendor_item_id) { const { data } = await sb.from('jimscanner_listing_items').select('*').eq('market', 'coupang').eq('market_item_id', String(o.vendor_item_id)).limit(1); if (data?.[0]) return data[0] }
+      const items = Array.isArray(o.raw_payload?.orderItems) ? o.raw_payload.orderItems : []
+      const it = items.find((x) => String(x?.vendorItemId) === String(o.vendor_item_id)) ?? (items.length === 1 ? items[0] : null)
+      const sku = it?.externalVendorSkuCode
+      if (sku) { const { data } = await sb.from('jimscanner_listing_items').select('*').eq('market', 'coupang').eq('external_sku', String(sku)).limit(1); if (data?.[0]) return data[0] }
+    }
+    if (market === 'toss' && o.item_management_code) { const { data } = await sb.from('jimscanner_listing_items').select('*').eq('market', 'toss').eq('external_sku', String(o.item_management_code)).limit(1); if (data?.[0]) return data[0] }
+  } catch { /* 매핑 테이블이 없거나 조회 실패 → 종전 경로 */ }
+  return null
+}
+// 매입처별 옵션 부가정보 — 캠핑문: 옵션가(가산액 포함)로 35% 할인 기대 결제금액 2종(배송비 포함/제외) + 예상 원가
+async function supplierOptionInfo(src, li, qty) {
+  if (src !== 'campingmoon') return { itemCode: li.item_code || null }
+  const { data: it } = await sb.from('jimscanner_campingmoon_items').select('option_price, add_price, product_no').eq('item_code', li.item_code).maybeSingle()
+  const { data: p } = await sb.from('jimscanner_campingmoon_products').select('sale_price').eq('product_no', li.goods_no).maybeSingle()
+  const unit = it?.option_price || ((p?.sale_price || 0) + (it?.add_price || 0))
+  if (!unit) return { itemCode: li.item_code || null }
+  const SHIP = 3000, R = 0.65
+  const expectTotals = [{ base: 'total(상품+배송비)×0.65', total: Math.round((unit * qty + SHIP) * R) }, { base: 'product(상품×0.65+배송비)', total: Math.round(unit * qty * R + SHIP) }]
+  if (unit * qty >= 150000) expectTotals.push({ base: '15만원↑ 무료배송', total: Math.round(unit * qty * R) })
+  return { itemCode: li.item_code || null, expectTotals, domeCost: Math.round(unit * qty * R + SHIP) }
 }
 
 // 쿠팡 주문 행의 묶음 수 — raw_payload.orderItems 중 이 행의 vendorItemId 의 업체상품코드 접미사.
@@ -154,6 +186,8 @@ async function resolveTossOrder(orderId) {
   } else {
     const m = /^([a-z0-9]+):(.+)$/i.exec(t.item_management_code || '')
     if (m) { src = m[1]; goodsNo = m[2] }
+    // 옵션별 stock(campingmoon:{no}:{item_code}:{n}) — goods_no 는 첫 토큰, 나머지는 옵션 매핑(listing_items)으로
+    if (goodsNo && goodsNo.includes(':')) goodsNo = goodsNo.split(':')[0]
     if (!goodsNo && t.toss_product_id) {
       const { data: L } = await sb.from('jimscanner_toss_listings').select('source, source_goods_no, dome_price_krw').eq('toss_product_id', t.toss_product_id).limit(1)
       src = L?.[0]?.source; goodsNo = L?.[0]?.source_goods_no; domeCost = L?.[0]?.dome_price_krw ? L[0].dome_price_krw * (t.quantity ?? 1) : null
@@ -163,11 +197,15 @@ async function resolveTossOrder(orderId) {
   if (!goodsNo) return { error: '매입처 미연결 — item_management_code/toss_listings 에 source_goods_no가 없습니다', order }
   const recipient = { name: t.receiver_name || '', zip: t.receiver_zip_code || '', addr1: t.receiver_address || '', addr2: t.receiver_address_detail || '', phone: t.receiver_phone || '' }
   if (!recipient.name || !recipient.addr1) return { error: '수령인 주소 정보가 부족합니다 (toss orders 수집 컬럼 확인)', order }
+  const li = (t.supplier_source && t.supplier_goods_no) ? null : await resolveListingItem('toss', t)
+  const bundle = li?.pack_qty || 1
+  const qty = (t.quantity ?? 1) * bundle
+  const optionInfo = li ? await supplierOptionInfo(src, li, qty) : {}
   return {
     order, source: src, sourceLabel: SUPPORTED_SOURCES[src], goodsNo,
     detailUrl: src === 'upickb2b' ? `https://upickb2b.com/product/x/${goodsNo}/category/1/display/1/` : null, recipient,
-    kind: 'toss', dbKey: t.order_product_id,
-    paidAmount: t.price ?? null, domeCost,
+    kind: 'toss', dbKey: t.order_product_id, bundle, purchaseQty: qty, ...optionInfo,
+    paidAmount: t.price ?? null, domeCost: optionInfo.domeCost ?? domeCost,
   }
 }
 
@@ -766,7 +804,14 @@ async function enqueueCoupangAck(orderId) {
 //   출고는 영업일 PM3시(구공지 2:30)까지 '입금 확인'된 주문만 당일 → 입금이 늦으면 쿠팡 출고기한이 밀린다.
 //   매장전용(대리점회원 전용) 상품은 "대리점회원만 접근권한이 있습니다" 경고 후 첫 화면으로 돌려보낸다(실측) → 감지해 중단.
 const KWHOLESALE_BASE = env.KWHOLESALE_BASE_URL || 'https://kwholesale.co.kr'
-async function runFlowKwholesale(goodsNo, qty, recipient, detailUrl, full = null) {
+// Cafe24 무통장 공용 플로우 — K홀세일(2026-09-27)·캠핑문(2026-10-14). site={base,user,pass,label}. opts.itemCode = 옵션 select 값(캠핑문 색상/사이즈 item_code),
+// opts.expectTotals = 주문서 결제예정금액 기대값 배열(캠핑문 35% 회원할인은 주문서에서만 적용되므로 ±10원 안에 들어야 완주) — 매입처마다 함수를 복사하지 않는다(등록표 원칙)
+const KWHOLESALE_SITE = { base: KWHOLESALE_BASE, user: env.KWHOLESALE_USER, pass: env.KWHOLESALE_PASS, label: 'K홀세일' }
+const CAMPINGMOON_SITE = { base: env.CAMPINGMOON_BASE_URL || 'https://campingmoon.co.kr', user: env.CAMPINGMOON_USER, pass: env.CAMPINGMOON_PASS, label: '캠핑문' }
+const runFlowKwholesale = (goodsNo, qty, recipient, detailUrl, full = null) => runFlowCafe24Cash(KWHOLESALE_SITE, goodsNo, qty, recipient, detailUrl, full)
+async function runFlowCafe24Cash(site, goodsNo, qty, recipient, detailUrl, full = null, opts = {}) {
+  const KWHOLESALE_BASE = site.base, L = site.label
+  if (!site.user || !site.pass) return { ok: false, msg: `${L} 자격증명 없음(.env.local)` } // 브라우저를 띄우기 전에
   const dialogs = []
   // "동일상품이 장바구니에 N개 있습니다. 함께 구매하시겠습니까?" → 취소(현재 선택 수량만)
   const { ctx, page } = await openBrowser((d) => { dialogs.push(d.message()); return /함께 구매/.test(d.message()) ? d.dismiss() : d.accept() })
@@ -777,21 +822,40 @@ async function runFlowKwholesale(goodsNo, qty, recipient, detailUrl, full = null
   await page.goto(`${KWHOLESALE_BASE}/member/login.html`, { waitUntil: 'load', timeout: 45000 })
   for (let i = 0; i < 4; i++) {
     await page.waitForTimeout(600)
-    await page.locator('#member_id').fill(env.KWHOLESALE_USER)
-    await page.locator('#member_passwd').fill(env.KWHOLESALE_PASS)
-    if ((await page.locator('#member_id').inputValue()) === env.KWHOLESALE_USER && (await page.locator('#member_passwd').inputValue()) === env.KWHOLESALE_PASS) break
+    await page.locator('#member_id').fill(site.user)
+    await page.locator('#member_passwd').fill(site.pass)
+    if ((await page.locator('#member_id').inputValue()) === site.user && (await page.locator('#member_passwd').inputValue()) === site.pass) break
   }
   await Promise.all([
     page.waitForURL((u) => !/\/member\/login\.html/.test(u.toString()), { timeout: 30000 }).catch(() => {}),
     page.press('#member_passwd', 'Enter'),
   ])
-  if (/member\/login/.test(page.url())) return { ok: false, msg: `K홀세일 로그인 실패 — 자격증명(KWHOLESALE_USER/PASS) 확인 필요${lastDialog()}` }
+  if (/member\/login/.test(page.url())) return { ok: false, msg: `${L} 로그인 실패 — 자격증명 확인 필요${lastDialog()}` }
   // 2) 상품 페이지 + 수량 (등급 제한 경고가 뜨면 구매 불가 상품)
   const before = dialogs.length
   await page.goto(detailUrl || `${KWHOLESALE_BASE}/product/detail.html?product_no=${goodsNo}`, { waitUntil: 'domcontentloaded', timeout: 30000 })
   await page.waitForTimeout(1500)
   const denied = dialogs.slice(before).find((m) => /회원만|접근\s*권한|권한이\s*없/.test(m))
-  if (denied) return { ok: false, msg: `K홀세일 구매 불가 상품 — ${denied.replace(/\s+/g, ' ').slice(0, 60)} (매장전용 등, 쿠팡 판매중지 검토)` }
+  if (denied) return { ok: false, msg: `${L} 구매 불가 상품 — ${denied.replace(/\s+/g, ' ').slice(0, 60)} (매장전용 등, 쿠팡 판매중지 검토)` }
+  // 2-b) 옵션(색상/사이즈) 선택 — item_code 가 select 값. 라벨에 [품절]이면 매입처 옵션 품절(쿠팡 옵션 품절 처리 대상)
+  if (opts.itemCode) {
+    const picked = await page.evaluate((code) => {
+      // 캠핑문은 1축(option1)만 쓴다(2026-10-14 정찰: 2축·추가옵션 0건). option1 이 없을 때만 첫 옵션 select
+      const sel = document.querySelector('select[name="option1"]') || document.querySelector('select[name^="option"]')
+      if (!sel) return { ok: false, why: '옵션 select 없음' }
+      const o = [...sel.options].find((x) => x.value === code)
+      if (!o) return { ok: false, why: `옵션 ${code} 없음(현재: ${[...sel.options].map((x) => x.value).filter((v) => v && v !== '*' && v !== '**').join(',').slice(0, 80)})` }
+      if (/\[\s*품절\s*\]|\(\s*품절\s*\)/.test(o.textContent || '')) return { ok: false, why: `옵션 품절: ${o.textContent.trim()}` }
+      sel.value = code; sel.dispatchEvent(new Event('change', { bubbles: true }))
+      return { ok: true, label: o.textContent.trim() }
+    }, opts.itemCode)
+    if (!picked.ok) return { ok: false, msg: `${L} 옵션 선택 실패 — ${picked.why}` }
+    await page.waitForTimeout(900)
+    // 사이트 스크립트가 값을 되돌리는 경우 대비 — 실제 선택값 재확인
+    const nowVal = await page.evaluate(() => (document.querySelector('select[name="option1"]') || document.querySelector('select[name^="option"]'))?.value).catch(() => null)
+    if (nowVal !== opts.itemCode) return { ok: false, msg: `${L} 옵션 선택이 유지되지 않음(현재 ${nowVal}) — 열린 창에서 직접 진행` }
+    // 옵션 선택 후 생기는 선택상품 수량칸(quantity_opt[])에 수량. 없으면 아래 공통 수량 입력으로
+  }
   if (qty > 1) await page.evaluate((q) => { const el = document.querySelector('input#quantity, input[name="quantity_opt[]"]'); if (el) { el.value = String(q); el.dispatchEvent(new Event('change', { bubbles: true })); el.dispatchEvent(new Event('blur', { bubbles: true })) } }, qty)
   // 3) BUY IT NOW = product_submit(1, …) → 주문서
   await page.evaluate(() => {
@@ -803,6 +867,9 @@ async function runFlowKwholesale(goodsNo, qty, recipient, detailUrl, full = null
   await page.waitForTimeout(2000)
   const op = ctx.pages().find((p) => /\/order\/orderform/.test(p.url())) || page
   if (!/\/order\/orderform/.test(op.url())) return { ok: false, msg: `주문서로 이동 실패 — 품절/수량제한 여부 확인${lastDialog()}` }
+  // 주문서 품목 수 확인 — 바로구매라도 장바구니 품목이 섞여 들어오면(캠핑문 계정 장바구니에 기존 3건) 금액이 달라진다
+  const lineCount = await op.evaluate(() => document.querySelectorAll('.xans-order-list tbody tr, .orderListArea tbody tr, table.ec-base-table tbody tr[class*="xans-record"]').length).catch(() => 0)
+  if (lineCount > 1 && !opts.allowMultiLine) return { ok: false, msg: `${L} 주문서에 품목이 ${lineCount}줄 — 장바구니 품목이 섞였을 수 있어 중단(열린 창에서 확인)` }
   // 4) 배송지 = 새로운 배송지(기본은 주문자 동일!) → 클리어 핸들러 대기 후 수령인 입력
   const newAddr = op.locator('#sameaddr1')
   if ((await newAddr.count()) && !(await newAddr.isChecked().catch(() => true))) { await newAddr.click({ force: true }); await op.waitForTimeout(800) }
@@ -831,7 +898,7 @@ async function runFlowKwholesale(goodsNo, qty, recipient, detailUrl, full = null
   }, recipient.phone)
   await op.bringToFront().catch(() => {})
   const phoneWarn = phoneOk ? '' : ' ⚠ 수령인 전화번호 국번이 주문서 선택지에 없어 비워 뒀습니다 — 직접 입력하세요.'
-  if (!full) return { ok: true, msg: `주문서 작성 완료 — 열린 K홀세일 창에서 금액·배송지 확인 후 무통장입금으로 [결제하기]를 직접 누르세요.${phoneWarn}` }
+  if (!full) return { ok: true, msg: `주문서 작성 완료 — 열린 ${L} 창에서 금액·배송지 확인 후 무통장입금으로 [결제하기]를 직접 누르세요.${phoneWarn}` }
   if (!phoneOk) return { ok: false, msg: `수령인 전화번호를 주문서에 넣지 못함 — 완주 중단(열린 창에서 직접 진행)${phoneWarn}` }
 
   // ── 완주(무통장): 무통장 확인 → 입금은행(유일 계좌) + 입금자명 → 필수 동의 → 금액 가드 → 결제하기(+확인 레이어) → 주문번호 ──
@@ -868,8 +935,14 @@ async function runFlowKwholesale(goodsNo, qty, recipient, detailUrl, full = null
     const m2 = /최종\s*결제\s*금액[^0-9]{0,30}([\d,]{3,})\s*원/.exec(document.body.innerText)
     return m2 ? parseInt(m2[1].replace(/,/g, ''), 10) : null
   }).catch(() => null)
-  const g = guardFail('K홀세일', total, full.maxPay)
+  const g = guardFail(L, total, full.maxPay)
   if (g) return { ok: false, msg: g }
+  // 기대 금액 가드(캠핑문): 35% 회원할인 적용 결제예정금액이 계산식 후보 중 하나와 ±10원 안에 있어야 한다 — 첫 주문이 할인 기준(배송비 포함 여부)을 확정한다
+  if (Array.isArray(opts.expectTotals) && opts.expectTotals.length && total != null) {
+    const hit = opts.expectTotals.find((e) => Math.abs(e.total - total) <= 10)
+    if (!hit) return { ok: false, msg: `${L} 결제예정금액 ${total.toLocaleString()}원이 기대값(${opts.expectTotals.map((e) => `${e.base}:${e.total.toLocaleString()}`).join(' / ')})과 다름 — 완주 중단(열린 창에서 확인, 할인 기준·옵션 가산액 점검)` }
+    console.log(`[order-server] ${L} 결제예정금액 ${total} = ${hit.base} 기준 기대값 일치`)
+  }
   // 클릭 직전 재확인 — 여전히 무통장이어야 누른다(카드/PG 자동결제 금지)
   const stillCash = await op.evaluate(() => document.querySelector('input[name=addr_paymethod][value=cash]')?.checked === true)
   if (!stillCash) return { ok: false, msg: '결제수단이 무통장입금이 아님 — 완주 중단(열린 창에서 직접 진행)' }
@@ -884,7 +957,7 @@ async function runFlowKwholesale(goodsNo, qty, recipient, detailUrl, full = null
     const m = /주문\s*번호[^\d]{0,12}(\d{8}-\d{6,9})/.exec(document.body.innerText)
     return m ? m[1] : null
   }).catch(() => null)
-  if (!done && !orderNo) return { ok: false, msg: `결제하기 이후 완료 페이지 확인 실패 — 열린 K홀세일 창에서 주문 상태를 직접 확인하세요${lastDialog()}` }
+  if (!done && !orderNo) return { ok: false, msg: `결제하기 이후 완료 페이지 확인 실패 — 열린 ${L} 창에서 주문 상태를 직접 확인하세요${lastDialog()}` }
   return { ok: true, done: true, orderNo, total, bankAccount, msg: `무통장 주문 완료 — 주문번호 ${orderNo ?? '(파싱 실패, 창에서 확인)'} · 총액 ${total.toLocaleString()}원 · 입금대기(${bankAccount?.text || '농협 다인내추럴 계좌'}로 이체 후 [입금완료])` }
 }
 
@@ -899,6 +972,7 @@ const RUN_FLOWS = {
   wellroot: (r, full) => runFlowWellroot(r.goodsNo, buyQty(r), r.recipient, r.detailUrl, full),
   kwholesale: (r, full) => runFlowKwholesale(r.goodsNo, buyQty(r), r.recipient, r.detailUrl, full),
   cmtstory: (r, full) => runFlowGgsan(r.goodsNo, buyQty(r), r.recipient, full, CMTSTORY),   // 건강산 무통장 흐름 재사용(호스트·계정만 다름)
+  campingmoon: (r, full) => runFlowCafe24Cash(CAMPINGMOON_SITE, r.goodsNo, buyQty(r), r.recipient, r.detailUrl, full, { itemCode: r.itemCode, expectTotals: r.expectTotals }), // 옵션 select + 35% 할인 기대금액 가드
 }
 async function execPurchase(orderKey, fullMode) {
   const r = await resolveOrder(orderKey)
@@ -999,6 +1073,7 @@ setInterval(async () => {
 // 결제진행 폴러(Playwright, 수 분)와 분리해 대기 없이 처리. 직렬(coupangJobBusy). 멱등이라 재실행 안전.
 let coupangJobBusy = false
 setInterval(async () => {
+  beat().catch(() => {}) // busy여도 살아 있음 → busy 검사 앞
   if (coupangJobBusy) return
   coupangJobBusy = true
   try {

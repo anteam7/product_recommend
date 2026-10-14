@@ -91,6 +91,7 @@ const TRACKERS = [
   { source: 'bio77', label: '77bio', with: (e, fn) => withBio77Session(e, (page, base) => fn((no) => fetchBio77Order(page, base, no))) },
   cafe24('wellroot', '웰루트', 'https://wellrootb2b.com', 'WELLROOT'),       // 예치금 결제(입금대기 없음)
   cafe24('kwholesale', 'K홀세일', 'https://kwholesale.co.kr', 'KWHOLESALE'), // 무통장(입금 확인 후 출고) — 상태어가 고도몰과 달라 depositSync 미적용
+  cafe24('campingmoon', '캠핑문', 'https://campingmoon.co.kr', 'CAMPINGMOON'), // 2026-10-14 무통장·한진택배 — 첫 배송에서 fetchCafe24Order 송장 파싱 실측 필요(docs/plan-campingmoon.md P5)
 ]
 
 // ─── 쿠팡 발주확인·송장등록(로컬 직접 실행, scripts/lib/coupang-invoice.mjs 공용) ───
