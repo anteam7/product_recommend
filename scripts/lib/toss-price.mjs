@@ -11,7 +11,7 @@
  */
 export const TOSS_FEE_RATE = 0.11 // 판매 8% + 결제 3%
 export const COUPANG_FEE_RATE = 0.106 // 기타 영양제 기본
-export const COUPANG_FEE_BY_SOURCE = { cmtstory: 0.096 } // 화장품스토리 = 뷰티
+export const COUPANG_FEE_BY_SOURCE = { cmtstory: 0.096, campingmoon: 0.108 } // 화장품스토리 = 뷰티, 캠핑문 = 스포츠/레저(2026-10-14)
 const VAT = 1 / 11
 
 export const coupangFeeRateFor = (source) => COUPANG_FEE_BY_SOURCE[source ?? ''] ?? COUPANG_FEE_RATE

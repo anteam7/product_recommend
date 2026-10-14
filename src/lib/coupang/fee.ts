@@ -13,6 +13,7 @@ export const FEE_RATE = 0.106
  */
 export const FEE_RATE_BY_SOURCE: Record<string, number> = {
   cmtstory: 0.096, // 화장품스토리 — 뷰티
+  campingmoon: 0.108, // 캠핑문 — 스포츠/레저용품 기본 10.8% (쿠팡 공식 수수료표, 캠핑 하위 구분 없음; 2026-10-14)
 }
 
 export function feeRateFor(source?: string | null): number {
