@@ -289,6 +289,9 @@ async function tryRetag(p, reasons) {
   if (!isTagReject(reasons) || p.retag) return false
   const words = parseBannedWords(reasons)
   if (!words.length) { console.log(`  ↪ 금칙어 반려인데 메시지에서 단어를 못 읽음 — 수동 확인: ${JSON.stringify(reasons).slice(0, 160)}`); return false }
+  // 금칙어가 상품명 토큰의 일부(호로파 ⊃ 호로)면 토큰 제거로 못 고친다 — 토스는 상품명도 부분일치로 막아(2026-10-14 호로파 60정 "상품명 / 옵션명 금칙어") 이름을 바꿔야 하므로 사람 판단
+  const stuck = words.filter((w) => (p.name || '').includes(w) && !(p.name || '').split(' ').includes(w))
+  if (stuck.length) { console.log(`  ↪ 금칙어(${stuck.join(', ')})가 상품명 단어 일부라 자동 제거 불가 — 상품명 변경은 수동 판단: ${p.name}`); log({ spid: p.spid, name: p.name, step: 'retag', ok: false, words, error: 'banned word inside name token' }); return false }
   const { data: row, error: rowErr } = await sb.from('jimscanner_toss_listings').select('category_id').eq('toss_product_id', p.tossId).maybeSingle()
   if (rowErr) { console.log(`  ↪ 금칙어 반려 자동 조치 보류 — DB 조회 실패: ${rowErr.message}`); return false } // 카테고리 모른 채 삭제·재등록하지 않는다
   const extra = [...(row?.category_id ? [`--cat=${row.category_id}`] : []), '--force', `--ban=${words.join(',')}`]
