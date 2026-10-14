@@ -404,6 +404,13 @@ while (idx < plan.length || pending.length) {
   if (!halt && failStreak >= MAX_FAIL) halt = `연속 실패 ${failStreak}건`
   if (!halt && timeoutStreak >= PARALLEL) halt = `검수 대기 ${WAIT_MAX_MIN}분 초과 ${timeoutStreak}건 연속(토스 검수 지연 의심)`
   if (halt && !pending.length) break // 더 등록 안 하고, 남은 검수 대기분은 끝까지 추적
+  // 3) 후보를 다 돌렸고(또는 중단) 남은 대기분이 전부 이어받은 건·수동 검수 추정이면 90분까지 붙잡지 않고 끝낸다 — 다음 실행의 resumePending(7일 창)이 재확인.
+  //    (2026-10-14 2회차: 16:47 마지막 등록 후 수동 검수 2건 때문에 17:47까지 1시간 공회전, 감독 루프의 다음 회차가 그만큼 늦어짐)
+  if ((halt || idx >= plan.length) && pending.length && pending.every((p) => p.resumed || p.escalated)) {
+    for (const p of pending) console.log(`  ⏳ ${p.tossId} ${String(p.name || '').slice(0, 36)} — 수동 검수 추정 ${((Date.now() - p.t0) / 60_000).toFixed(0)}분째, 이번 실행은 더 기다리지 않음(다음 실행에서 재확인)`)
+    pending.length = 0
+    break
+  }
   if (!pending.length) break
   // 2) 검수 대기분 폴링(60초)
   await sleep(60_000)
