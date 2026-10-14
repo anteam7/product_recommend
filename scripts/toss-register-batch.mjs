@@ -36,7 +36,7 @@ const has = (k) => process.argv.includes(`--${k}`)
 const LIST = has('list')
 const LIMIT = Math.max(1, parseInt(arg('limit', '20'), 10) || 20)
 const MIN_SOLD = parseInt(arg('min-sold', '0'), 10) || 0
-const SOURCES = arg('sources', 'ggsan,upickb2b,bio77,kwholesale,wellroot,cmtstory').split(',').map((s) => s.trim()).filter(Boolean)
+const SOURCES = arg('sources', 'ggsan,upickb2b,bio77,kwholesale,wellroot,cmtstory,campingmoon').split(',').map((s) => s.trim()).filter(Boolean)
 const WAIT_MAX_MIN = Math.max(1, parseInt(arg('wait-max', '90'), 10) || 90)
 // 자동(LLM) 검수는 1~17분에 끝난다(2026-10-14 실측 100여 건). 이보다 오래 걸리면 수동 검수로 넘어간 것(수 시간, 결과는 대개 반려) —
 // 창(--parallel)을 붙잡고 있으면 러너가 1.5시간씩 논다. 이 시간이 지나면 창에서 빼고 계속 추적만 한다(다음 실행도 7일 창으로 이어받음).
