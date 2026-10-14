@@ -38,6 +38,9 @@ const LIMIT = Math.max(1, parseInt(arg('limit', '20'), 10) || 20)
 const MIN_SOLD = parseInt(arg('min-sold', '0'), 10) || 0
 const SOURCES = arg('sources', 'ggsan,upickb2b,bio77,kwholesale').split(',').map((s) => s.trim()).filter(Boolean)
 const WAIT_MAX_MIN = Math.max(1, parseInt(arg('wait-max', '90'), 10) || 90)
+// 자동(LLM) 검수는 1~17분에 끝난다(2026-10-14 실측 100여 건). 이보다 오래 걸리면 수동 검수로 넘어간 것(수 시간, 결과는 대개 반려) —
+// 창(--parallel)을 붙잡고 있으면 러너가 1.5시간씩 논다. 이 시간이 지나면 창에서 빼고 계속 추적만 한다(다음 실행도 7일 창으로 이어받음).
+const ESCALATE_MIN = Math.max(5, parseInt(arg('escalate-min', '25'), 10) || 25)
 const PARALLEL = Math.max(1, parseInt(arg('parallel', '1'), 10) || 1) // 동시에 검수 대기시킬 최대 건수(창). 1 = 엄격한 1건씩
 const MAX_FAIL = Math.max(1, parseInt(arg('max-fail', '3'), 10) || 3)
 const SKIP = new Set(arg('skip', '').split(',').map((s) => s.trim()).filter(Boolean))
@@ -276,7 +279,9 @@ const settle = (p, insp) => {
   const ok = insp.inspection === 'COMPLETE'
   if (ok) { okCount++; failStreak = 0; timeoutStreak = 0 }
   else if (insp.inspection === 'TIMEOUT') timeoutStreak++ // 토스 검수 자체가 멈춘 경우 — 실패 streak 과 분리
-  else failStreak++
+  // 이전 실행에서 이어받은 건의 반려는 그때 설정(옵션·썸네일 규칙)의 결과라 지금 등록 설정의 문제가 아니다 — streak 에 안 셈
+  // (2026-10-14 10시 수동 검수로 넘어갔던 전날 등록분이 한꺼번에 "옵션 정보" 반려로 돌아와 새 등록이 전부 통과하는데도 "연속 실패"로 멈출 뻔)
+  else if (!p.resumed) failStreak++
   console.log(`  ${ok ? '✓' : '✗'} ${p.tossId} ${String(p.name || '').slice(0, 36)} — ${insp.inspection}${insp.item ? ` (${insp.item})` : ''}${insp.reasons ? ' ' + JSON.stringify(insp.reasons).slice(0, 160) : ''}${insp.err ? ` check 오류: ${insp.err}` : ''} — ${mins}분`)
   log({ spid: p.spid, name: p.name, source: p.source, step: 'inspection', tossId: p.tossId, category: p.category ?? null, options: p.options ?? null, inspection: insp.inspection, item: insp.item, reasons: insp.reasons, lastErr: insp.err ?? null, minutes: mins, resumed: !!p.resumed })
   results.push({ spid: p.spid, name: p.name, tossId: p.tossId, result: insp.inspection })
@@ -284,7 +289,7 @@ const settle = (p, insp) => {
 while (idx < plan.length || pending.length) {
   // 1) 중단 사유 없으면 빈 슬롯만큼 등록 (검수 창 = 이번 실행에서 새로 등록해 검수 대기 중인 건수. 이전 실행에서 이어받은
   //    건(resumed)은 토스 검수가 수십 분째 멈춘 것들이라 창에서 빼지 않으면 러너가 놀게 된다 — 2026-10-14 00:11 관찰)
-  const fresh = () => pending.filter((p) => !p.resumed).length
+  const fresh = () => pending.filter((p) => !p.resumed && !p.escalated).length
   while (!halt && idx < plan.length && fresh() < PARALLEL) {
     const c = plan[idx++]
     console.log(`\n[${idx}/${plan.length}] ${c.spid} ${c.name.slice(0, 40)} — 등록 중… (검수 대기 ${pending.length}건)`)
@@ -326,9 +331,14 @@ while (idx < plan.length || pending.length) {
     }
     else if (Date.now() - p.t0 > WAIT_MAX_MIN * 60_000) {
       pending.splice(pending.indexOf(p), 1)
-      // 이전 실행에서 이어받은 건은 이번 실행에서 1회만 확인 — 계속 대기면 실패·TIMEOUT 으로 세지 않고 다음 실행에 넘긴다(검수가 수동으로 넘어간 상품)
-      if (p.resumed) { console.log(`  ⏳ ${p.tossId} ${String(p.name || '').slice(0, 36)} — 검수 대기 지속 ${((Date.now() - p.t0) / 3600_000).toFixed(1)}시간 (다음 실행에서 재확인)`); continue }
+      // 이전 실행에서 이어받은 건·수동 검수로 넘어간 건은 계속 대기여도 실패·TIMEOUT 으로 세지 않고 다음 실행에 넘긴다(7일 창으로 자동 재확인)
+      if (p.resumed || p.escalated) { console.log(`  ⏳ ${p.tossId} ${String(p.name || '').slice(0, 36)} — 검수 대기 지속 ${((Date.now() - p.t0) / 3600_000).toFixed(1)}시간 (다음 실행에서 재확인)`); continue }
       settle(p, { inspection: 'TIMEOUT', item: null, reasons: null, err: insp.err })
+    }
+    else if (!p.resumed && !p.escalated && Date.now() - p.t0 > ESCALATE_MIN * 60_000) {
+      // 자동 검수 시간을 넘김 → 수동 검수 추정: 창에서 빼서(fresh() 제외) 새 등록을 계속하고, 결과는 계속 폴링한다
+      p.escalated = true
+      console.log(`  ⏳ ${p.tossId} ${String(p.name || '').slice(0, 36)} — ${ESCALATE_MIN}분 넘게 검수 중(수동 검수 추정) → 검수 창에서 제외, 결과는 계속 추적`)
     }
   }
   if (!halt && failStreak >= MAX_FAIL) halt = `연속 실패 ${failStreak}건`
