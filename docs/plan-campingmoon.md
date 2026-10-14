@@ -189,3 +189,18 @@ purchase_catalog 뷰 UNION ALL 블록(kwholesale 블록 복제), 리스팅 sourc
 6. **묶음 수량**: 1개 단위만(권장) vs 2·3개 번들 추가.
 7. **장바구니 기존 3건**(4461 18cm·4468 블랙 등 33,000원) 처리 — 비우고 시작할지.
 8. 네이버 스마트스토어는 범위 밖(요청: 쿠팡·토스)으로 둠.
+
+---
+
+## 8. 진행 기록 (2026-10-14 밤, 사장님 "그대로 진행해" 승인 후)
+
+- **수수료 확정**: 쿠팡 공식 수수료표(cloud.mkt.coupang.com/Fee-Table) "스포츠/레저용품 기본 10.8%"(캠핑 하위 구분 없음, 부가세 별도 → 실차감 11.88%). 정산 실측 118건으로 영양제 10.6% 일치 확인. 배송비 수수료는 실수취 배송비에만(무료배송 0). `fee.ts`·`toss-price.mjs` 에 campingmoon 0.108.
+- **카테고리 메타(쿠팡)**: predict → 캠핑 테이블 81858(색상·사이즈·가로길이 MANDATORY, 수량 축 없음, single 불가) · 캠핑의자 81867(색상·수량) · 코펠세트 81984(색상·수량, 기타 재화 고시 없음 → 스포츠용품/주방용품) · 화로대 81934(사이즈·수량) 등. KC 인증 MANDATORY 없음(RECOMMEND 만), 충전식 랜턴은 배터리 서류 조건부.
+- **P0 완료**: `campingmoon-collect.mjs` 964건(판매가능 606·품절 358·옵션 상품 400·옵션 행 1,917·KC 의심 97). 옵션 축 색상 162·사이즈 82·선택 95·복합(색상-사이즈 등) 20여.
+- **P1 진행 중**: `campingmoon-market.mjs` Aside 검색 — 0.8초 간격으로 약 30회 만에 쿠팡 차단(검색 null). 간격 3~5.5초로 늘리고 30분 뒤 재개. 첫 21건 판정: OK 5 · BUNDLE2/3 3 · NO_MATCH 6 · STRUCTURAL 7 — **캠핑문 35% 원가로는 쿠팡 최저가(사입 셀러) 아래인 상품이 많다** → 묶음 전략이 핵심. 매칭 오류(특대형화로대 148,000 ↔ 시세 27,600) 보이면 리포트 상위 3건으로 사람이 확인.
+- **P2 완료(테스트)**: `campingmoon-register.mjs` — 3744 MT-2 폴딩 중형화로대(단품, 50,250원) → 16414558217, 4456 목베개(색상 2 item, 19,180원) → 16414558248, 둘 다 승인요청(PENDING_APPROVAL). 첫 실행에서 listings `msp_price_krw` NOT NULL 로 DB 기록 실패 → 하한가(floor)를 MSP 칸에 쓰도록 수정, 두 건은 로그 JSON 으로 복구.
+- **P3 완료(테스트)**: `toss-register.mjs` 스포츠 도메인 + 다중 stock — 16414558248 → 토스 856602869(색상 2 stock, managementCode = SKU, listing_items 2건). 검수 결과는 러너 `--check`.
+- **P4 구현**: order-server `runFlowCafe24Cash`(K홀세일도 이 함수) + 옵션 select + 결제예정금액 기대값 가드(배송비 포함/제외 35% 둘 다 후보, ±10원) + resolveOrder/resolveTossOrder 의 listing_items 해석. **첫 실주문은 `full=false`(제출 직전 정지)로 금액을 눈으로 확인 → DISCOUNT_BASE 확정.**
+- **P5 구현**: TRACKERS 1줄(송장은 첫 배송에서 실측), stock-sync SUPPLIERS + 옵션 단계(5-a), followup 이 vendorItemId 를 listing_items 에 채움(승인 후 `node scripts/coupang-followup-approvals.mjs --source=campingmoon`).
+- **P6 일부**: 어드민 등록표·카탈로그 뷰(적용됨). **리프라이스 크론(`campingmoon-reprice.mjs`)은 미작성** — 시세 전수 조회가 끝난 뒤 작성.
+- **남은 일**: 시세 조회 완료 → 선별 리포트 검토 → `campingmoon-register.mjs`(--limit 20) → 승인 후 followup → 토스 러너 sources 에 campingmoon 추가 → 첫 주문 dry 로 할인 기준 확정 → reprice 크론.
