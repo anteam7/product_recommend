@@ -125,7 +125,8 @@ function aggregate(t, answers) {
   const netG = mode(a.map((x) => num(x.net_g)).filter(Boolean))?.[0] || null
   const netMl = mode(a.map((x) => num(x.net_ml)).filter(Boolean))?.[0] || null
   const cpG = num(/(\d+(?:\.\d+)?)\s*g(?![a-z])/i.exec(t.itemName || '')?.[1]), cpMl = num(/(\d+(?:\.\d+)?)\s*ml/i.exec(t.itemName || '')?.[1])
-  const r = { count: null, unit: null, perMg, netG, netMl, bottles: mode(a.map((x) => num(x.bottles)).filter((n) => n && n > 1))?.[0] || null, evidence: [], confidence: 'none', verified: null, opts: null }
+  const bottles = mode(a.map((x) => num(x.bottles)).filter((n) => n && n > 1))?.[0] || null
+  const r = { count: null, unit: null, perMg, netG, netMl, bottles, evidence: [], confidence: 'none', verified: null, opts: null }
   if (t.need === 'weight') {
     const g = netG || (cpG && cpG >= 20 ? cpG : null)
     if (g) { r.netG = g; r.opts = `개당 중량=${g}g`; r.confidence = netG && cpG && Math.abs(netG - cpG) / cpG < 0.15 ? 'high' : netG ? 'medium' : 'low'; r.evidence = a.filter((x) => num(x.net_g)).map((x) => String(x.evidence || '').slice(0, 80)).slice(0, 2) }
@@ -138,12 +139,16 @@ function aggregate(t, answers) {
   for (const c of counts) { const u = unitOf(c.u), k = `${c.n}|${u}`; const g = groups.get(k) || { n: c.n, u, freq: 0, ev: [] }; g.freq++; if (c.ev && g.ev.length < 2) g.ev.push(c.ev); groups.set(k, g) }
   const ranked = [...groups.values()].sort((x, y) => y.freq - x.freq)
   // 중량 검증: 1정 중량 × 수량 ≈ 총 내용량(이미지 net_g 또는 쿠팡 itemName g). 검증되는 그룹이 있으면 빈도보다 우선
-  const weightOk = (n) => { if (!perMg) return null; const calc = (perMg * n) / 1000; const ref = netG || cpG; if (!ref) return null; return Math.abs(calc - ref) / ref < 0.15 }
-  const best = ranked.find((g) => weightOk(g.n) === true) || ranked[0]
+  // 세트(3g x 30포 x 3박스 = 270g)는 총 내용량이 박스 수 배 — 1박스 중량으로도, 세트 중량으로도 맞으면 검증
+  //   세트 배수로만 맞는 검증('set')은 반쪽 수량(60정 중 30)이 통과할 수 있어 high 로 올리지 않는다(최대 medium, --min-conf=medium 으로만 적용)
+  const weightOk = (n) => { if (!perMg) return null; const calc = (perMg * n) / 1000; const ref = netG || cpG; if (!ref) return null; const ok = (c) => Math.abs(c - ref) / ref < 0.15; return ok(calc) ? 'direct' : (bottles && ok(calc * bottles)) ? 'set' : false }
+  const best = ranked.find((g) => weightOk(g.n) === 'direct') || ranked.find((g) => weightOk(g.n) === 'set') || ranked[0]
   const conflict = ranked.some((g) => g !== best && g.freq >= 2)
-  r.count = best.n; r.unit = best.u; r.evidence = best.ev; r.verified = weightOk(best.n)
-  r.confidence = r.verified === true ? 'high' : (best.freq >= 2 && !conflict) ? 'high' : best.freq >= 2 ? 'medium' : conflict ? 'low' : 'medium'
-  if (r.verified === false) r.confidence = 'low' // 1정 중량×수량이 총중량과 안 맞으면 수량이 틀렸을 가능성 — 상품 정보 불일치 반려 예방
+  const w = weightOk(best.n)
+  r.count = best.n; r.unit = best.u; r.evidence = best.ev; r.verified = w === 'direct' ? true : w === false ? false : null
+  r.confidence = w === 'direct' ? 'high' : (best.freq >= 2 && !conflict) ? 'high' : best.freq >= 2 ? 'medium' : conflict ? 'low' : 'medium'
+  if (w === 'set' && r.confidence === 'high') r.confidence = 'medium'
+  if (w === false) r.confidence = 'low' // 1정 중량×수량이 총중량과 안 맞으면 수량이 틀렸을 가능성 — 상품 정보 불일치 반려 예방
   // 템플릿에 '(택1) 개당 캡슐/정' 이 있으면 그 키가 먼저 잡히고(toss-register buildOptions), 없으면 '개당 수량' 으로 들어간다(단위는 템플릿 허용값으로 교정)
   r.opts = /정|캡슐|환/.test(best.u) ? `개당 캡슐/정=${best.n}${best.u};개당 수량=${best.n}${best.u}` : `개당 수량=${best.n}${best.u}`
   return r
@@ -181,6 +186,8 @@ async function worker() {
   }
 }
 await Promise.all(Array.from({ length: CONC }, worker))
+// 같은 날 결과 파일이 있으면 병합(--spids 재판독이 전체 결과를 덮어쓰지 않게) — 이번에 읽은 spid 만 교체
+if (!DRY && existsSync(OUT_JSON)) { try { const prev = JSON.parse(readFileSync(OUT_JSON, 'utf8')); const done = new Set(results.map((r) => r.spid)); for (const p of prev) if (!done.has(p.spid)) results.push(p) } catch { /* 새로 쓴다 */ } }
 results.sort((a, b) => (CONF_RANK[b.result.confidence] ?? 0) - (CONF_RANK[a.result.confidence] ?? 0) || a.source.localeCompare(b.source))
 const tally = results.reduce((m, r) => { m[r.result.confidence] = (m[r.result.confidence] || 0) + 1; return m }, {})
 console.log(`\n판독 ${results.length}건: ${Object.entries(tally).map(([k, v]) => `${k} ${v}`).join(' · ')}`)
