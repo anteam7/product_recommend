@@ -97,8 +97,10 @@ for (let i = 0; i < rows.length; i++) {
       sum.rejected++; await sleep(400); continue
     }
 
-    // ② 임시저장 — 승인요청이 누락된 건
-    if (/임시저장/.test(statusName)) {
+    // ② 임시저장 — 승인요청이 누락된 건. '임시저장중'은 다르다: 승인완료 이력·vendorItemId 가 있는데 쿠팡 쪽 수정 처리가 걸린 상태로
+    //    승인요청이 "'임시저장' 상태의 상품만" 으로 거부된다(2026-10-16 캠핑문 4179, 매 실행 실패로만 찍히고 재고도 못 넣던 것) → 승인요청은 건너뛰고 아래 매핑·재고만
+    if (/임시저장중/.test(statusName)) console.log(`${tag} | ⚠ 임시저장중(승인 뒤 수정 처리 중?) — Wing 확인 필요${vendorItemIds.length ? '' : ' · vendorItemId 없음'}`)
+    else if (/임시저장/.test(statusName)) {
       if (DRY) { console.log(`${tag} | (dry) 승인요청 필요`); sum.requested++; await sleep(300); continue }
       const appr = await api('PUT', `${P}/seller-products/${r.seller_product_id}/approvals`)
       const ok = appr.status === 200 && (appr.body?.code === 'SUCCESS' || appr.body?.code === 200)
