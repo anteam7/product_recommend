@@ -34,37 +34,48 @@ const QTY = Math.max(1, +(argOf('qty') || 30))
 const LIMIT = +(argOf('limit') || 0) || 0
 const DRY = args.includes('--dry')
 const FORCE_STOCK = args.includes('--force-stock')
+// APPROVED 행은 승인 후 N시간 안의 것만 다시 본다(--approved-within=0 이면 전부). 전량 등록 중엔 승인분이 수백 건이라
+// 매 실행 전수 재조회가 쿠팡 API 제한(HTTP 400)을 부른다(2026-10-15 캠핑문 followup 실패 55건). 오래된 승인분 재고는 stock-sync 크론 소관
+const APPROVED_WITHIN_H = argOf('approved-within') == null ? 72 : Math.max(0, +argOf('approved-within') || 0)
 const sleep = ms => new Promise(r => setTimeout(r, ms))
 
 function sign(m, p, q = '') { const dt = new Date().toISOString().substring(2, 19).replace(/[-:]/g, '') + 'Z'; return { dt, sig: crypto.createHmac('sha256', SECRET_KEY).update(dt + m + p + q).digest('hex') } }
-async function api(m, p) {
+async function apiOnce(m, p) {
   const { dt, sig } = sign(m, p)
   const r = await fetch(`${HOST}${p}`, { method: m, headers: { Authorization: `CEA algorithm=HmacSHA256, access-key=${ACCESS_KEY}, signed-date=${dt}, signature=${sig}`, 'Content-Type': 'application/json;charset=UTF-8' } })
   const t = await r.text()
   try { return { status: r.status, body: JSON.parse(t) } } catch { return { status: r.status, body: t } }
 }
+/** GET 은 일시 오류(400 제한·429·5xx)면 2초 뒤 한 번 더 — 같은 시각에 등록기·토스 러너가 API 를 같이 쓰면 묶음으로 400 이 난다(2026-10-15) */
+async function api(m, p) {
+  let r = await apiOnce(m, p)
+  if (m === 'GET' && (r.status === 400 || r.status === 429 || r.status >= 500)) { await sleep(2000); r = await apiOnce(m, p) }
+  return r
+}
 const P = '/v2/providers/seller_api/apis/api/v1/marketplace'
 
-/** 현재 재고 조회 — 실패하면 null(모름) */
+/** 현재 재고·판매상태 조회 — 실패하면 qty null(모름). onSale=false 는 stock-sync 가 매입처 품절로 정지한 변형(sales/stop + 0개) */
 async function currentStock(vendorItemId) {
   const r = await api('GET', `${P}/vendor-items/${vendorItemId}/inventories`)
   const d = r.body?.data
   const v = d?.amountInStock ?? d?.quantity
-  return typeof v === 'number' ? v : null
+  return { qty: typeof v === 'number' ? v : null, onSale: typeof d?.onSale === 'boolean' ? d.onSale : null }
 }
 
 let query = sb.from('jimscanner_coupang_listings')
-  .select('id, source, source_goods_no, seller_product_id, registered_title, status, list_price_krw')
+  .select('id, source, source_goods_no, seller_product_id, registered_title, status, list_price_krw, approved_at')
   .in('status', ['TEMPORARY_SAVE', 'PENDING_APPROVAL', 'APPROVED'])
   .not('seller_product_id', 'is', null)
 if (SOURCE !== 'all') query = query.eq('source', SOURCE)
 if (ONLY.length) query = query.in('source_goods_no', ONLY)
 const { data: all, error } = await query.order('registered_at', { ascending: true })
 if (error) { console.error('조회 실패:', error.message); process.exit(1) }
-const rows = LIMIT > 0 ? (all ?? []).slice(0, LIMIT) : (all ?? [])
+const cutoff = APPROVED_WITHIN_H > 0 ? Date.now() - APPROVED_WITHIN_H * 3600_000 : 0
+const inWindow = (all ?? []).filter(r => r.status !== 'APPROVED' || !cutoff || !r.approved_at || new Date(r.approved_at).getTime() >= cutoff)
+const rows = LIMIT > 0 ? inWindow.slice(0, LIMIT) : inWindow
 
 console.log(`=== 쿠팡 등록 마무리 ${DRY ? '[DRY]' : ''} ===`)
-console.log(`매입처 ${SOURCE} · 대상 ${rows.length}건 · 재고 ${QTY}개${FORCE_STOCK ? ' (기존 재고 덮어씀)' : ''}\n`)
+console.log(`매입처 ${SOURCE} · 대상 ${rows.length}건 · 재고 ${QTY}개${FORCE_STOCK ? ' (기존 재고 덮어씀)' : ''}${(all ?? []).length > inWindow.length ? ` · 승인 ${APPROVED_WITHIN_H}시간 지난 APPROVED ${(all ?? []).length - inWindow.length}건 제외` : ''}\n`)
 
 const sum = { approved: 0, requested: 0, stocked: 0, rejected: 0, waiting: 0, fail: 0 }
 for (let i = 0; i < rows.length; i++) {
@@ -123,9 +134,13 @@ for (let i = 0; i < rows.length; i++) {
 
     // ⑤ 재고 — 0인 것만 채운다(기존 재고는 stock-sync 크론 소관)
     const stocked = []
+    let held = 0
     for (const vid of vendorItemIds) {
-      const cur = await currentStock(vid)
+      const { qty: cur, onSale } = await currentStock(vid)
       if (!FORCE_STOCK && cur != null && cur > 0) { await sleep(250); continue }
+      // 판매중지(onSale=false)는 stock-sync 가 매입처 품절로 멈춘 변형 — 재고를 넣으면 품절 상품이 되살아난다(2026-10-15 캠핑문 옵션 단위 정지와 충돌).
+      // 조회 실패(모름)도 건드리지 않는다 — 다음 실행에서 다시 본다
+      if (!FORCE_STOCK && (onSale === false || cur == null)) { held++; await sleep(250); continue }
       if (DRY) { stocked.push(`${vid}(현재 ${cur ?? '?'})`); await sleep(250); continue }
       const q = await api('PUT', `${P}/vendor-items/${vid}/quantities/${QTY}`)
       if (q.status === 200) stocked.push(String(vid))
@@ -137,7 +152,7 @@ for (let i = 0; i < rows.length; i++) {
       console.log(`${tag} | ${approved ? '✓ 승인완료' : `· ${statusName}`} → 재고 ${QTY}개 설정 ${DRY ? '(dry) ' : ''}(${stocked.join(',')})`)
       sum.stocked++
     } else {
-      console.log(`${tag} | ${approved ? '✓ 승인완료' : `· ${statusName}`} — 재고 이미 있음, 건너뜀`)
+      console.log(`${tag} | ${approved ? '✓ 승인완료' : `· ${statusName}`} — ${held ? `판매중지·미확인 변형 ${held}건 보류` : '재고 이미 있음, 건너뜀'}`)
     }
   } catch (e) {
     console.log(`${tag} | ✗ ERROR: ${e.message}`)
