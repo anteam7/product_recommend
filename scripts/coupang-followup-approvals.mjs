@@ -79,8 +79,10 @@ for (let i = 0; i < rows.length; i++) {
 
     // ① 반려 — 재시도 불가, DB에 사유를 남긴다
     if (/반려|거절/.test(statusName)) {
-      console.log(`${tag} | ⛔ ${statusName}`)
-      if (!DRY) await sb.from('jimscanner_coupang_listings').update({ status: 'REJECTED', rejection_reason: `쿠팡 ${statusName}`, last_synced_at: new Date().toISOString() }).eq('id', r.id)
+      // 반려 코멘트(쿠팡 셀러 시스템)는 상품 GET 에 없고 histories 에만 있다(2026-10-15 캠핑문 "대표이미지 최소 500*500" 확인) — 사유를 DB 에 남겨 재승인 판단에 쓴다
+      const why = await (async () => { try { const h = await api('GET', `/v2/providers/seller_api/apis/api/v1/marketplace/seller-products/${d.sellerProductId ?? r.seller_product_id}/histories`); return (h.body?.data ?? []).find((x) => /반려|거절/.test(x.statusName || '') && x.comment)?.comment || null } catch { return null } })()
+      console.log(`${tag} | ⛔ ${statusName}${why ? ' — ' + why.slice(0, 120) : ''}`)
+      if (!DRY) await sb.from('jimscanner_coupang_listings').update({ status: 'REJECTED', rejection_reason: `쿠팡 ${statusName}${why ? ' — ' + why : ''}`.slice(0, 500), last_synced_at: new Date().toISOString() }).eq('id', r.id)
       sum.rejected++; await sleep(400); continue
     }
 

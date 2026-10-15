@@ -13,6 +13,7 @@
  *    vendorItemId 는 승인 후 coupang-followup-approvals 가 채운다(P5). SKU 에 하이픈이 없어 기존 번들 파서(coupangBundleSize)가 건드리지 않는다 — 묶음 수는 listing_items.pack_qty.
  */
 import crypto from 'node:crypto'
+import sharp from 'sharp'
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
@@ -137,15 +138,43 @@ function buildAttributes(meta, row, item, n, title) {
   return { attributes: out }
 }
 
+const BUCKET = 'site-assets', IMG_MIN = 500, IMG_MAX = 5000
+const _specCache = new Map()
+/** 쿠팡 대표 이미지 규격(최소 500x500·최대 5000x5000·10MB) 보정 — 미달이면 흰 배경 500x500 패딩(초과면 축소)해 site-assets 에 올리고 그 URL 을 쓴다.
+ *  2026-10-15 옛 잡화(스티커·자전거용품 등)가 "대표이미지는 최소 500*500" 으로 승인요청 직후 자동 반려 6건(coupang-fix-images.mjs 와 같은 규칙). DRY 는 업로드 없이 원본 URL 유지. */
+async function ensureImageSpec(url, key) {
+  if (_specCache.has(url)) return _specCache.get(url)
+  let r
+  try { r = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' }, signal: AbortSignal.timeout(20_000) }) } catch (e) { throw new Error(`대표 이미지 다운로드 실패: ${url} (${e.message})`) }
+  if (r.status !== 200 || !/image\//.test(r.headers.get('content-type') || '')) throw new Error(`대표 이미지 다운로드 실패: ${url} (${r.status})`)
+  const buf = Buffer.from(await r.arrayBuffer())
+  let m
+  try { m = await sharp(buf).metadata() } catch { throw new Error(`대표 이미지 해석 실패: ${url}`) }
+  if (m.width >= IMG_MIN && m.height >= IMG_MIN && m.width <= IMG_MAX && m.height <= IMG_MAX && buf.length <= 10 * 1024 * 1024) { _specCache.set(url, url); return url }
+  const small = m.width < IMG_MIN || m.height < IMG_MIN
+  const out = await (small ? sharp(buf).resize(IMG_MIN, IMG_MIN, { fit: 'contain', background: { r: 255, g: 255, b: 255 } }) : sharp(buf).resize(IMG_MAX, IMG_MAX, { fit: 'inside' })).jpeg({ quality: 92 }).toBuffer()
+  console.log(`  ℹ 대표 이미지 ${m.width}x${m.height} → ${small ? '500x500 패딩' : '5000 이내 축소'} 후 site-assets 업로드${DRY ? ' (dry: 생략)' : ''}`)
+  if (DRY) { _specCache.set(url, url); return url }
+  const up = await sb.storage.from(BUCKET).upload(`${key}.jpg`, out, { contentType: 'image/jpeg', upsert: true })
+  if (up.error) throw new Error(`대표 이미지 업로드 실패: ${up.error.message}`)
+  const pub = sb.storage.from(BUCKET).getPublicUrl(`${key}.jpg`).data.publicUrl
+  _specCache.set(url, pub)
+  return pub
+}
+/** 승인반려 사유 — 쿠팡 셀러 시스템 코멘트는 상품 GET 에 없고 histories 에만 있다(2026-10-15 확인) */
+async function rejectComment(spid) {
+  try { const h = await api('GET', `/v2/providers/seller_api/apis/api/v1/marketplace/seller-products/${spid}/histories`); return (h.body?.data ?? []).find((x) => /반려/.test(x.statusName || '') && x.comment)?.comment || null } catch { return null }
+}
+
 async function buildPayload(row, items, meta, cat) {
   const title = cleanTitle(row)
   const nc = pickNoticeCategory(meta.noticeCategories)
   if (!nc) throw new Error(`전기/KC 고시만 있는 카테고리(${(meta.noticeCategories ?? []).map((n) => n.noticeCategoryName).join(',')}) — 보류`)
   row._colors = [...new Set(items.map((it) => optionAxes(row.option_title, it.option_value).color).filter(Boolean))].join(', ')
   const notices = buildNotices(nc, title, row)
-  const rep = row.big_url || row.thumb_url
-  if (!rep) throw new Error('대표 이미지 없음')
-  if (!(await downloadable(rep))) throw new Error(`대표 이미지 다운로드 실패: ${rep}`)
+  const rep0 = row.big_url || row.thumb_url
+  if (!rep0) throw new Error('대표 이미지 없음')
+  const rep = await ensureImageSpec(rep0, `campingmoon/${row.product_no}/rep`)
   const contentImgs = []
   for (const u of (row.detail_image_src || []).slice(0, 10)) if (await downloadable(u)) contentImgs.push(u)
   // 상세 이미지가 아예 없는 옛 잡화(자전거벨·스티커 등 22건, 2026-10-15)는 대표 이미지를 상세로 쓴다 — 쿠팡은 상세 이미지 1장 이상 필수
@@ -157,7 +186,7 @@ async function buildPayload(row, items, meta, cat) {
     const attr = buildAttributes(meta, row, it, it._n, title)
     if (attr.error) throw new Error(attr.error)
     const label = [it.option_value, it._n > 1 ? `${it._n}개` : null].filter(Boolean).join(', ') || (it._n > 1 ? `${it._n}개` : '단품')
-    const itemImg = it.item_image && (await downloadable(it.item_image)) ? it.item_image : rep
+    const itemImg = it.item_image ? await ensureImageSpec(it.item_image, `campingmoon/${row.product_no}/item-${it.item_code}`).catch(() => rep) : rep
     built.push({
       itemName: label.slice(0, 100), originalPrice: price, salePrice: price,
       maximumBuyCount: 0, maximumBuyForPerson: 0, maximumBuyForPersonPeriod: 1, outboundShippingTimeDay: 2, unitCount: it._n,
@@ -294,7 +323,7 @@ for (let i = 0; i < targets.length; i++) {
         await sleep(3000)
         const cur = (await api('GET', `/v2/providers/seller_api/apis/api/v1/marketplace/seller-products/${sellerProductId}`)).body?.data?.statusName ?? ''
         // 요청 직후 이미 '승인반려'면 자동 반려(사유는 Wing 에서만 보임) → REJECTED 로 기록하고 응답 본문을 사유 칸에 남긴다(2026-10-15 돼지꼬리팩 1516)
-        if (cur && /승인반려/.test(cur)) { const hint = JSON.stringify(appr.body).slice(0, 300); await sb.from('jimscanner_coupang_listings').update({ status: 'REJECTED', approval_status_name: cur, rejection_reason: `승인요청 직후 자동 반려 — 응답: ${hint}`, last_synced_at: new Date().toISOString() }).eq('id', inserted.id); console.log(`      → 승인요청 직후 '승인반려'(자동 반려, 사유는 Wing) 응답: ${hint.slice(0, 160)}`) }
+        if (cur && /승인반려/.test(cur)) { const why = (await rejectComment(sellerProductId)) || `응답: ${JSON.stringify(appr.body).slice(0, 300)}`; await sb.from('jimscanner_coupang_listings').update({ status: 'REJECTED', approval_status_name: cur, rejection_reason: `승인요청 직후 자동 반려 — ${why}`.slice(0, 500), last_synced_at: new Date().toISOString() }).eq('id', inserted.id); console.log(`      → 승인요청 직후 '승인반려'(자동 반려): ${why.slice(0, 160)}`) }
         else if (cur && !/임시저장/.test(cur)) { await sb.from('jimscanner_coupang_listings').update({ status: 'PENDING_APPROVAL', approval_status_name: cur, last_synced_at: new Date().toISOString() }).eq('id', inserted.id); summary.approved++; console.log(`      → 승인요청 응답은 오류지만 쿠팡 상태 '${cur}' → PENDING_APPROVAL`) }
         else { console.log(`      → 승인요청 실패: ${JSON.stringify(appr.body).slice(0, 150)}`); await sb.from('jimscanner_coupang_listings').update({ rejection_reason: `승인요청 실패: ${JSON.stringify(appr.body).slice(0, 300)}`, last_synced_at: new Date().toISOString() }).eq('id', inserted.id) }
       }
