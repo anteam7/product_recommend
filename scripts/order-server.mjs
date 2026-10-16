@@ -17,6 +17,7 @@ import { makeBeater } from './lib/heartbeat.mjs'
 import { createCoupangInvoiceOps } from './lib/coupang-invoice.mjs'
 import { createCoupangOrdersSyncOps } from './lib/coupang-orders-sync.mjs'
 import { createNaverOrderOps } from './lib/naver-order-ops.mjs'
+import { GODOMALL_PRICE_TABLES, godomallExpectTotals, checkExpectTotals } from './lib/purchase-guard.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const env = Object.fromEntries(
@@ -250,7 +251,8 @@ function guardFail(kind, total, maxPay) {
 
 // Playwright: 고도몰5(ggsan·cmtstory) 주문서 자동 작성 → 결제 직전 정지 (브라우저 열어둠) / full 지정 시 무통장 결제 완주
 // mall 생략 = 건강산(기존 동작 그대로). 화장품스토리는 같은 플랫폼·같은 계정이라 host/계정/표시명만 주입(CMTSTORY).
-async function runFlowGgsan(goodsNo, qty, recipient, full = null, mall = null) {
+// expect = { totals, ship } — 주문서 총액 기대값(execPurchase 가 godomallExpectTotals 로 계산). 완주는 일치할 때만, 직전 정지는 다르면 경고
+async function runFlowGgsan(goodsNo, qty, recipient, full = null, mall = null, expect = null) {
   const base = mall?.base || BASE, user = mall?.user || env.GGSAN_USER, pass = mall?.pass || env.GGSAN_PASS, label = mall?.label || 'ggsan'
   const { ctx, page } = await openBrowser()
   if (full) full.ctxRef = ctx   // 원격 잡이 완료 후 브라우저를 닫을 수 있게
@@ -318,7 +320,9 @@ async function runFlowGgsan(goodsNo, qty, recipient, full = null, mall = null) {
     }).catch(() => null)
     const bankNote = diag && /선택/.test(diag.bank) ? ` ⚠ 입금은행 미선택 — 드롭다운: ${diag.bankOptions.join(' | ') || '(없음)'}` : ''
     const d = diag ? ` [총액 ${diag.total?.toLocaleString() ?? '?'}원 · ${diag.cash ? '무통장' : '⚠ 무통장 아님'} · 은행 ${diag.bank}${bankNote} · 수령인 ${diag.receiver} · 세금계산서 ${diag.tax ? '✓' : '✗'}]` : ''
-    return { ok: true, msg: `주문서 작성 완료 — 열린 ${label} 창에서 금액·배송지 확인 후 [결제하기]를 직접 누르세요${d}` }
+    const ex = diag?.total != null && expect?.totals?.length ? checkExpectTotals(diag.total, expect.totals, { qty, ship: expect.ship, address: recipient.addr1 }) : null
+    const warn = ex && !ex.ok ? ` ⚠ ${ex.short} — 수량·재고 확인 후 결제` : ''
+    return { ok: true, msg: `주문서 작성 완료 — 열린 ${label} 창에서 금액·배송지 확인 후 [결제하기]를 직접 누르세요${d}${warn}` }
   }
 
   // ── 완주(무통장): 동의 체크 → 금액 가드 → 결제하기 → 완료페이지 주문번호 파싱 ──
@@ -338,6 +342,10 @@ async function runFlowGgsan(goodsNo, qty, recipient, full = null, mall = null) {
   }).catch(() => null)
   const g = guardFail(label, total, full.maxPay)
   if (g) return { ok: false, msg: g }
+  // 기대 총액 가드 — 상한만 보면 수량이 줄어든 주문서(매입처 재고 부족)가 통과한다(2026-10-16 도브 시어버터 3개 주문이 1개 9,900원으로 2번 생성)
+  const ex = checkExpectTotals(total, expect?.totals, { qty, ship: expect?.ship, address: recipient.addr1 })
+  if (!ex.ok) return { ok: false, msg: `${label} ${ex.msg}` }
+  console.log(`[order-server] ${label} 주문서 총액 ${total} = ${ex.note}`)
   // 결제수단이 무통장(gb)으로 선택돼 있을 때만 클릭 (카드/PG 자동결제 금지)
   const isCash = await op.evaluate(() => document.querySelector('input[name=settleKind][value="gb"]')?.checked === true)
   if (!isCash) return { ok: false, msg: '결제수단이 무통장입금이 아님 — 완주 중단(열린 창에서 직접 진행)' }
@@ -484,7 +492,8 @@ async function isBio77GiftEligible(goodsNo) {
   if (error) { console.log(`  [bio77] is_pill_form 조회 실패(goods_no=${goodsNo}): ${error.message} — 사은품 문구 생략`); return false }
   return data?.is_pill_form === true
 }
-async function runFlowBio77(goodsNo, qty, recipient, full = null) {
+// expect = { totals, ship } — 주문서 총액 기대값(execPurchase 가 godomallExpectTotals 로 계산, 건강산 흐름과 같은 가드)
+async function runFlowBio77(goodsNo, qty, recipient, full = null, expect = null) {
   const giftEligible = await isBio77GiftEligible(goodsNo)
   const { ctx, page } = await openBrowser()
   if (full) full.ctxRef = ctx
@@ -528,7 +537,10 @@ async function runFlowBio77(goodsNo, qty, recipient, full = null) {
   await op.bringToFront().catch(() => {})
 
   if (!full) {
-    return { ok: true, msg: '주문서 작성 완료 — 열린 77bio 창에서 결제수단(가상계좌 등) 선택 후 [결제하기]를 직접 누르세요' }
+    const t = await op.evaluate(() => { const hid = document.querySelector('input[name=settlePrice]'); return hid && /^\d+$/.test(hid.value) ? +hid.value : null }).catch(() => null)
+    const ex = t != null && expect?.totals?.length ? checkExpectTotals(t, expect.totals, { qty, ship: expect.ship, address: recipient.addr1 }) : null
+    const warn = !expect?.totals?.length ? ' ⚠ 기대 총액 미상(공급가 없음) — 금액 직접 확인' : ex && !ex.ok ? ` ⚠ ${ex.short} — 수량·재고 확인 후 결제` : ''
+    return { ok: true, msg: `주문서 작성 완료 — 열린 77bio 창에서 결제수단(가상계좌 등) 선택 후 [결제하기]를 직접 누르세요${t != null ? ` [총액 ${t.toLocaleString()}원]` : ''}${warn}` }
   }
 
   // ── 완주: 예치금 전액사용 → 가상계좌 선택 → 결제하기 → KG이니시스 팝업 진행 ──
@@ -541,6 +553,10 @@ async function runFlowBio77(goodsNo, qty, recipient, full = null) {
   }).catch(() => null)
   const g = guardFail('77bio', grandTotal, full.maxPay)
   if (g) return { ok: false, msg: g }
+  // 기대 총액 가드(건강산 흐름과 동일) — 예치금 적용 전 합계금액이 공급가 × 수량 + 배송비와 같아야 결제 진행
+  const ex = checkExpectTotals(grandTotal, expect?.totals, { qty, ship: expect?.ship, address: recipient.addr1 })
+  if (!ex.ok) return { ok: false, msg: `77bio ${ex.msg}` }
+  console.log(`[order-server] 77bio 주문서 총액 ${grandTotal} = ${ex.note}`)
 
   // 예치금 "전액 사용하기" — 라벨이 없으면(예치금 0원 등) 조용히 생략
   await op.evaluate(() => {
@@ -966,12 +982,12 @@ async function runFlowCafe24Cash(site, goodsNo, qty, recipient, detailUrl, full 
 // 수량은 매입 수량(purchaseQty = 주문 수량 × 묶음 수) — 쿠팡 주문 수량(shipping_count)을 그대로 쓰면 묶음 옵션이 덜 사진다
 const buyQty = r => r.purchaseQty ?? r.order.shipping_count ?? 1
 const RUN_FLOWS = {
-  ggsan: (r, full) => runFlowGgsan(r.goodsNo, buyQty(r), r.recipient, full),
+  ggsan: (r, full) => runFlowGgsan(r.goodsNo, buyQty(r), r.recipient, full, null, r.godomallExpect),
   upickb2b: (r, full) => runFlowUpick(r.goodsNo, buyQty(r), r.recipient, r.detailUrl, full),
-  bio77: (r, full) => runFlowBio77(r.goodsNo, buyQty(r), r.recipient, full),
+  bio77: (r, full) => runFlowBio77(r.goodsNo, buyQty(r), r.recipient, full, r.godomallExpect),
   wellroot: (r, full) => runFlowWellroot(r.goodsNo, buyQty(r), r.recipient, r.detailUrl, full),
   kwholesale: (r, full) => runFlowKwholesale(r.goodsNo, buyQty(r), r.recipient, r.detailUrl, full),
-  cmtstory: (r, full) => runFlowGgsan(r.goodsNo, buyQty(r), r.recipient, full, CMTSTORY),   // 건강산 무통장 흐름 재사용(호스트·계정만 다름)
+  cmtstory: (r, full) => runFlowGgsan(r.goodsNo, buyQty(r), r.recipient, full, CMTSTORY, r.godomallExpect),   // 건강산 무통장 흐름 재사용(호스트·계정만 다름)
   campingmoon: (r, full) => runFlowCafe24Cash(CAMPINGMOON_SITE, r.goodsNo, buyQty(r), r.recipient, r.detailUrl, full, { itemCode: r.itemCode, expectTotals: r.expectTotals }), // 옵션 select + 35% 할인 기대금액 가드
 }
 async function execPurchase(orderKey, fullMode) {
@@ -982,8 +998,13 @@ async function execPurchase(orderKey, fullMode) {
   if (!runFlow) return { ok: false, msg: `자동주문 흐름 미구현 매입처(${r.source})` }
   // 예치금 결제 매입처는 완주 후 쿠팡 발주확인까지 자동 연결하므로 쿠팡 주문만 허용(웰루트는 쿠팡에만 등록됨)
   if (DEPOSIT_PAY_SOURCES.has(r.source) && r.kind !== 'coupang') return { ok: false, msg: `${r.sourceLabel} 자동주문은 쿠팡 주문만 지원합니다 — 매입처에서 직접 주문하세요` }
+  // 고도몰5 매입처: 주문서 총액 기대값(공급가 × 매입 수량 + 배송비). 완주는 일치할 때만 [결제하기], 직전 정지는 다르면 경고만 (2026-10-16 도브 3개→1개 사고)
+  if (GODOMALL_PRICE_TABLES[r.source]) {
+    try { r.godomallExpect = await godomallExpectTotals(sb, r, buyQty(r)) } catch (e) { console.log(`[order-server] 기대 총액 계산 실패(${r.source} ${r.goodsNo}): ${e instanceof Error ? e.message : e}`) }
+  }
   let full = null
   if (fullMode) {
+    if (GODOMALL_PRICE_TABLES[r.source] && !r.godomallExpect?.totals?.length) return { ok: false, msg: `기대 총액 계산 불가(${r.sourceLabel} 상품표·리스팅 공급가 없음) — 완주 불가. 직전 정지 모드로 진행 후 직접 결제하세요` }
     // 금액 가드 상한 — 고객결제액·예상공급가 중 큰 쪽 기준(둘 다 없으면 완주 거부)
     const cands = []
     if (r.paidAmount > 0) cands.push(r.paidAmount * 1.25 + 3000)
