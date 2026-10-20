@@ -952,6 +952,9 @@ async function runFlowCafe24Cash(site, goodsNo, qty, recipient, detailUrl, full 
   const total = await op.evaluate(() => {
     const m = /([\d,]{3,})\s*원/.exec(document.querySelector('#btn_payment')?.innerText || '')
     if (m) return parseInt(m[1].replace(/,/g, ''), 10)
+    // 옛 기본 스킨(캠핑문): #btn_payment 가 금액 없는 <img> → Cafe24 표준 '총 결제예정 금액' 칸(할인·배송비 반영)
+    const v = /^[\d,]{3,}$/.exec((document.querySelector('#total_order_sale_price_view')?.textContent || '').trim())
+    if (v) return parseInt(v[0].replace(/,/g, ''), 10)
     const m2 = /최종\s*결제\s*금액[^0-9]{0,30}([\d,]{3,})\s*원/.exec(document.body.innerText)
     return m2 ? parseInt(m2[1].replace(/,/g, ''), 10) : null
   }).catch(() => null)
