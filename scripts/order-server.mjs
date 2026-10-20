@@ -858,6 +858,8 @@ async function runFlowCafe24Cash(site, goodsNo, qty, recipient, detailUrl, full 
     const picked = await page.evaluate((code) => {
       // 캠핑문은 1축(option1)만 쓴다(2026-10-14 정찰: 2축·추가옵션 0건). option1 이 없을 때만 첫 옵션 select
       const sel = document.querySelector('select[name="option1"]') || document.querySelector('select[name^="option"]')
+      // 옵션 없는 단일상품도 Cafe24 는 기본 품목코드(product_code+000A)를 둔다 → 고를 것 없이 진행(2026-10-20 #4471 내열 장갑, 등록분 338건이 단일상품)
+      if (!sel && window.has_option === 'F' && /000A$/.test(code)) return { ok: true, single: true }
       if (!sel) return { ok: false, why: '옵션 select 없음' }
       const o = [...sel.options].find((x) => x.value === code)
       if (!o) return { ok: false, why: `옵션 ${code} 없음(현재: ${[...sel.options].map((x) => x.value).filter((v) => v && v !== '*' && v !== '**').join(',').slice(0, 80)})` }
@@ -866,10 +868,12 @@ async function runFlowCafe24Cash(site, goodsNo, qty, recipient, detailUrl, full 
       return { ok: true, label: o.textContent.trim() }
     }, opts.itemCode)
     if (!picked.ok) return { ok: false, msg: `${L} 옵션 선택 실패 — ${picked.why}` }
-    await page.waitForTimeout(900)
-    // 사이트 스크립트가 값을 되돌리는 경우 대비 — 실제 선택값 재확인
-    const nowVal = await page.evaluate(() => (document.querySelector('select[name="option1"]') || document.querySelector('select[name^="option"]'))?.value).catch(() => null)
-    if (nowVal !== opts.itemCode) return { ok: false, msg: `${L} 옵션 선택이 유지되지 않음(현재 ${nowVal}) — 열린 창에서 직접 진행` }
+    if (!picked.single) {
+      await page.waitForTimeout(900)
+      // 사이트 스크립트가 값을 되돌리는 경우 대비 — 실제 선택값 재확인
+      const nowVal = await page.evaluate(() => (document.querySelector('select[name="option1"]') || document.querySelector('select[name^="option"]'))?.value).catch(() => null)
+      if (nowVal !== opts.itemCode) return { ok: false, msg: `${L} 옵션 선택이 유지되지 않음(현재 ${nowVal}) — 열린 창에서 직접 진행` }
+    }
     // 옵션 선택 후 생기는 선택상품 수량칸(quantity_opt[])에 수량. 없으면 아래 공통 수량 입력으로
   }
   if (qty > 1) await page.evaluate((q) => { const el = document.querySelector('input#quantity, input[name="quantity_opt[]"]'); if (el) { el.value = String(q); el.dispatchEvent(new Event('change', { bubbles: true })); el.dispatchEvent(new Event('blur', { bubbles: true })) } }, qty)
