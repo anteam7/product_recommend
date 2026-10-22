@@ -254,7 +254,9 @@ function guardFail(kind, total, maxPay) {
 // expect = { totals, ship } — 주문서 총액 기대값(execPurchase 가 godomallExpectTotals 로 계산). 완주는 일치할 때만, 직전 정지는 다르면 경고
 async function runFlowGgsan(goodsNo, qty, recipient, full = null, mall = null, expect = null) {
   const base = mall?.base || BASE, user = mall?.user || env.GGSAN_USER, pass = mall?.pass || env.GGSAN_PASS, label = mall?.label || 'ggsan'
-  const { ctx, page } = await openBrowser()
+  const dialogs = [] // 사이트 경고(검증 실패 등)를 실패 메시지에 붙인다 — 없으면 "완료 페이지 확인 실패"만 남아 원인을 모른다(2026-10-23 수령인 이름 20자 초과)
+  const { ctx, page } = await openBrowser((d) => { dialogs.push(d.message()); return d.accept() })
+  const lastDialog = () => (dialogs.length ? ` (사이트 메시지: ${dialogs[dialogs.length - 1].replace(/\s+/g, ' ').slice(0, 80)})` : '')
   if (full) full.ctxRef = ctx   // 원격 잡이 완료 후 브라우저를 닫을 수 있게
 
   // 1) 로그인
@@ -275,15 +277,16 @@ async function runFlowGgsan(goodsNo, qty, recipient, full = null, mall = null, e
   await page.evaluate(() => { const b = [...document.querySelectorAll('.btn_shop_buy, a, button, input')].find((x) => /바로구매/.test(x.innerText || x.value || '')); if (b) { b.scrollIntoView({ block: 'center' }); b.click() } })
   await page.waitForTimeout(3500)
   const op = ctx.pages().find((p) => /\/order\/order\.php/.test(p.url())) || page
-  if (!/\/order\//.test(op.url())) return { ok: false, msg: '주문서로 이동 실패 — 품절/옵션 필요 여부 확인' }
+  if (!/\/order\//.test(op.url())) return { ok: false, msg: `주문서로 이동 실패 — 품절/옵션 필요 여부 확인${lastDialog()}` }
   // 4) 배송지=직접입력 + 수령인 입력 (readonly 대비 JS set)
   await op.evaluate(({ rcp, biz, dep }) => {
-    const set = (n, v) => { const el = document.querySelector(`[name="${n}"]`); if (el) { el.removeAttribute('readonly'); el.value = v; el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })) } }
+    // fit: 칸의 maxlength 를 넘으면 잘라 넣는다 — JS 로 넣으면 maxlength 가 안 걸려 결제하기 때 "최대 20 이하 입력해 주세요"로 막힌다
+    const set = (n, v, fit = false) => { const el = document.querySelector(`[name="${n}"]`); if (el) { const max = fit ? +el.getAttribute('maxlength') || 0 : 0; el.removeAttribute('readonly'); el.value = max && String(v).length > max ? String(v).slice(0, max).trim() : v; el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })) } }
     // 배송지=직접입력 + 수령인
     const rs = [...document.querySelectorAll('input[name=shipping]')]
     const t = rs.find((r) => /신규|새로운|직접/.test((document.querySelector(`label[for="${r.id}"]`)?.innerText) || r.parentElement?.innerText || ''))
     if (t) { t.checked = true; t.click(); t.dispatchEvent(new Event('change', { bubbles: true })) }
-    set('receiverName', rcp.name); set('receiverZonecode', rcp.zip); set('receiverAddress', rcp.addr1); set('receiverAddressSub', rcp.addr2); set('receiverCellPhone', rcp.phone)
+    set('receiverName', rcp.name, true); set('receiverZonecode', rcp.zip); set('receiverAddress', rcp.addr1); set('receiverAddressSub', rcp.addr2); set('receiverCellPhone', rcp.phone)
     // 현금영수증/계산서 → 세금계산서 선택 + 사업자 정보 입력
     let taxRadio = document.querySelector('input[name=receiptFl][value="t"]')
     if (!taxRadio) taxRadio = [...document.querySelectorAll('input[name=receiptFl]')].find((r) => /세금계산서/.test((document.querySelector(`label[for="${r.id}"]`)?.innerText) || r.parentElement?.innerText || ''))
@@ -303,6 +306,8 @@ async function runFlowGgsan(goodsNo, qty, recipient, full = null, mall = null, e
       if (opt) { bankSel.value = opt.value; bankSel.dispatchEvent(new Event('change', { bubbles: true })) }
     }
   }, { rcp: recipient, biz: BIZ_INFO, dep: { ...GGSAN_DEPOSIT, bankKeyword: mall?.bankKeyword || GGSAN_DEPOSIT.bankKeyword } })
+  const nameIn = await op.evaluate(() => document.querySelector('[name="receiverName"]')?.value ?? null).catch(() => null)
+  const nameNote = nameIn != null && nameIn !== recipient.name ? ` ⚠ 수령인 이름 ${recipient.name.length}자 → 칸 제한 ${nameIn.length}자로 잘라 입력` : ''
   await op.bringToFront().catch(() => {})
   if (!full) {
     // 브라우저는 닫지 않는다 — 사장님이 금액 확인 후 결제하기. 주문서가 어떻게 채워졌는지(총액·결제수단·입금은행)는 결과에 같이 보여준다(새 몰 검증용)
@@ -322,7 +327,7 @@ async function runFlowGgsan(goodsNo, qty, recipient, full = null, mall = null, e
     const d = diag ? ` [총액 ${diag.total?.toLocaleString() ?? '?'}원 · ${diag.cash ? '무통장' : '⚠ 무통장 아님'} · 은행 ${diag.bank}${bankNote} · 수령인 ${diag.receiver} · 세금계산서 ${diag.tax ? '✓' : '✗'}]` : ''
     const ex = diag?.total != null && expect?.totals?.length ? checkExpectTotals(diag.total, expect.totals, { qty, ship: expect.ship, address: recipient.addr1 }) : null
     const warn = ex && !ex.ok ? ` ⚠ ${ex.short} — 수량·재고 확인 후 결제` : ''
-    return { ok: true, msg: `주문서 작성 완료 — 열린 ${label} 창에서 금액·배송지 확인 후 [결제하기]를 직접 누르세요${d}${warn}` }
+    return { ok: true, msg: `주문서 작성 완료 — 열린 ${label} 창에서 금액·배송지 확인 후 [결제하기]를 직접 누르세요${d}${warn}${nameNote}` }
   }
 
   // ── 완주(무통장): 동의 체크 → 금액 가드 → 결제하기 → 완료페이지 주문번호 파싱 ──
@@ -361,8 +366,8 @@ async function runFlowGgsan(goodsNo, qty, recipient, full = null, mall = null, e
     const m = /주문\s*번호[^\d]{0,12}(\d{8,20})/.exec(document.body.innerText)
     return m ? m[1] : null
   }).catch(() => null)
-  if (!done && !orderNo) return { ok: false, msg: `결제하기 이후 완료 페이지 확인 실패 — 열린 ${label} 창에서 주문 상태를 직접 확인하세요` }
-  return { ok: true, done: true, orderNo, total, bankAccount, msg: `무통장 주문 완료 — 주문번호 ${orderNo ?? '(파싱 실패, 창에서 확인)'} · 총액 ${total.toLocaleString()}원 · 입금대기(${bankAccount.text})` }
+  if (!done && !orderNo) return { ok: false, msg: `결제하기 이후 완료 페이지 확인 실패 — 열린 ${label} 창에서 주문 상태를 직접 확인하세요${lastDialog()}` }
+  return { ok: true, done: true, orderNo, total, bankAccount, msg: `무통장 주문 완료 — 주문번호 ${orderNo ?? '(파싱 실패, 창에서 확인)'} · 총액 ${total.toLocaleString()}원 · 입금대기(${bankAccount.text})${nameNote}` }
 }
 
 // Playwright: upickb2b(Cafe24) 주문서 자동 작성 → 결제 직전 정지 (브라우저 열어둠)
