@@ -59,6 +59,7 @@ export async function fetchCafe24Order(page, base, orderId, label = 'cafe24') {
     // 세션 만료 → 로그인 페이지로 튕김: '주문 없음'과 구분해 상위에서 회차 중단
     if (/member\/login/.test(page.url())) throw new Error(`${label} session expired`)
     r = await page.evaluate((expected) => {
+      const CARRIER_RE = /(CJ\s*대한통운|한진택배|롯데택배|우체국택배|로젠택배|경동택배|대신택배)/
       const norm = (s) => (s || '').replace(/\s+/g, ' ').trim()
       const cellText = (td) => { const c = td.cloneNode(true); c.querySelectorAll('a, button, input, select').forEach((e) => e.remove()); return norm(c.textContent) }
       let found = false, status = null
@@ -80,10 +81,15 @@ export async function fetchCafe24Order(page, base, orderId, label = 'cafe24') {
           if (!invoiceRaw) { try { invoiceRaw = decodeURIComponent(m[1]) } catch { invoiceRaw = m[1] } }
           const t = norm(a.textContent)
           if (t && !/^\[.*\]$/.test(t) && !/^[\d-]+$/.test(t) && !/배송조회/.test(t) && !carrier) carrier = t
+          // 상품 영역 블록이 없는 옛 기본 스킨(캠핑문) — 송장 링크가 든 줄 안에서만 택배사명(푸터 안내문 오인 방지)
+          if (!carrier && !areas.length) {
+            const cm = CARRIER_RE.exec(a.closest('tr, li')?.innerText || '')
+            if (cm) carrier = cm[1].replace(/\s+/g, '')
+          }
         }
       }
       if (invoiceRaw && !carrier && areas.length) {
-        const m = /(CJ\s*대한통운|한진택배|롯데택배|우체국택배|로젠택배|경동택배|대신택배)/.exec(areas.map((e) => e.innerText).join(' '))
+        const m = CARRIER_RE.exec(areas.map((e) => e.innerText).join(' '))
         if (m) carrier = m[1].replace(/\s+/g, '')
       }
       const itemStatuses = []

@@ -148,8 +148,8 @@ async function trackRow(t, row, p) {
     paidConfirmed++
     console.log(`  ${tag} ${p.status} — 입금확인 → ORDERED`)
   }
-  // 입금대기 & 발주 후 24h 경과 → 미결제 지연
-  if (p.status === '입금대기') {
+  // 입금대기(고도몰) / 입금전(Cafe24) & 발주 후 24h 경과 → 미결제 지연 ([입금완료]를 눌렀는데 매입처가 입금을 못 받은 경우 포함)
+  if (p.status === '입금대기' || p.status === '입금전') {
     const orderedTs = row.purchase_ordered_at ? new Date(row.purchase_ordered_at).getTime() : null
     if (orderedTs != null && Date.now() - orderedTs > PAID_WAIT_HOURS * 3600 * 1000) flag('미결제 지연')
   }
