@@ -899,13 +899,13 @@ async function runFlowCafe24Cash(site, goodsNo, qty, recipient, detailUrl, full 
   await fillIf('#raddr1', recipient.addr1)
   await fillIf('#raddr2', recipient.addr2)
   // 전화: select 국번(옵션 중 최장 접두사, 0502 안심번호 포함) + 2칸. 매칭 실패면 비워 둔다(주문자 번호가 남지 않게)
-  const phoneOk = await op.evaluate((phone) => {
+  const phoneOk = await op.evaluate(({ phone, contact }) => {
     const fire = (el) => { el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })) }
     const setVal = (sel, v) => { const el = document.querySelector(sel); if (el) { el.removeAttribute('readonly'); el.value = v; fire(el) } }
-    const setPhone = (prefix) => {
+    const setPhone = (prefix, num = phone) => {
       const sel = document.getElementById(`${prefix}1`)
       if (!sel) return null
-      const d = String(phone || '').replace(/\D/g, '')
+      const d = String(num || '').replace(/\D/g, '')
       const head = d ? [...sel.options].map((o) => o.value).filter((v) => /^\d+$/.test(v) && d.startsWith(v)).sort((a, b) => b.length - a.length)[0] : null
       const rest = head ? d.slice(head.length) : ''
       if (!head || rest.length < 7 || rest.length > 8) { setVal(`#${prefix}2`, ''); setVal(`#${prefix}3`, ''); return false }
@@ -914,8 +914,11 @@ async function runFlowCafe24Cash(site, goodsNo, qty, recipient, detailUrl, full 
       return true
     }
     const a = setPhone('rphone1_'); const b = setPhone('rphone2_')
+    // 주문자 일반전화가 필수인 몰(캠핑문 — "주문자 유선전화 항목은 필수 입력값") → 비어 있으면 업무 연락처, 없으면 주문자 휴대전화
+    const o1 = document.getElementById('ophone1_2')
+    if (o1 && !o1.value) setPhone('ophone1_', contact || ['ophone2_1', 'ophone2_2', 'ophone2_3'].map((id) => document.getElementById(id)?.value || '').join(''))
     return a !== false && b !== false
-  }, recipient.phone)
+  }, { phone: recipient.phone, contact: env.ORDER_CONTACT_PHONE || '' })
   await op.bringToFront().catch(() => {})
   const phoneWarn = phoneOk ? '' : ' ⚠ 수령인 전화번호 국번이 주문서 선택지에 없어 비워 뒀습니다 — 직접 입력하세요.'
   if (!full) return { ok: true, msg: `주문서 작성 완료 — 열린 ${L} 창에서 금액·배송지 확인 후 무통장입금으로 [결제하기]를 직접 누르세요.${phoneWarn}` }
@@ -947,6 +950,9 @@ async function runFlowCafe24Cash(site, goodsNo, qty, recipient, detailUrl, full 
       const lab = (document.querySelector(`label[for="${c.id}"]`)?.innerText || c.parentElement?.innerText || '')
       if (/\[필수\]/.test(lab) && !c.checked && !c.disabled && shown(c)) c.click()
     }
+    // Cafe24 표준 '결제정보 확인 및 구매진행 동의' — 옛 기본 스킨(캠핑문)은 [필수] 표기가 없고 체크박스가 숨겨져 있어 위 규칙에 안 걸린다
+    const pa = document.querySelector('input[name=chk_purchase_agreement]')
+    if (pa && !pa.checked && !pa.disabled) pa.click()
   })
   await op.waitForTimeout(500)
   const total = await op.evaluate(() => {
