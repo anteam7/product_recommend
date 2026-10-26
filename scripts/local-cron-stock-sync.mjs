@@ -9,6 +9,7 @@
  *   1) APPROVED/SELLING 상품의 매입처 재고 확인 — 4개 공급처 전부(+ K홀세일, 2026-09-27)
  *        ggsan · bio77   : goods_view.php 라이브 조회(상용몰 엔진)
  *        upickb2b · wellroot · kwholesale : Cafe24 카테고리 리스트 품절아이콘 스캔
+ *        domeatoz : 공급사 상품 목록 ProductState 한 번 훑기(2026-10-27)
  *   2) 신규 품절 → 쿠팡 판매중지(STOPPED) / 재입고 → 판매재개
  *   3) 재고 있는 상품은 쿠팡 판매가능수량을 MIN_QTY 이상으로 유지(주문이 끊기지 않게)
  *   4) 실행 로그를 jimscanner_coupang_stock_sync_runs 에 기록 (관리자 위젯 소스)
@@ -26,6 +27,7 @@ import path from 'node:path'
 import { createClient } from '@supabase/supabase-js'
 import { makeSession, cafe24Login, cafe24BuildStockMap, mallLogin, mallCheckStock } from './lib/supplier-stock.mjs'
 import { tossSetStock } from './lib/toss-api.mjs'
+import { makeDomeatozSession, domeatozLogin, domeatozListSupplier } from './lib/domeatoz-site.mjs'
 import { coupangClient, repriceCoupangListing, fetchNaverChannelProducts, syncNaverUpickListing, refreshUpickCatalog, loadUpickProducts } from './lib/upick-price-sync.mjs'
 import { naverApi } from './lib/naver-api.mjs'
 import { logExecution } from './lib/execution-log.mjs'
@@ -68,6 +70,8 @@ const SUPPLIERS = {
   // 캠핑문(2026-10-14): Cafe24 AuthSSL — 목록 품절아이콘(icon_sellout)은 상품 단위. 옵션 단위(is_selling)는 아래 캠핑문 옵션 단계가 상세 option_stock_data 로 본다
   campingmoon: { kind: 'cafe24', base: env.CAMPINGMOON_BASE_URL || 'https://campingmoon.co.kr', user: env.CAMPINGMOON_USER, pass: env.CAMPINGMOON_PASS, label: '캠핑문', table: 'jimscanner_campingmoon_products', key: 'product_no', cateCol: 'cate_nos' },
   // 화장품스토리 = 건강산 화장품 서브몰(고도몰5, 회원 공유) — 건강산 자격증명으로 로그인, 판정은 상용몰 분기(goods_view 라이브) 그대로
+  // 도매아토즈(2026-10-27): 공급사 목록 ProductState(1 판매중 · 2 품절 · 3 판매중단)로 재고맵 — 상세 페이지는 ~50회 조회 후 차단돼 못 쓴다
+  domeatoz: { kind: 'domeatoz', user: env.DOMEATOZ_ID, pass: env.DOMEATOZ_PW, label: '도매아토즈', table: 'jimscanner_domeatoz_products' },
   cmtstory: { kind: 'mall',    base: env.CMTSTORY_BASE_URL || 'https://www.cmtstory.com', user: env.CMTSTORY_USER || env.GGSAN_USER, pass: env.CMTSTORY_PASS || env.GGSAN_PASS, label: '화장품스토리' },
 }
 
@@ -86,10 +90,22 @@ async function coupangApi(method, urlPath, body = null) {
   try { return { status: res.status, body: JSON.parse(text) } } catch { return { status: res.status, body: text } }
 }
 
+// 사람이 옵션만 판매 종료한 쿠팡 vendorItem(jimscanner_listing_items status=REMOVED, _coupang-stop-one.mjs --vitem).
+// 상품 재입고 판매재개·수량 보충에서 빼야 한다(2026-10-19 도브 수딩 코코넛 3개 옵션 — 매입처 수량 부족).
+// 조회 실패면 null → 이번 런은 판매재개를 보류한다(되살릴 위험보다 한 시간 늦는 게 낫다).
+let removedVids = null  // 메인에서 loadRemovedVids() 로 채운다 — 안 채워지면 판매재개 보류(안전 쪽)
+async function loadRemovedVids() {
+  const { data, error } = await sb.from('jimscanner_listing_items').select('market_item_id').eq('market', 'coupang').eq('status', 'REMOVED').not('market_item_id', 'is', null).range(0, 4999)
+  if (error) { console.log(`[local-cron-stock] 옵션 판매 종료 목록 조회 실패 — 이번 런 판매재개 보류: ${error.message}`); return null }
+  if (data.length >= 1000) { console.log(`[local-cron-stock] 옵션 판매 종료 ${data.length}행 — 조회 상한에 걸렸을 수 있어 이번 런 판매재개 보류`); return null }
+  return new Set(data.map((r) => String(r.market_item_id)))
+}
+
 // 판매 중지/재개는 vendor-item 레벨만 유효 (seller-products/{id}/sales/stop 은 404 PRECONDITION_FAILED — 미존재 엔드포인트).
 async function setVendorSale(spid, action) {
+  if (action === 'resume' && removedVids === null) return { status: 500 }
   const d = (await coupangApi('GET', `/v2/providers/seller_api/apis/api/v1/marketplace/seller-products/${spid}`)).body?.data
-  const items = (d?.items ?? []).filter((it) => it.vendorItemId)
+  const items = (d?.items ?? []).filter((it) => it.vendorItemId && !(action === 'resume' && removedVids.has(String(it.vendorItemId))))
   if (!items.length) return { status: 500 }
   let ok = true
   for (const it of items) {
@@ -172,7 +188,9 @@ async function setQuantity(spid, qty) {
 async function ensureQuantity(spid, { force = false } = {}) {
   if (DRY) return 0
   const d = (await coupangApi('GET', `/v2/providers/seller_api/apis/api/v1/marketplace/seller-products/${spid}`)).body?.data
-  const vids = (d?.items ?? []).map((it) => it.vendorItemId).filter(Boolean)
+  // 옵션 판매 종료(REMOVED)는 force(재입고 직후)여도 보충하지 않는다. 목록 조회 실패(null)면 force 보충 자체를 건너뛴다
+  if (force && removedVids === null) return 0
+  const vids = (d?.items ?? []).map((it) => it.vendorItemId).filter((vid) => vid && !removedVids?.has(String(vid)))
   let filled = 0
   for (const vid of vids) {
     const inv = (await coupangApi('GET', `/v2/providers/seller_api/apis/api/v1/marketplace/vendor-items/${vid}/inventories`)).body?.data
@@ -276,6 +294,8 @@ const startedAt = Date.now()
 let total = 0, soldOut = 0, resumed = 0, errors = 0, refilled = 0
 
 try {
+  removedVids = await loadRemovedVids()
+
   // 0) PENDING_APPROVAL 폴링
   const { data: pending } = await sb.from('jimscanner_coupang_listings').select('id, seller_product_id').eq('status', 'PENDING_APPROVAL')
   for (const p of (pending ?? [])) {
@@ -328,6 +348,24 @@ try {
         sessions[src] = session
         console.log(`[local-cron-stock] ${conf.label} 로그인 OK (${srcRows.length}건 라이브 조회)`)
         await beatOnce(sb, `supplier:${src}`, 'ok', { kind: 'mall', targets: srcRows.length })
+      } else if (conf.kind === 'domeatoz') {
+        // 대상 상품의 공급사 목록 전체를 훑는다. 목록에서 사라진 대상(공급사 삭제)은 품절 — 목록 함수가 끝을 못 찾으면 throw 하므로 잘린 목록으로 내리지 않는다
+        const site = makeDomeatozSession()
+        await domeatozLogin(site, conf)
+        const nos = [...new Set(srcRows.map((r) => String(r.source_goods_no)))]
+        const { data: codeRows, error: codeErr } = await sb.from(conf.table).select('supplier_code').in('idx', nos)
+        if (codeErr) throw new Error(`공급사 코드 조회 실패: ${codeErr.message}`)
+        const map = new Map()
+        for (const code of new Set((codeRows ?? []).map((r) => r.supplier_code).filter(Boolean))) {
+          for (const x of await domeatozListSupplier(site, code)) map.set(String(x.IDX), Number(x.ProductState) === 1 ? 'in_stock' : 'sold_out')
+        }
+        const hit = nos.filter((n) => map.has(n)).length
+        if (map.size) for (const n of nos) if (!map.has(n)) map.set(n, 'sold_out')
+        stockMaps[src] = map
+        const soldN = nos.filter((n) => map.get(n) === 'sold_out').length
+        console.log(`[local-cron-stock] ${conf.label} 목록 ${map.size - (nos.length - hit)}건 · 대상 ${nos.length}건 중 품절 ${soldN}(목록에 없음 ${nos.length - hit})`)
+        if (hit === 0) skipped.push(`${conf.label}(목록 0건 매칭)`)
+        await beatOnce(sb, `supplier:${src}`, hit === 0 ? 'fail' : 'ok', { kind: 'domeatoz', mapSize: map.size, soldOut: soldN, targets: nos.length, hit })
       } else {
         await cafe24Login(session, conf)
         sessions[src] = session  // 유픽은 5) 가격반영에서 상세 재조회에 다시 쓴다
@@ -365,7 +403,7 @@ try {
       let status = 'unknown'
       if (conf?.kind === 'mall' && sessions[row.source]) {
         status = await mallCheckStock(sessions[row.source], conf.base, row.source_goods_no)
-      } else if (conf?.kind === 'cafe24' && stockMaps[row.source]) {
+      } else if ((conf?.kind === 'cafe24' || conf?.kind === 'domeatoz') && stockMaps[row.source]) {
         status = stockMaps[row.source].get(String(row.source_goods_no)) ?? 'unknown'
       }
       const wasPaused = !!row.auto_paused

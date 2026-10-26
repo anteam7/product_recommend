@@ -18,6 +18,7 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
 import { createClient } from '@supabase/supabase-js'
+import { makeDomeatozSession, domeatozLogin, domeatozListSupplier, DOMEATOZ_XHR } from './lib/domeatoz-site.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const env = Object.fromEntries(readFileSync(path.join(__dirname, '..', '.env.local'), 'utf8').split(/\r?\n/).filter((l) => l && !l.startsWith('#') && l.includes('=')).map((l) => { const i = l.indexOf('='); let v = l.slice(i + 1).trim(); if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) v = v.slice(1, -1); return [l.slice(0, i).trim(), v] }))
@@ -25,7 +26,6 @@ const sb = createClient(env.NEXT_PUBLIC_SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_
 const BASE = 'https://www.domeatoz.com'
 const IMG_BASE = 'https://domeatoz.com/'
 const TABLE = 'jimscanner_domeatoz_products'
-const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
 
 const argv = process.argv.slice(2)
 const arg = (k) => argv.find((a) => a.startsWith(`--${k}=`))?.split('=').slice(1).join('=')
@@ -54,44 +54,10 @@ const EXCLUDE_RULES = [
   [(r) => !r.export_seen_at, '상품DB 정보 없음'],
 ]
 
-// ── fetch + sid 쿠키 ──
-let sid = ''
-function absorb(res) { for (const c of res.headers.getSetCookie?.() || []) { const m = c.match(/^sid=([^;]+)/); if (m) sid = m[1] } }
-async function fx(p, init = {}) {
-  const res = await fetch(BASE + p, { redirect: 'manual', ...init, headers: { 'User-Agent': UA, 'Accept-Language': 'ko-KR,ko;q=0.9', ...(sid ? { Cookie: `sid=${sid}` } : {}), ...(init.headers || {}) } })
-  absorb(res)
-  return res
-}
-const XHR = { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8', 'X-Requested-With': 'XMLHttpRequest' }
-async function login() {
-  if (!env.DOMEATOZ_ID || !env.DOMEATOZ_PW) throw new Error('.env.local DOMEATOZ_ID / DOMEATOZ_PW 필요')
-  await fx('/login')
-  const res = await fx('/login', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ ReUrl: '/', UserId: env.DOMEATOZ_ID, UserPass: env.DOMEATOZ_PW }) })
-  const body = await res.text()
-  if (!/location\.href\s*=\s*'\/'/.test(body)) throw new Error(`로그인 실패: ${body.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 120)}`)
-  const home = await (await fx('/')).text()
-  if (!/로그아웃/.test(home)) throw new Error('로그인 후 세션 확인 실패(로그아웃 링크 없음)')
-}
-
-async function listSupplier(code) {
-  const out = [], seen = new Set(), MAX_PAGES = 500
-  for (let page = 1; ; page++) {
-    // 잘린 목록으로 끝나면 정상 상품이 gone 처리되므로 상한 도달은 실패로 본다
-    if (page > MAX_PAGES) throw new Error(`목록 ${code} ${MAX_PAGES}쪽 초과 — 페이지 끝 감지 실패`)
-    const res = await fx('/search', { method: 'POST', headers: XHR, body: `page=${page}&searchType=5&search=${code}&group_1=&group_2=&group_3=&group_4=&research=` })
-    if (res.status !== 200) throw new Error(`목록 ${code} p${page} HTTP ${res.status}`)
-    const j = await res.json()
-    let fresh = 0
-    for (const x of j.list || []) {
-      if (!/^\d+$/.test(String(x.IDX))) { console.log(`  ⚠ IDX 형식 이상 건너뜀: ${String(x.IDX).slice(0, 20)}`); continue } // gone 필터 문자열에 그대로 들어간다
-      if (seen.has(x.IDX)) continue
-      seen.add(x.IDX); fresh++; out.push(x)
-    }
-    if (!fresh) break
-    await sleep(200)
-  }
-  return out
-}
+// ── 세션 — 로그인·목록은 lib/domeatoz-site.mjs(재고 동기화와 공용) ──
+const site = makeDomeatozSession(BASE)
+const fx = site.fx
+const XHR = DOMEATOZ_XHR
 
 // 상품DB 다운로드: 공급사 전 상태 → 행 배열. 폼은 사이트 기본값 중 필요한 것만(가격 설정 0 = 원가 그대로).
 async function exportSupplier(code) {
@@ -185,7 +151,7 @@ async function fetchDetailPage(idx) {
 }
 
 // ── 실행 ──
-await login()
+await domeatozLogin(site, { user: env.DOMEATOZ_ID, pass: env.DOMEATOZ_PW })
 const exRows = []
 for (let from = 0; ; from += 1000) {
   const { data, error } = await sb.from(TABLE).select('idx, content_hash, detail_fetched_at').order('idx').range(from, from + 999)
@@ -198,7 +164,7 @@ let rows = []
 const listedBySupplier = new Map()
 const now = new Date().toISOString()
 for (const code of supplierCodes) {
-  const list = await listSupplier(code)
+  const list = await domeatozListSupplier(site, code)
   listedBySupplier.set(code, list.map((x) => String(x.IDX)))
   const exp = await exportSupplier(code)
   const byIdx = new Map(exp.map((x) => [String(toInt(String(x['*업체상품코드'] || '').replace(/^AZ/i, ''))), x]))
