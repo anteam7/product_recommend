@@ -5,7 +5,8 @@
  *       · aside : Aside AI 브라우저(aside.exe repl, 사용자 로그인 세션) — 크롬 워밍업 불필요
  *       · cdp   : 떠 있는 사용자 크롬(9222)에 CDP 접속 (launch-chrome-debug.cmd) — 폴백
  *       둘 다 "사람처럼" 검색(메인 → 검색창 입력 → 검색버튼). ?q= 딥링크는 Akamai 차단되므로 금지.
- *       선택: opts.backend 또는 env COUPANG_PRICE_BACKEND = auto(기본: aside→cdp) | aside | cdp
+ *       · chrome: 설치된 크롬을 전용 프로필로 직접 실행(Playwright channel 'chrome') — 다건 스크리닝, auto 에는 안 들어감
+ *       선택: opts.backend 또는 env COUPANG_PRICE_BACKEND = auto(기본: aside→cdp) | aside | cdp | chrome
  *   - coupangMedian(kw) / coupangMedianViaCDP(kw, 구명): 세션 1회 검색 래퍼
  *
  *   import { naverShopMedian, openCoupangSession, coupangMedian, median } from './lib/market-price.mjs'
@@ -83,7 +84,7 @@ function _extractCoupangPrices() {
     const key = (a.getAttribute('href') || '').match(/products\/(\d+)/)?.[1] || `${price}:${out.length}`
     if (seen.has(key)) return
     seen.add(key)
-    out.push({ price, title: (ne?.textContent || '').trim().slice(0, 50), reviews, rating })
+    out.push({ price, title: (ne?.textContent || '').trim().slice(0, 100), reviews, rating }) // 100자: 식품 규격(용량·수량)이 제목 뒤에 붙어 50자에선 잘림
   })
   return out
 }
@@ -94,28 +95,8 @@ function _coupangResult(got) {
   return { source: 'coupang', median: median(trimmed.length ? trimmed : prices), count: prices.length, samples: got.slice(0, 5), items: got.filter((g) => g.price > 0).map((g) => ({ title: g.title, price: g.price, reviews: g.reviews ?? null, rating: g.rating ?? null })) }
 }
 
-/**
- * 쿠팡 세션 — 떠 있는 사용자 크롬(CDP)에 1회 붙어 페이지를 '재사용'한다.
- * 최초 1회만 메인 진입(워밍업), 이후 search(kw)는 **결과페이지 검색란만 바꿔 재검색**
- * (새 탭/메인 재진입 없음 → 봇 패턴·Akamai 재차단 위험↓). 다건 스크리닝용.
- * 반환 null = CDP 미가동/차단. 끝나면 반드시 close().
- * @returns {Promise<{search:(kw:string)=>Promise<object|null>, close:()=>Promise<void>, backend:'cdp'}|null>}
- */
-export async function openCoupangSessionViaCDP({ endpoint = 'http://127.0.0.1:9222', timeoutMs = 25000 } = {}) {
-  let chromium
-  try { ({ chromium } = await import('playwright')) } catch { ({ chromium } = await import('playwright-core')) }
-  let browser
-  try { browser = await chromium.connectOverCDP(endpoint, { timeout: 4000 }) } catch { return null }
-  let page, reused = false
-  try {
-    const ctx = browser.contexts()[0] || (await browser.newContext())
-    // 이미 열려있는 쿠팡 탭이 있으면 그대로 재사용(메인 재진입조차 안 함 → 가장 안전). 없을 때만 새 탭+워밍업.
-    page = ctx.pages().find((p) => (p.url() || '').includes('coupang.com'))
-    if (page) { reused = true; await page.bringToFront().catch(() => {}) }
-    else { page = await ctx.newPage(); await page.goto('https://www.coupang.com/', { waitUntil: 'domcontentloaded', timeout: timeoutMs }); await page.waitForTimeout(1200) }
-    if (/Access Denied/i.test(await page.title())) { if (!reused) await page.close().catch(() => {}); await browser.close().catch(() => {}); return null }
-  } catch { try { await browser.close() } catch { /* noop */ } return null }
-
+// 페이지 하나로 "사람처럼" 재검색하는 search() — CDP·chrome 백엔드 공용. 검색란만 바꿔 재검색(새 탭/메인 재진입 없음).
+function _makePageSearch(page, timeoutMs) {
   async function doSearchOnce(kw) {
     // 헤더 검색란(결과페이지에도 존재)에 키워드만 교체 후 검색 — 새 탭/메인 재진입 없이.
     const input = page.locator('input#headerSearchKeyword, input[name="q"]').first()
@@ -155,9 +136,61 @@ export async function openCoupangSessionViaCDP({ endpoint = 'http://127.0.0.1:92
       return out
     } catch { return null }
   }
+  return search
+}
+
+/**
+ * 쿠팡 세션 — 떠 있는 사용자 크롬(CDP)에 1회 붙어 페이지를 '재사용'한다.
+ * 최초 1회만 메인 진입(워밍업), 이후 search(kw)는 **결과페이지 검색란만 바꿔 재검색**
+ * (새 탭/메인 재진입 없음 → 봇 패턴·Akamai 재차단 위험↓). 다건 스크리닝용.
+ * 반환 null = CDP 미가동/차단. 끝나면 반드시 close().
+ * @returns {Promise<{search:(kw:string)=>Promise<object|null>, close:()=>Promise<void>, backend:'cdp'}|null>}
+ */
+export async function openCoupangSessionViaCDP({ endpoint = 'http://127.0.0.1:9222', timeoutMs = 25000 } = {}) {
+  let chromium
+  try { ({ chromium } = await import('playwright')) } catch { ({ chromium } = await import('playwright-core')) }
+  let browser
+  try { browser = await chromium.connectOverCDP(endpoint, { timeout: 4000 }) } catch { return null }
+  let page, reused = false
+  try {
+    const ctx = browser.contexts()[0] || (await browser.newContext())
+    // 이미 열려있는 쿠팡 탭이 있으면 그대로 재사용(메인 재진입조차 안 함 → 가장 안전). 없을 때만 새 탭+워밍업.
+    page = ctx.pages().find((p) => (p.url() || '').includes('coupang.com'))
+    if (page) { reused = true; await page.bringToFront().catch(() => {}) }
+    else { page = await ctx.newPage(); await page.goto('https://www.coupang.com/', { waitUntil: 'domcontentloaded', timeout: timeoutMs }); await page.waitForTimeout(1200) }
+    if (/Access Denied/i.test(await page.title())) { if (!reused) await page.close().catch(() => {}); await browser.close().catch(() => {}); return null }
+  } catch { try { await browser.close() } catch { /* noop */ } return null }
+
+  const search = _makePageSearch(page, timeoutMs)
   // 재사용한 사용자 탭은 닫지 않음(우리가 새로 연 탭만 닫음). browser.close는 CDP 연결만 끊음.
   async function close() { try { if (page && !reused) await page.close() } catch { /* noop */ } try { await browser.close() } catch { /* noop */ } }
   return { search, close, backend: 'cdp' }
+}
+
+/**
+ * 쿠팡 세션 — 설치된 크롬(Playwright channel 'chrome')을 전용 프로필로 직접 띄운다. 사용자 크롬·Aside 가 없어도 되는 다건 스크리닝용.
+ * Playwright 기본 Chromium 은 40회 안팎에서 Access Denied(2026-10-25 실측) → 반드시 channel 'chrome'·헤드풀. 검색 간격은 호출 쪽에서 5초 이상.
+ * 프로필(쿠키 유지) = env COUPANG_CHROME_PROFILE 또는 <repo>/_workspace/coupang-chrome-profile(gitignore). 반환 null = 크롬 없음/차단.
+ * @returns {Promise<{search:(kw:string)=>Promise<object|null>, close:()=>Promise<void>, backend:'chrome'}|null>}
+ */
+export async function openCoupangSessionViaChrome({ timeoutMs = 25000, profileDir } = {}) {
+  let chromium
+  try { ({ chromium } = await import('playwright')) } catch { ({ chromium } = await import('playwright-core')) }
+  const dir = profileDir || process.env.COUPANG_CHROME_PROFILE || env.COUPANG_CHROME_PROFILE || path.join(__dirname, '..', '..', '_workspace', 'coupang-chrome-profile')
+  let ctx
+  try {
+    ctx = await chromium.launchPersistentContext(dir, { channel: 'chrome', headless: false, locale: 'ko-KR', viewport: { width: 1280, height: 900 }, args: ['--disable-blink-features=AutomationControlled'] })
+  } catch (e) { console.log(`  (chrome 백엔드 불가: ${String(e?.message || e).slice(0, 120)})`); return null }
+  let page
+  try {
+    page = ctx.pages()[0] || (await ctx.newPage())
+    await page.goto('https://www.coupang.com/', { waitUntil: 'domcontentloaded', timeout: timeoutMs })
+    await page.waitForTimeout(2500)
+    if (/Access Denied/i.test(await page.title())) { await ctx.close().catch(() => {}); return null }
+  } catch { await ctx.close().catch(() => {}); return null }
+  const search = _makePageSearch(page, timeoutMs)
+  async function close() { try { await ctx.close() } catch { /* noop */ } }
+  return { search, close, backend: 'chrome' }
 }
 
 // ─── Aside 백엔드 ───
@@ -242,13 +275,14 @@ export async function openCoupangSessionViaAside({ timeoutMs = 125000, quiet = f
 }
 
 /**
- * 쿠팡 세션 — 백엔드 자동 선택. opts.backend | env COUPANG_PRICE_BACKEND = auto(기본) | aside | cdp.
+ * 쿠팡 세션 — 백엔드 자동 선택. opts.backend | env COUPANG_PRICE_BACKEND = auto(기본) | aside | cdp | chrome.
  * auto 는 aside → cdp 순으로 시도. 반환 null = 둘 다 불가. 끝나면 close().
  */
 export async function openCoupangSession(opts = {}) {
   const backend = String(opts.backend || process.env.COUPANG_PRICE_BACKEND || env.COUPANG_PRICE_BACKEND || 'auto').toLowerCase()
   if (backend === 'cdp') return openCoupangSessionViaCDP(opts)
   if (backend === 'aside') return openCoupangSessionViaAside(opts)
+  if (backend === 'chrome') return openCoupangSessionViaChrome(opts)
   return (await openCoupangSessionViaAside(opts)) || openCoupangSessionViaCDP(opts)
 }
 

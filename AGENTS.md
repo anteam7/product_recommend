@@ -42,6 +42,7 @@
 | [`docs/plan-purchase-catalog.md`](./docs/plan-purchase-catalog.md) | 매입 대상 상품 카탈로그 `/admin/purchase-catalog` — 매입처 5곳 통합 뷰·MSP 마진·쿠팡 등록현황·체크 일괄등록 큐(register-agent) |
 | [`docs/plan-kwholesale.md`](./docs/plan-kwholesale.md) | K-홀세일(Cafe24) 위탁 도매 온보딩 — 수집·쿠팡 등록·결제진행·재고/송장 싱크, 판매가=max(MSP, 순마진 10%) |
 | [`docs/plan-cmtstory.md`](./docs/plan-cmtstory.md) | 화장품스토리(건강산 화장품 서브몰, 고도몰5) 위탁 화장품 → 쿠팡 등록·재고/품절 연동 계획 — 건강산 계정·코드 재사용, 계획 단계 |
+| [`docs/plan-domeatoz.md`](./docs/plan-domeatoz.md) | 도매아토즈(위탁 도매 마켓) 입점 공급사 삼일유통 브랜드 식품 → 쿠팡 등록·적립금 결제진행·송장/재고 싱크 계획 — 수집=상품DB 다운로드 JSON, 가격=clamp(순마진 10%, 하한, 쿠팡 규격 일치 시세 P25), P0~P1 진행 |
 | [`docs/scout-protocol.md`](./docs/scout-protocol.md) | 쿠팡 소싱 스카우트 — 크롬 확장(손)↔로컬 Claude 두뇌 아키텍처·JSON 프로토콜·설치 |
 | [`SEPARATION_NOTES.md`](./SEPARATION_NOTES.md) | 본업 분리(옵션 A) 내역 + 잔재 제거 가이드 |
 | [`README.md`](./README.md) | 레포 개요 / 로컬 실행 |
