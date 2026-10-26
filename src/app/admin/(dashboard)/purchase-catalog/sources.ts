@@ -8,6 +8,7 @@ export const SOURCE_META: Record<string, { label: string; cls: string; url: (g: 
   kwholesale: { label: 'K홀세일', cls: 'bg-rose-100 text-rose-700', url: (g) => `https://kwholesale.co.kr/product/detail.html?product_no=${g}` },
   cmtstory: { label: '화장품스토리', cls: 'bg-pink-100 text-pink-700', url: (g) => `https://www.cmtstory.com/goods/goods_view.php?goodsNo=${g}` },
   campingmoon: { label: '캠핑문', cls: 'bg-lime-100 text-lime-700', url: (g) => `https://campingmoon.co.kr/product/detail.html?product_no=${g}` },
+  domeatoz: { label: '도매아토즈', cls: 'bg-orange-100 text-orange-700', url: (g) => `https://domeatoz.com/product/${g}` },
   beseller: { label: '비셀러', cls: 'bg-amber-100 text-amber-700', url: () => null },
 }
 export const SOURCES = Object.keys(SOURCE_META)

@@ -91,6 +91,7 @@ export const SUPPLIER_LABELS: Record<string, string> = {
   kwholesale: 'K홀세일',
   cmtstory: '화장품스토리',
   campingmoon: '캠핑문',
+  domeatoz: '도매아토즈',
   manual: '수동',
 }
 // order-server.mjs의 SUPPORTED_SOURCES와 반드시 동기화 — 여기 없으면 결제진행 버튼 자체가 안 그려짐
@@ -107,6 +108,7 @@ export function supplierUrl(source: string | null | undefined, goodsNo: string |
   if (source === 'wellroot') return `https://wellrootb2b.com/product/detail.html?product_no=${g}`
   if (source === 'campingmoon') return `https://campingmoon.co.kr/product/detail.html?product_no=${g}`
   if (source === 'kwholesale') return `https://kwholesale.co.kr/product/detail.html?product_no=${g}`
+  if (source === 'domeatoz') return `https://domeatoz.com/product/${g}`
   if (source === 'cmtstory') return `https://www.cmtstory.com/goods/goods_view.php?goodsNo=${g}`
   return null
 }

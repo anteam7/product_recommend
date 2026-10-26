@@ -36,6 +36,7 @@ const SOURCE_SCRIPTS = {
   kwholesale: { script: 'kwholesale-register.mjs', extra: [] },   // 2026-09-27 — 판매가는 수집기 sale_prices(max(MSP, 순마진10%))
   cmtstory: { script: 'cmtstory-register.mjs', extra: [] },
   campingmoon: { script: 'campingmoon-register.mjs', extra: [] }, // 2026-10-14 — 옵션별 item, 가격=lib/campingmoon-price(시세 조회 선행)       // 2026-10-07 — 화장품스토리(건강산 화장품 서브몰), 1·2·3개 변형·화장품 고시
+  domeatoz: { script: 'domeatoz-register.mjs', extra: [] },      // 2026-10-26 — 1 idx = 1 상품, 시세 OK 판정만(domeatoz-market.mjs 선행)
   bio77: { script: 'bio77-register.mjs', extra: [] },
   upickb2b: { script: 'upickb2b-register.mjs', extra: ['--request'] },
   ggsan: { script: 'coupang-register-batch-v2.mjs', extra: [] },

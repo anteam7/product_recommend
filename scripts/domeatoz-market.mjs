@@ -17,6 +17,7 @@ import { fileURLToPath } from 'node:url'
 import { createClient } from '@supabase/supabase-js'
 import { openCoupangSession, median } from './lib/market-price.mjs'
 import { decide, quantile, COUPANG_FEE, TARGET_MARGIN, MIN_MARGIN, MIN_ABS, MIN_P25_MATCHES } from './lib/domeatoz-price.mjs'
+import { specOf, baseOf, titleMatches, queryOf } from './lib/domeatoz-spec.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const ROOT = path.join(__dirname, '..')
@@ -34,47 +35,6 @@ const KST = new Date(Date.now() + 9 * 3600e3).toISOString().slice(0, 10).replace
 const WS = path.join(ROOT, '_workspace'); mkdirSync(WS, { recursive: true })
 const OUT_MD = path.join(WS, `domeatoz-select-${KST}.md`)
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
-
-// ── 식품 규격 시그니처 ──
-const VOL = /(\d+(?:\.\d+)?)\s*(ml|mL|ML|g|G|kg|KG|Kg|l|L)(?![a-zA-Z])/
-const VOL_G = new RegExp(VOL.source, 'g')
-const CNT_G = /[x×*]\s*(\d+)|(\d+)\s*(?:개입|개|입|캔|병|매|팩|PET|pet|번들|롤|포|봉지|봉|박스|BOX|box|EA|ea|스틱|컵|통|T|P|p)(?![a-zA-Z가-힣])/g
-function normVol(n, u) {
-  let v = parseFloat(n); u = u.toLowerCase()
-  if (u === 'l') { v *= 1000; u = 'ml' } else if (u === 'kg') { v *= 1000; u = 'g' }
-  return { v, u }
-}
-function specOf(name) {
-  const s = String(name || '')
-  if (/\+|각\s*\d/.test(s)) return { set: true }
-  const m = s.match(VOL)
-  const vol = m ? normVol(m[1], m[2]) : null
-  // 첫 용량 뒤(없으면 전체)에서 괄호 내역·다른 용량을 지우고 수량을 곱한다
-  let rest = m ? s.slice(m.index + m[0].length) : s
-  rest = rest.replace(/\([^)]*\)|\[[^\]]*\]/g, ' ').replace(/[()[\]]/g, ' ').replace(VOL_G, ' ')
-  const cnts = [...rest.matchAll(CNT_G)].map((x) => +(x[1] || x[2])).filter((n) => n >= 1 && n < 2000)
-  // 쿠팡 제목은 수량을 용량 앞 칸에 쓰기도 한다("상품명, 2개, 367.5g") — 용량 앞의 쉼표 칸 중 수량만 있는 칸(첫 칸=상품명 제외)도 곱한다
-  if (m) for (const seg of s.slice(0, m.index).split(',').slice(1)) { const c = seg.trim().match(/^(\d+)\s*(?:개입|개|입|팩|박스|봉|병|캔|PET|EA)$/i); if (c && +c[1] >= 1 && +c[1] < 2000) cnts.push(+c[1]) }
-  const count = cnts.reduce((a, b) => a * b, 1)
-  return { set: false, vol, count, total: vol ? vol.v * count : null }
-}
-// 같은 상품의 묶음 수 변형("… 230g x 2개 / x 4개 / x 8개")은 한 번만 검색한다 — 끝의 묶음 수량만 뗀 이름
-const baseOf = (name) => String(name).replace(/\s*[x×*]?\s*\d+\s*(?:개|박스|PET|팩|캔|병|봉|EA)\s*$/i, '').trim()
-const brandless = (name) => {
-  const toks = String(name).replace(/\([^)]*\)|\[[^\]]*\]/g, ' ').split(/[\s,/]+/).filter((w) => /[가-힣a-zA-Z]{2,}/.test(w) && !/\d/.test(w)).slice(0, 5)
-  return toks.length >= 2 ? toks.slice(1) : toks
-}
-function titleMatches(ourName, ourSpec, title) {
-  const toks = brandless(ourName)
-  const flat = String(title).replace(/\s/g, '')
-  const hit = toks.filter((w) => flat.includes(w)).length
-  if (!toks.length || hit < Math.ceil((toks.length * 2) / 3)) return false // 3개 중 2개, 2개면 둘 다
-  const t = specOf(title)
-  if (t.set) return false
-  if (ourSpec.vol && t.vol) return ourSpec.vol.u === t.vol.u && Math.abs(ourSpec.total - t.total) <= ourSpec.total * 0.02
-  return ourSpec.count === t.count && ourSpec.count > 1
-}
-const queryOf = (name) => String(name).replace(/\([^)]*\)|\[[^\]]*\]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 50)
 
 async function fetchAll(build) { const PAGE = 1000, out = []; for (let from = 0; ; from += PAGE) { const { data, error } = await build().range(from, from + PAGE - 1); if (error) throw new Error(error.message); out.push(...(data ?? [])); if ((data ?? []).length < PAGE) return out } }
 const COLS = 'idx, supplier_code, supplier_name, name_clean, group_2, group_3, wholesale_price, delivery_price, status, auto_excluded_reason, register_excluded, market_low, market_p25, market_median, market_count, market_top3, market_checked_at'
