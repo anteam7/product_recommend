@@ -1,6 +1,6 @@
 /**
  * 로컬 cron — 매입처 주문 추적(입금확인 · 송장) ↔ 쿠팡 발주확인 · 송장등록 동기화
- *   node scripts/local-cron-ggsan-sync.mjs [--dry]      --dry: 갱신 내용만 출력(DB·쿠팡 호출 없음)
+ *   node scripts/local-cron-ggsan-sync.mjs [--dry] [--only=<source>]   --dry: 갱신 내용만 출력(DB·쿠팡 호출 없음) · --only: 한 매입처만
  *
  * 구조(2026-10-09 리팩터): 매입처마다 루프를 복사하던 구조(건강산·유픽·77bio·Cafe24·고도몰 5벌)를
  *   **TRACKERS 등록표 + 공통 루프 하나**로 통합. 매입처별로 다른 건 "어떻게 로그인하고 주문상세를 어떻게 읽나"뿐이고
@@ -45,6 +45,7 @@ import { withUpickSession, fetchUpickOrder } from './lib/upick-tracking.mjs'
 import { withBio77Session, fetchBio77Order } from './lib/bio77-tracking.mjs'
 import { withCafe24Session, fetchCafe24Order } from './lib/cafe24-tracking.mjs'
 import { createGgsanSession } from './lib/ggsan-tracking.mjs'
+import { createDomeatozApi, normalizeDomeatozOrder, domeatozDateIso, DOMEATOZ_CANCELLED } from './lib/domeatoz-api.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const env = Object.fromEntries(
@@ -60,6 +61,8 @@ const env = Object.fromEntries(
 )
 const sb = createClient(env.NEXT_PUBLIC_SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY)
 const DRY = process.argv.includes('--dry')
+// --only=<source>: 한 매입처만 추적(수동 점검용). 재시도·사각지대 스윕은 건너뛴다
+const ONLY = process.argv.find((a) => a.startsWith('--only='))?.slice('--only='.length) || null
 
 const MAX_TARGETS = 100
 const DEADLINE_MS = 5 * 60 * 1000 // 5분 가드
@@ -83,6 +86,24 @@ const cafe24 = (source, label, defaultBase, prefix) => ({
   source, label,
   with: (e, fn) => withCafe24Session({ base: e[`${prefix}_BASE_URL`] || defaultBase, user: e[`${prefix}_USER`], pass: e[`${prefix}_PASS`], label: source }, (page, base) => fn((no) => fetchCafe24Order(page, base, no, source))),
 })
+// 도매아토즈 = 판매사 OPEN API(브라우저 없음, lib/domeatoz-api.mjs). 최근 60일 주문을 한 번에 받아 주문번호로 찾고, 없으면 '주문번호' 단건 검색
+async function withDomeatozApi(e, fn) {
+  const api = createDomeatozApi(e)
+  const byNo = new Map((await api.orders({ days: 60 })).map((o) => [String(o.orderNumber), o]))
+  await fn(async (no) => normalizeDomeatozOrder(byNo.get(String(no)) ?? await api.orderByNo(no)))
+}
+// recent(env) → 최근 매입처 주문 [{orderNo, refText, cancelled, status, paid, goods, orderedAt}] — 직접 결제 주문 연결(captureOrders)용.
+// refText 에 쿠팡 주문번호가 들어 있으면 그 쿠팡 주문의 매입 주문으로 본다(도매아토즈 주문서의 외부주문코드·주문관리메모 칸)
+async function recentDomeatoz(e) {
+  return (await createDomeatozApi(e).orders({ days: 30 })).map((o) => {
+    const n = normalizeDomeatozOrder(o) // 상태 null 가드 등 판정은 추적과 같은 함수로
+    const code = o.status == null || o.status === '' ? NaN : Number(o.status)
+    return {
+      orderNo: String(o.orderNumber), refText: `${o.externalCode ?? ''} ${o.memo ?? ''}`,
+      cancelled: DOMEATOZ_CANCELLED.has(code), status: n.status, paid: n.actualPaid, goods: Number(o.totalPrice) || null, orderedAt: domeatozDateIso(o.setDate),
+    }
+  })
+}
 const TRACKERS = [
   { source: 'ggsan', label: '건강산', depositSync: true, with: (e, fn) => withGodomall(e, fn) },
   // 화장품스토리 = 건강산 화장품 서브몰(같은 고도몰·같은 회원 계정) — 호스트·계정만 바꿔 건강산 세션 재사용, CMTSTORY_* 없으면 GGSAN_* 폴백
@@ -92,6 +113,8 @@ const TRACKERS = [
   cafe24('wellroot', '웰루트', 'https://wellrootb2b.com', 'WELLROOT'),       // 예치금 결제(입금대기 없음)
   cafe24('kwholesale', 'K홀세일', 'https://kwholesale.co.kr', 'KWHOLESALE'), // 무통장(입금 확인 후 출고) — 상태어가 고도몰과 달라 depositSync 미적용
   cafe24('campingmoon', '캠핑문', 'https://campingmoon.co.kr', 'CAMPINGMOON'), // 2026-10-14 무통장·한진택배 — 첫 배송에서 fetchCafe24Order 송장 파싱 실측 필요(docs/plan-campingmoon.md P5)
+  // 2026-10-27 적립금 결제(입금대기 없음) · OPEN API. recent = 사이트에서 직접 결제한 주문도 외부주문코드로 찾아 연결
+  { source: 'domeatoz', label: '도매아토즈', with: (e, fn) => withDomeatozApi(e, fn), recent: (e) => recentDomeatoz(e) },
 ]
 
 // ─── 쿠팡 발주확인·송장등록(로컬 직접 실행, scripts/lib/coupang-invoice.mjs 공용) ───
@@ -99,7 +122,7 @@ const coupangOps = createCoupangInvoiceOps({ sb, env, log: (m) => console.log(' 
 const coupangAck = (orderId) => coupangOps.ackByOrderId(orderId).catch((e) => ({ ok: false, detail: e?.message || String(e) }))
 
 // 집계
-let tracked = 0, paidConfirmed = 0, shipped = 0, invoiceOk = 0, duplicate = 0, invoiceErr = 0, attention = 0, errors = 0
+let tracked = 0, paidConfirmed = 0, shipped = 0, invoiceOk = 0, duplicate = 0, invoiceErr = 0, attention = 0, errors = 0, captured = 0
 const sessionErrors = []
 
 /** registerInvoice 결과를 집계 카운터에 반영. 반환: 결과 객체 */
@@ -190,6 +213,78 @@ async function trackRow(t, row, p) {
   if (fresh && autoUpload && p.carrier && !DRY) await registerLocal(row.id, `order#${row.order_id}`)
 }
 
+// 매입처 판별 = order-server.mjs resolveOrder()와 동일 규칙(오버라이드 우선 → listings.source 조인 → 미상이면 ggsan 간주).
+// ggsan_order_no 는 매입처 공용 주문번호 저장소라 자릿수로는 매입처를 구분할 수 없다(2026-09-02) — 반드시 실제 source 로 분기.
+async function makeSourceResolver(rows) {
+  const sellerProductIds = [...new Set((rows ?? []).filter((r) => !(r.supplier_source && r.supplier_goods_no) && r.seller_product_id != null).map((r) => r.seller_product_id))]
+  const sourceBySellerProductId = new Map()
+  if (sellerProductIds.length) {
+    const { data: listings, error } = await sb.from('jimscanner_coupang_listings').select('seller_product_id, source').in('seller_product_id', sellerProductIds)
+    if (error) throw new Error(`listings: ${error.message}`)
+    for (const l of listings ?? []) if (l.source && !sourceBySellerProductId.has(l.seller_product_id)) sourceBySellerProductId.set(l.seller_product_id, l.source)
+  }
+  return (r) => (r.supplier_source && r.supplier_goods_no) ? r.supplier_source : (sourceBySellerProductId.get(r.seller_product_id) || 'ggsan')
+}
+
+// ─── 직접 결제 주문 연결 — 결제진행 버튼 밖(매입처 사이트에서 직접)으로 결제해 매입처 주문번호(ggsan_order_no)가 빈 쿠팡 주문을
+//     매입처 주문의 외부주문코드·메모에 적힌 쿠팡 주문번호로 찾아 연결한다(등록표에 recent 가 있는 매입처만 — 도매아토즈).
+//     연결 = 주문번호 + ORDERED + 실결제액 → 같은 회차 ③ 추적 대상이 되고, 미발주(PENDING)였으면 쿠팡 발주확인.
+//     한 쿠팡 주문을 가리키는 매입처 주문이 둘 이상이면 연결하지 않고 사람 확인(중복 발주 가능성).
+async function captureOrders(t) {
+  const since = new Date(Date.now() - 30 * 864e5).toISOString()
+  const { data: rows, error } = await sb.from('jimscanner_coupang_orders')
+    .select('id, order_id, seller_product_id, supplier_source, supplier_goods_no, shipping_count, purchase_status, purchase_note, purchase_total_cost, needs_attention')
+    .in('purchase_status', ['PENDING', 'ORDERED'])
+    .is('ggsan_order_no', null)
+    .gte('ordered_at', since)
+    .limit(500)
+  if (error) throw new Error(`capture select: ${error.message}`)
+  const resolveSource = await makeSourceResolver(rows)
+  const mine = (rows ?? []).filter((r) => resolveSource(r) === t.source)
+  if (!mine.length) return
+  const recent = (await t.recent(env)).filter((x) => !x.cancelled)
+  if (!recent.length) return
+  // 이미 다른 쿠팡 주문에 연결된 매입처 주문은 제외
+  const { data: linked, error: linkErr } = await sb.from('jimscanner_coupang_orders').select('ggsan_order_no').in('ggsan_order_no', recent.map((x) => x.orderNo))
+  if (linkErr) throw new Error(`capture linked: ${linkErr.message}`)
+  const taken = new Set((linked ?? []).map((x) => String(x.ggsan_order_no)))
+  for (const row of mine) {
+    const id = String(row.order_id)
+    const re = new RegExp(`(^|\\D)${id}(\\D|$)`)
+    const hits = recent.filter((x) => !taken.has(x.orderNo) && re.test(x.refText))
+    if (!hits.length) continue
+    const tag = `${t.source}#${hits.map((h) => h.orderNo).join(',')}`
+    if (hits.length > 1) {
+      if (!row.needs_attention) {
+        await writeOrder(row, { needs_attention: true, attention_reason: `${t.label} 주문 ${hits.length}건이 이 쿠팡 주문을 가리킴(${hits.map((h) => h.orderNo).join(', ')}) — 중복 발주 확인` }, tag)
+        attention++
+      }
+      continue
+    }
+    const h = hits[0], now = nowIso()
+    const update = {
+      ggsan_order_no: h.orderNo, purchase_status: 'ORDERED', purchase_ordered_at: h.orderedAt ?? now,
+      ggsan_order_status: h.status, ggsan_last_checked_at: now, updated_at: now,
+      purchase_note: [row.purchase_note, `[${t.label}] 직접 결제 주문 연결 — 주문코드 ${h.orderNo}${h.paid ? ` · ${h.paid.toLocaleString()}원` : ''}`].filter(Boolean).join(' / '),
+    }
+    if (h.paid && !(row.purchase_total_cost > 0)) update.purchase_total_cost = h.paid
+    if (h.goods) update.purchase_unit_cost = Math.round(h.goods / (row.shipping_count || 1)) // 쿠팡 주문 1개당 상품가(나머지 = 운송비)
+    await writeOrder(row, update, tag)
+    taken.add(h.orderNo)
+    captured++
+    console.log(`  ${t.label} 직접 결제 주문 연결: 쿠팡 ${id} ← ${h.orderNo} (${h.status ?? '?'}${h.paid ? `, ${h.paid}원` : ''})`)
+    if (row.purchase_status === 'PENDING' && !DRY) {
+      const ack = await coupangAck(row.order_id)
+      console.log(`  order#${row.order_id} 쿠팡 발주확인 → ${ack.ok ? 'OK' : '실패'}: ${ack.detail}`)
+      // 실패해도 송장등록 단계가 발주확인을 다시 시도하지만, 그 전까지 출고기한이 흐르므로 보이게 남긴다
+      if (!ack.ok && !row.needs_attention) {
+        await writeOrder(row, { needs_attention: true, attention_reason: `쿠팡 발주확인 실패(직접 결제 주문 연결 후) — ${String(ack.detail ?? '').slice(0, 120)}` }, tag)
+        attention++
+      }
+    }
+  }
+}
+
 // ════════ 메인 ════════
 const t0 = Date.now()
 const deadlineAt = t0 + DEADLINE_MS
@@ -219,10 +314,24 @@ async function finish(status, errorMessage = null) {
       }).eq('id', runId)
     } catch { /* noop */ }
   }
-  console.log(`[local-cron-ggsan-sync] ${status}${DRY ? ' [DRY]' : ''} auto_upload=${autoUpload} tracked=${tracked} paid=${paidConfirmed} shipped=${shipped} invoice_ok=${invoiceOk} dup=${duplicate} invoice_err=${invoiceErr} attention=${attention} errors=${errors} (${((Date.now() - t0) / 1000).toFixed(1)}s)`)
+  console.log(`[local-cron-ggsan-sync] ${status}${DRY ? ' [DRY]' : ''}${ONLY ? ` only=${ONLY}` : ''} auto_upload=${autoUpload} captured=${captured} tracked=${tracked} paid=${paidConfirmed} shipped=${shipped} invoice_ok=${invoiceOk} dup=${duplicate} invoice_err=${invoiceErr} attention=${attention} errors=${errors} (${((Date.now() - t0) / 1000).toFixed(1)}s)`)
 }
 
 try {
+  const activeTrackers = ONLY ? TRACKERS.filter((t) => t.source === ONLY) : TRACKERS
+  if (ONLY && !activeTrackers.length) throw new Error(`--only=${ONLY}: 등록표(TRACKERS)에 없는 매입처`)
+
+  // ①-b 직접 결제 주문 연결(등록표에 recent 가 있는 매입처) — ② 전에 해야 연결된 주문이 이번 회차 추적 대상에 든다
+  for (const t of activeTrackers.filter((x) => x.recent)) {
+    if (Date.now() > deadlineAt) break
+    try { await captureOrders(t) } catch (e) {
+      errors++
+      const msg = `${t.label} capture: ${e instanceof Error ? e.message : String(e)}`
+      sessionErrors.push(msg)
+      console.log(`  ${msg} — 직접 결제 주문 연결 건너뜀`)
+    }
+  }
+
   // ② 대상 조회
   const { data: rows, error: selErr } = await sb
     .from('jimscanner_coupang_orders')
@@ -233,15 +342,7 @@ try {
     .limit(MAX_TARGETS)
   if (selErr) throw new Error(`select: ${selErr.message}`)
 
-  // 매입처 판별 = order-server.mjs resolveOrder()와 동일 규칙(오버라이드 우선 → listings.source 조인 → 미상이면 ggsan 간주).
-  // ggsan_order_no 는 매입처 공용 주문번호 저장소라 자릿수로는 매입처를 구분할 수 없다(2026-09-02) — 반드시 실제 source 로 분기.
-  const sellerProductIds = [...new Set((rows ?? []).filter((r) => !(r.supplier_source && r.supplier_goods_no) && r.seller_product_id != null).map((r) => r.seller_product_id))]
-  const sourceBySellerProductId = new Map()
-  if (sellerProductIds.length) {
-    const { data: listings } = await sb.from('jimscanner_coupang_listings').select('seller_product_id, source').in('seller_product_id', sellerProductIds)
-    for (const l of listings ?? []) if (l.source && !sourceBySellerProductId.has(l.seller_product_id)) sourceBySellerProductId.set(l.seller_product_id, l.source)
-  }
-  const resolveSource = (r) => (r.supplier_source && r.supplier_goods_no) ? r.supplier_source : (sourceBySellerProductId.get(r.seller_product_id) || 'ggsan')
+  const resolveSource = await makeSourceResolver(rows)
 
   // 매입처별 대상 — AWAITING_DEPOSIT 은 depositSync 매입처만(나머지는 종전대로 ORDERED/SHIPPED)
   const targets = new Map(TRACKERS.map((t) => [t.source, (rows ?? []).filter((r) => resolveSource(r) === t.source && (t.depositSync || r.purchase_status !== 'AWAITING_DEPOSIT'))]))
@@ -249,10 +350,10 @@ try {
   const awaitingSkipped = (rows ?? []).filter((r) => r.purchase_status === 'AWAITING_DEPOSIT' && !TRACKERS.find((t) => t.source === resolveSource(r))?.depositSync).length
   // 등록표 밖 매입처(도매꾹·비셀러 등)는 자동추적 미지원 — 조용히 빠지지 않게 건수만이라도 남긴다
   const untracked = (rows ?? []).length - covered - awaitingSkipped
-  console.log(`  대상: ${TRACKERS.map((t) => `${t.label} ${targets.get(t.source).length}건`).join(', ')}${untracked > 0 ? `, 자동추적 미지원 ${untracked}건` : ''}`)
+  console.log(`  대상: ${activeTrackers.map((t) => `${t.label} ${targets.get(t.source).length}건`).join(', ')}${untracked > 0 && !ONLY ? `, 자동추적 미지원 ${untracked}건` : ''}`)
 
   // ③ 매입처별 세션 1회 → 공통 처리
-  for (const t of TRACKERS) {
+  for (const t of activeTrackers) {
     const list = targets.get(t.source)
     if (!list.length) continue
     if (Date.now() > deadlineAt) { console.log(`  deadline reached — ${t.label} 은 다음 회차`); continue }
@@ -282,7 +383,8 @@ try {
 
   // ④ 재시도 스윕 — 송장은 있는데 쿠팡 등록이 pending/failed 로 고착된 건(과거 Vercel 호출 실패분 포함).
   //    쿠팡이 이미 배송지시 이후(Wing 수동등록)면 registerInvoice 가 API 호출 없이 manual_done 으로 동기화한다.
-  if (autoUpload && !DRY && Date.now() < deadlineAt) {
+  if (ONLY) console.log(`  --only=${ONLY} — 재시도·사각지대 스윕 건너뜀`)
+  if (autoUpload && !DRY && !ONLY && Date.now() < deadlineAt) {
     try {
       const { data: stuck } = await sb
         .from('jimscanner_coupang_orders')
@@ -304,7 +406,7 @@ try {
   }
 
   // ⑤ ggsan_order_no 없는 ORDERED + 24h 경과 → 사각지대 가시화(needs_attention)
-  try {
+  if (!ONLY) try {
     const cutoffIso = new Date(Date.now() - PAID_WAIT_HOURS * 3600 * 1000).toISOString()
     const { data: orphans } = await sb
       .from('jimscanner_coupang_orders')

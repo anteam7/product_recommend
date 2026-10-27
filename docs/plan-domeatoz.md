@@ -17,7 +17,7 @@
 | 배송 | **주문 1건당 3,000원 선불**, **묶음배송 가능 수량 1개**(2개 사면 배송비 2번) → 번들 할인 이점 없음. 제주·도서 각 +3,000. 주문마감 **12:00**, 택배 |
 | 결제 | **적립금 선충전**(신한·기업 가상계좌, 10만원~). 출금은 마지막 배송 15일 뒤. 엑셀 일괄 주문 가능 |
 | 쿠팡 판매 | 허용. **주문은 반드시 도매아토즈 경유**(직거래 시 ID 정지). 이미지 자유 사용 |
-| 판매사 OPEN API | 상품·상태·주문·CS 존재하나 **고객센터 승인 필요**("사용승인 안된 회원 입니다") → 승인 전에는 웹 수집 |
+| 판매사 OPEN API | 상품·상태·주문·CS. **사용 승인됨**(2026-10-27 호출 확인, 키 = `/user-api` 발급분 → `.env.local DOMEATOZ_API_KEY/SECRET`). 가이드 `domeatoz.com/pdf/atoz_api.pdf`. 클라이언트 `scripts/lib/domeatoz-api.mjs` — 송장 싱크가 사용, 수집·주문은 아직 웹 |
 | 핵심 리스크 | ① 음료·생수는 쿠팡 로켓과 정면 경쟁(시세 매칭 필수) ② 품절 비율 47% → 재고 싱크 필수 ③ 적립금 잔액 부족 시 결제진행 실패 |
 
 **순서:** P0 수집 → P1 쿠팡 시세(규격 매칭) 선별 리포트(**사장님 승인**) → P2 쿠팡 등록 파일럿 20~30건(**"실행" 후**) → P3 적립금 결제진행 → P4 송장·재고 싱크 → 배치 확대 → (P5 토스)
@@ -90,17 +90,17 @@ price  = clamp(target, floor, ref × 0.99) ; ref×0.99 < floor 면 STRUCTURAL(�
 | **P0 수집** ✅ | `scripts/domeatoz-collect.mjs`(fetch 로그인 → 공급사 목록(상태) + 상품DB 다운로드(내용), content_hash 변경분만, `--details[=N]` 은 상세 페이지 소량) + DDL | 2,230 수집, 재실행 변경 0 |
 | **P1 시세 선별** | `scripts/domeatoz-market.mjs`(Aside, 1분 1검색) + `lib/domeatoz-price.mjs` → `_workspace/domeatoz-select-<날짜>.md` | **사장님 승인**(P25 기준·마진 하한·NO_MATCH 보류) |
 | **P2 쿠팡 등록** 🔄 | `scripts/domeatoz-register.mjs` — 1 idx = 1 쿠팡 상품(단일 item, 묶음 수 변형도 각각), 판정 OK 만(저장된 시세로 decide 재현), 가공식품 고시, 구매옵션 = `lib/domeatoz-spec.mjs purchaseSpecOf`("142g 5개" → 개당 중량·수량) + `lib/coupang-purchase-options.mjs`, 검색어 `lib/search-tags.mjs`, 상세 = esmplus 상품 이미지 + 위탁 배송 안내, 출고 3일, brand 생략. listings source CHECK 에 `domeatoz`(`supabase/domeatoz_register.sql` 적용). 드립 = `scripts/register-drip.sh domeatoz`(매입처 공용) | 사장님 "확인된 것 먼저 등록, 확인될 때마다 추가"(2026-10-26) → 파일럿 3건 ✅ → 드립 |
-| **P3 결제진행** | `order-server.mjs` `RUN_FLOWS.domeatoz` — 적립금 결제(DEPOSIT_PAY_SOURCES, 결제금액 가드), `PurchaseButton` | 적립금 충전 후 첫 주문 `full=false` 확인 |
-| **P4 싱크** 🔄 | 품절 ✅ `local-cron-stock-sync.mjs SUPPLIERS` 1줄 `kind: 'domeatoz'` — 대상 상품의 공급사 목록(`lib/domeatoz-site.mjs`, 수집기와 공용)을 매시 한 번 훑어 `ProductState` 1 = 재고 · 2·3 = 품절, 목록에서 사라진 대상도 품절(목록이 잘리면 throw → 이번 회차 건너뜀). 송장 ⏳ `local-cron-ggsan-sync.mjs TRACKERS` 1줄(주문배송조회) — 첫 주문 후 | 첫 송장 자동 반영 |
-| P5 | 토스(`toss-register-batch.mjs SOURCES`), OPEN API 승인 시 수집·주문 API 전환 | 이후 |
+| **P3 결제진행** 🔄 | `order-server.mjs` `runFlowDomeatoz`(`RUN_FLOWS.domeatoz`) — 적립금 결제(`DEPOSIT_PAY_SOURCES`·`DEPOSIT_PAY_LABEL`), 브라우저 전 fetch 로 **중복 발주(외부주문코드)·판매 상태** 확인, 완주 가드(수량·단가·등록 도매가 대비 인상·금액 상한·잔액·적립금 = 결제금액), 완료 확인 = 주문 목록 외부주문코드 검색. 사이트 호출은 `lib/domeatoz-site.mjs`(`domeatozProductRow/Cash/FindOrders`). 어드민 `PURCHASE_AUTOMATED_SOURCES`·`PurchaseButton` | 직전 정지 ✅(2026-10-27 첫 주문) → 완주 첫 실행 확인 ⏳ |
+| **P4 싱크** 🔄 | 품절 ✅ `local-cron-stock-sync.mjs SUPPLIERS` 1줄 `kind: 'domeatoz'` — 대상 상품의 공급사 목록(`lib/domeatoz-site.mjs`, 수집기와 공용)을 매시 한 번 훑어 `ProductState` 1 = 재고 · 2·3 = 품절, 목록에서 사라진 대상도 품절(목록이 잘리면 throw → 이번 회차 건너뜀). 송장 ✅ `local-cron-ggsan-sync.mjs TRACKERS` 1줄 — **OPEN API** `/orderList`(최근 60일 한 번에) → 주문번호로 상태·택배사·송장 → 공통 루프가 SHIPPED + 쿠팡 송장등록. 등록표 `recent` = **직접 결제 주문 연결**(사이트에서 직접 결제해 DB 에 주문번호가 없는 쿠팡 주문을 외부주문코드·메모의 쿠팡 주문번호로 찾아 주문번호·ORDERED·실결제액 기록 + 쿠팡 발주확인, 2건 이상이면 사람 확인) | 첫 송장 자동 반영 ⏳ |
+| P5 | 토스(`toss-register-batch.mjs SOURCES`), 수집(`/productList`·`/productModifyList`)·주문(`/productOrder`) API 전환 검토 | 이후 |
 
 등록표 한 줄씩([[feedback_supplier_registry_pattern]]): `purchase-catalog/sources.ts SOURCE_META` · `register-agent.mjs SOURCE_SCRIPTS` · `api/admin/register-jobs SUPPORTED_SOURCES` · `orders/model.ts SUPPLIER_LABELS/PURCHASE_AUTOMATED_SOURCES/supplierUrl` · `lib/search-tags.mjs kindOf` · `agent/snapshot.mjs`·`fixtures.mjs` · purchase_catalog 뷰 UNION ALL.
 
 ---
 
 ## 5. 사장님 확인/할 일
-1. **적립금 충전**(10만원~, 첫 주문 전) — 결제진행은 적립금 잔액에서만 결제.
-2. **판매사 OPEN API 사용 승인** 고객센터 요청(승인되면 수집·주문을 API 로 전환).
+1. ~~**적립금 충전**(10만원~, 첫 주문 전)~~ ✅ 2026-10-27 100,000원 충전 확인 — 결제진행은 적립금 잔액에서만 결제.
+2. ~~**판매사 OPEN API 사용 승인**~~ ✅ 2026-10-27 승인 확인(송장 싱크에 사용 중).
 3. 시세 기준(P25)·마진 하한(7% 또는 2,000원)·NO_MATCH 보류 — P1 리포트에서 확정.
 
 ---
@@ -117,3 +117,7 @@ price  = clamp(target, floor, ref × 0.99) ; ref×0.99 < floor 면 STRUCTURAL(�
 - 2026-10-27 00:10: 드립 1회차 10건 ✓ · 3건 ✗ "브랜드 정보가 필요합니다"(프로틴바 102553·초코바 72924·과일잼 58750 — 브랜드 필수 카테고리). 등록기에 그 오류일 때만 브랜드 사전 검색(첫 토큰 완전일치 → brandId, 없으면 이름만) 재시도 추가, 쿠팡 미생성 FAILED 3행 삭제 → 2회차 10건 ✓(오리온 KR-68537·복음자리 KR-69694 로 통과). 누적 23건 승인요청. 브랜드 붙은 상품은 seller gating(유통경로 검토)으로 심사가 길어질 수 있음(plan-cmtstory 실측).
 - 2026-10-27 07:43: 정정 — 00:30 메모리 부족 때 죽은 건 시세 대조뿐이고 드립은 계속 돌아 04:52 까지 71건(파일럿 포함 74건 전부 승인완료) 등록 후 후보 소진(18회 무진전)으로 스스로 끝났다. 시세 대조(남은 830건)·드립 재시작.
 - 2026-10-27: P4 품절 싱크 — 로그인·목록을 `lib/domeatoz-site.mjs` 로 빼 수집기와 재고 동기화가 같이 씀(수집기 재실행으로 동작 확인: 목록 2,230 · 판매중 1,195 · 품절 1,035 · 변경 0). 등록 74건은 지금 전부 판매중이라 내릴 것 없음. 등록분 예상 마진: 단순 평균 10.76% · 매출 가중 10.34% · 중앙값 10.0% · 건당 순이익 평균 3,038원(10% 초과 21건은 순이익 하한 2,000원 때문), 실주문 0.
+- 2026-10-27 08:56: 도매아토즈가 들어간 첫 재고 동기화(08:33) 정상 — 대상 69 · 품절 0 · 오류 0. 그런데 대상이 78이 아니라 69여서 확인해 보니 **재고 동기화 전체 버그**: 활성 리스팅 조회가 페이지 없이 1,000행에서 잘려 1,380 중 401건(최근 등록분 — 캠핑문 180 · 유픽 55 · 건강산 37 · 화장품스토리 23 · 77바이오 15 · 웰루트 12 · 도매아토즈 8 …)이 매 회차 품절 점검 밖이었다(캠핑문 대량 등록 10/16 즈음 1,000 초과 추정). 캠핑문 옵션 단계도 1,115 중 115 누락. `selectAll`(1,000행씩 나눠 읽기)로 수정, 조회 실패는 '활성 상품 없음' 대신 오류로 기록. 09:33 회차부터 전량 점검.
+- 2026-10-27 13:50: P3 결제진행 — 주문 흐름 정찰(읽기 전용, 주문서까지만): 상품 페이지 `aJsonArray` + `#ordervalue` → `ProductSubmit()` = `POST /orderInfo`(주문서) → 수령인·`outcode`(외부주문코드)·적립금(`#Cash`, [전액사용] `AllCash()`) → [결제하기] `#tt` = 숨은 iframe 으로 `POST /orderPayment`. 적립금 `POST /request-CashRefresh`, 주문배송조회 `POST /request-orderList`(SearchType=10 외부주문코드 → `IO_OrderNumber·IO_State·IO_DeliveryName·IO_DeliveryNumber` — 송장 TRACKERS 에도 그대로 쓸 수 있음). ⚠ 주문서의 [기본 배송지]·[주문자와 같음] 은 사장님 본인 주소·번호를 채우므로 누르지 않고 칸에 직접 입력. 제주·도서산간은 `BefarZoneState` 가 배송비를 6,000으로 바꿈. `runFlowDomeatoz` 구현 후 첫 쿠팡 주문(오리온 카스타드 690g×2, 5103875375613)으로 **직전 정지** 확인: 상품 17,090 + 배송 3,000 = 20,090원, 적립금 20,090원 적용(보유 100,000), 점검 전부 통과. 완주(실결제)는 사장님 승인 대기. 주문이 12:00 이후라 다음 날 출고.
+- 2026-10-27 14:10: P4 송장 — 사장님 "결제는 내가 할게, 배송상태 싱크 연동, API 가 있다더라". OPEN API 가 이미 승인돼 있음을 확인(`GET /myCashSearch` 100,000원). 실측 함정: 주문 조회 기간은 **beginDay = 늦은 날짜·endDay = 이른 날짜**(최대 30일), `/orderListSearch` 의 외부주문코드 검색('외주주문코드')은 서버가 ERROR·'주문관리메모'는 연결 끊김('주문번호'만 정상), 연달아 부르면 가끔 ECONNRESET → `lib/domeatoz-api.mjs` 는 재시도 + 외부주문코드는 `/orderList` 전체를 받아 직접 비교. 같은 이유로 결제진행 중복 확인(`domeatozFindOrders`, 웹)도 서버 검색 대신 기간 내 전체를 읽어 비교하도록 변경. 송장 싱크 `--dry --only=domeatoz`·전체 `--dry` 정상(다른 매입처 영향 없음). 매시 :30 `Coupang-Ggsan-Sync` 작업이 14:30 회차부터 도매아토즈 포함. 실제 송장 매핑(택배사 이름 표기)은 첫 발송 때 확인 필요.
+

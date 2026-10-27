@@ -96,7 +96,7 @@ export const SUPPLIER_LABELS: Record<string, string> = {
 }
 // order-server.mjs의 SUPPORTED_SOURCES와 반드시 동기화 — 여기 없으면 결제진행 버튼 자체가 안 그려짐
 // (2026-09-02: bio77 추가 시 order-server.mjs만 고치고 여기를 안 고쳐서 버튼이 안 보이던 버그 재발 방지 메모)
-export const PURCHASE_AUTOMATED_SOURCES: readonly string[] = ['ggsan', 'upickb2b', 'bio77', 'wellroot', 'kwholesale', 'cmtstory', 'campingmoon']
+export const PURCHASE_AUTOMATED_SOURCES: readonly string[] = ['ggsan', 'upickb2b', 'bio77', 'wellroot', 'kwholesale', 'cmtstory', 'campingmoon', 'domeatoz']
 
 /** 매입처 상세 URL (listing.source_detail_url 없거나 주문별 오버라이드일 때) */
 export function supplierUrl(source: string | null | undefined, goodsNo: string | null | undefined): string | null {

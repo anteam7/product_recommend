@@ -18,6 +18,7 @@ import { createCoupangInvoiceOps } from './lib/coupang-invoice.mjs'
 import { createCoupangOrdersSyncOps } from './lib/coupang-orders-sync.mjs'
 import { createNaverOrderOps } from './lib/naver-order-ops.mjs'
 import { GODOMALL_PRICE_TABLES, godomallExpectTotals, checkExpectTotals } from './lib/purchase-guard.mjs'
+import { DOMEATOZ_BASE, makeDomeatozSession, domeatozLogin, domeatozProductRow, domeatozCash, domeatozFindOrders } from './lib/domeatoz-site.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const env = Object.fromEntries(
@@ -61,14 +62,17 @@ function adminCors(req) {
 
 // 자동주문 지원 매입처 (listings.source → 표시명)
 // ⚠ 새 매입처를 넣으면 execPurchase의 RUN_FLOWS 분기와 coupang-orders/page.tsx PURCHASE_AUTOMATED_SOURCES도 같이 고칠 것
-const SUPPORTED_SOURCES = { ggsan: '건강산', upickb2b: '유픽B2B', bio77: '77바이오', wellroot: '웰루트', kwholesale: 'K홀세일', cmtstory: '화장품스토리', campingmoon: '캠핑문' }
+const SUPPORTED_SOURCES = { ggsan: '건강산', upickb2b: '유픽B2B', bio77: '77바이오', wellroot: '웰루트', kwholesale: 'K홀세일', cmtstory: '화장품스토리', campingmoon: '캠핑문', domeatoz: '도매아토즈' }
 // 무통장 완주 후 이체할 곳 안내(결과 화면) — 매입처마다 입금 계좌 은행이 다르다(계좌번호는 주문서 드롭다운 기준, 소스 미저장)
 const DEPOSIT_BANK_LABEL = { ggsan: '국민은행(건강산)', upickb2b: '국민은행(유픽B2B)', kwholesale: '농협((주)다인내추럴)', cmtstory: '기업은행((주)건강산)', campingmoon: '우리은행((주)소리)' }
 // 화장품스토리 = 건강산의 화장품 서브몰(같은 고도몰5·같은 회원 계정) → 건강산 무통장 흐름을 호스트만 바꿔 재사용(사용자 결정 2026-10-09: 예치금 아님)
 // 입금은행 드롭다운은 기업은행 하나뿐(건강산의 국민은행과 다름, 2026-10-09 주문서 실측) — 은행명 키워드만 저장(계좌번호는 드롭다운에서 선택)
 const CMTSTORY = { base: env.CMTSTORY_BASE_URL || 'https://www.cmtstory.com', user: env.CMTSTORY_USER || env.GGSAN_USER, pass: env.CMTSTORY_PASS || env.GGSAN_PASS, label: '화장품스토리', bankKeyword: '기업은행' }
 // 예치금 결제 매입처 — 완주 = 예치금 즉시 차감(실결제)이라 결과 상태가 입금대기가 아니라 발주완료(ORDERED)
-const DEPOSIT_PAY_SOURCES = new Set(['wellroot'])
+// 도매아토즈는 같은 선충전 방식인데 사이트 용어가 '적립금'이라 화면·메모 문구만 DEPOSIT_PAY_LABEL 로 바꾼다
+const DEPOSIT_PAY_SOURCES = new Set(['wellroot', 'domeatoz'])
+const DEPOSIT_PAY_LABEL = { wellroot: '예치금', domeatoz: '적립금' }
+const depositLabel = (src) => DEPOSIT_PAY_LABEL[src] ?? '예치금'
 
 // 주문 → 매입처(source) + goods_no + 수령인 해석
 // id 자동 판별: 쿠팡 order_id 우선 → 없으면 네이버 product_order_id (체계가 달라 충돌 없음)
@@ -995,6 +999,164 @@ async function runFlowCafe24Cash(site, goodsNo, qty, recipient, detailUrl, full 
   return { ok: true, done: true, orderNo, total, bankAccount, msg: `무통장 주문 완료 — 주문번호 ${orderNo ?? '(파싱 실패, 창에서 확인)'} · 총액 ${total.toLocaleString()}원 · 입금대기(${bankAccount?.text || '농협 다인내추럴 계좌'}로 이체 후 [입금완료])` }
 }
 
+// Playwright: 도매아토즈(domeatoz.com, 자체 Express 서버) 주문서 자동 작성 → 결제 직전 정지 / full 지정 시 적립금 전액결제 완주
+// 주문서 실측(2026-10-27, 결제 미실행 — _workspace/domeatoz-probe):
+//  - 상품 페이지 JS aJsonArray[0](Idx·Price·OptionType) + #ordervalue → ProductSubmit() = POST /orderInfo(주문서). 옵션 상품은 등록 안 함(1 idx = 1 상품)
+//  - 주문서 칸: receiverName · ZipCode(name=Zipcode) · Address · Address2 · receiverPhone · receiverPhone2(둘 다 필수) · textMessage(배송메시지)
+//    · outcode(외부주문코드 = 쿠팡 주문번호 → 완료 확인·중복 결제 방지 키) · marketName · SendtextMessage(주문관리 메모)
+//    ⚠ [기본 배송지]·[받는사람 정보가 주문자와 같습니다](BasicAddress/BasicName)는 사장님 본인 주소·번호를 채운다 → 누르지 않고 칸에 직접 입력
+//  - 결제 = 적립금(#Cash, [전액사용]=AllCash()). 페이지 JS 변수 Cash(보유)·totalPrice(상품)·DeliveryPrice(배송).
+//    제주·도서산간은 BefarZoneState(우편번호)가 DeliveryPrice 를 바꾸므로 금액을 읽기 전에 먼저 부른다(사이트 알림은 자동 확인).
+//  - [결제하기] #tt → submit() → 숨은 iframe(Frm)으로 POST /orderPayment → 결과는 주문 목록(외부주문코드 검색)·적립금 잔액으로 확인
+//  - 주문마감 12:00(이후 주문은 다음 날 출고). 적립금이 결제금액을 다 덮을 때만 완주(부족분 가상계좌 경로는 쓰지 않음).
+//  - 상세 페이지는 단시간 약 50회 조회 시 차단 → 주문당 1회만 연다. 판매 상태·중복 발주는 fetch 세션(lib/domeatoz-site.mjs)으로 먼저 본다.
+async function runFlowDomeatoz(r, full = null) {
+  const goodsNo = String(r.goodsNo), qty = buyQty(r), rcp = r.recipient, outCode = String(r.dbKey)
+  const creds = { user: env.DOMEATOZ_ID, pass: env.DOMEATOZ_PW }
+  // 0) 브라우저 전에: 같은 쿠팡 주문으로 이미 발주했는지(중복 결제 방지) · 판매 상태
+  const site = makeDomeatozSession()
+  try { await domeatozLogin(site, creds) } catch (e) { return { ok: false, msg: `도매아토즈 로그인 실패 — ${e instanceof Error ? e.message : e}` } }
+  let dup, row
+  try { dup = await domeatozFindOrders(site, outCode) } catch (e) { return { ok: false, msg: `도매아토즈 주문 목록 조회 실패(중복 발주 확인 불가) — ${e instanceof Error ? e.message : e}` } }
+  if (dup.length) return { ok: false, msg: `이미 도매아토즈에 이 주문(외부주문코드 ${outCode})으로 발주돼 있습니다 — 주문코드 ${dup.map((x) => x.IO_OrderNumber).join(', ')}. 중복 결제 방지로 중단(관리자 매입 상태를 직접 갱신하세요)` }
+  try { row = await domeatozProductRow(site, goodsNo) } catch (e) { return { ok: false, msg: `도매아토즈 상품 #${goodsNo} 판매 상태 조회 실패 — ${e instanceof Error ? e.message : e}` } }
+  if (!row) return { ok: false, msg: `도매아토즈 상품 #${goodsNo} 이(가) 목록에 없습니다(단종 가능) — 발주 불가, 쿠팡 주문 처리를 결정하세요` }
+  if (Number(row.ProductState) !== 1) return { ok: false, msg: `도매아토즈 상품 #${goodsNo} ${Number(row.ProductState) === 2 ? '품절' : '판매중단'} — 발주 불가, 쿠팡 주문 처리(취소 등)를 결정하세요` }
+
+  const dialogs = []
+  const { ctx, page } = await openBrowser((d) => {
+    dialogs.push(d.message())
+    // 완주는 금액을 확정한 뒤 [결제하기]를 누른다 — 그 뒤 "추가배송비 … 결제 하겠습니까?"가 뜨면 금액이 바뀐 것이라 거절(중단)
+    if (full && d.type() === 'confirm' && /추가배송비/.test(d.message())) return d.dismiss()
+    return d.accept()
+  })
+  if (full) full.ctxRef = ctx
+  const lastDialog = () => (dialogs.length ? ` (사이트 메시지: ${dialogs[dialogs.length - 1].replace(/\s+/g, ' ').slice(0, 80)})` : '')
+
+  // 1) 로그인 — 로그인 폼과 같은 POST /login 을 컨텍스트 요청으로(쿠키가 브라우저와 공유됨)
+  const lr = await ctx.request.post(`${DOMEATOZ_BASE}/login`, { form: { ReUrl: '/', UserId: creds.user, UserPass: creds.pass } }).catch(() => null)
+  if (!lr || !/location\.href\s*=\s*'\/'/.test(await lr.text().catch(() => ''))) return { ok: false, msg: '도매아토즈 브라우저 로그인 실패 — 자격증명(DOMEATOZ_ID/PW) 확인' }
+  // 2) 상품 페이지 → 수량 → [구매하기] = 주문서
+  await page.goto(`${DOMEATOZ_BASE}/product/${goodsNo}`, { waitUntil: 'domcontentloaded', timeout: 30000 })
+  await page.waitForTimeout(1200)
+  const info = await page.evaluate((q) => {
+    const body = document.body?.innerText || ''
+    if (/조회 수가 많아 차단/.test(body)) return { blocked: true }
+    const a = (typeof aJsonArray !== 'undefined' && Array.isArray(aJsonArray)) ? aJsonArray : null
+    const buy = [...document.querySelectorAll('button')].some((b) => /ProductSubmit\(/.test(b.getAttribute('onclick') || '') && b.offsetParent !== null)
+    if (a?.length === 1 && a[0].OptionType !== 'Y') {
+      a[0].Value = q
+      const el = document.getElementById('ordervalue'); if (el) el.value = String(q)
+      if (typeof TotalPrice === 'function') TotalPrice() // #product(JSON) 를 aJsonArray 로 다시 채운다
+    }
+    return { logged: /로그아웃/.test(body), n: a?.length ?? 0, idx: a?.[0] ? String(a[0].Idx) : null, optionType: a?.[0]?.OptionType ?? null, buy }
+  }, qty).catch(() => null)
+  if (!info) return { ok: false, msg: '도매아토즈 상품 페이지 읽기 실패 — 열린 창에서 확인하세요' }
+  if (info.blocked) return { ok: false, msg: '도매아토즈 상세 페이지 조회 차단("조회 수가 많아 차단") — 잠시 뒤 다시 시도하거나 직접 주문하세요' }
+  if (!info.logged) return { ok: false, msg: '도매아토즈 로그인 상태가 아닙니다(상품 페이지에 로그아웃 링크 없음)' }
+  if (info.n !== 1 || info.idx !== goodsNo) return { ok: false, msg: `상품 페이지 구조 이상(항목 ${info.n}개, idx ${info.idx ?? '-'}) — 직접 주문하세요` }
+  if (info.optionType === 'Y') return { ok: false, msg: '옵션 상품 — 자동 주문 미지원(옵션 선택 필요), 직접 주문하세요' }
+  if (!info.buy) return { ok: false, msg: '구매하기 버튼 없음(품절/판매중단 가능) — 열린 창에서 확인하세요' }
+  await Promise.all([
+    page.waitForURL(/\/orderInfo/, { timeout: 20000 }).catch(() => {}),
+    page.evaluate(() => ProductSubmit()).catch(() => {}), // 폼 제출로 페이지가 바뀌며 evaluate 가 끊길 수 있음
+  ])
+  if (!/\/orderInfo/.test(page.url())) return { ok: false, msg: `주문서로 이동 실패${lastDialog()}` }
+  await page.waitForTimeout(1000)
+
+  // 3) 수령인·외부주문코드 입력 → 지역 배송비 반영 → 적립금 새로고침 → [전액사용]
+  await page.evaluate(({ rcp, msg, outCode }) => {
+    const fire = (el) => { el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })) }
+    const setVal = (id, v) => { const el = document.getElementById(id); if (el) { el.removeAttribute('readonly'); el.value = v ?? ''; fire(el) } }
+    const same = document.getElementById('selectDeli3'); if (same?.checked) same.checked = false // 주문자(본인) 정보 복사 해제 — onclick 은 부르지 않는다
+    setVal('receiverName', rcp.name); setVal('ZipCode', rcp.zip); setVal('Address', rcp.addr1); setVal('Address2', rcp.addr2)
+    setVal('receiverPhone', rcp.phone); setVal('receiverPhone2', rcp.phone)
+    if (msg) setVal('textMessage', msg)
+    setVal('outcode', outCode); setVal('marketName', '쿠팡')
+    const memo = document.querySelector('textarea[name="SendtextMessage"]'); if (memo) { memo.value = `쿠팡 ${outCode}`; fire(memo) }
+    if (typeof BefarZoneState === 'function' && rcp.zip) BefarZoneState(rcp.zip)
+    if (typeof CashRefresh === 'function') CashRefresh()
+  }, { rcp, msg: r.order?.raw_payload?.parcelPrintMessage || '', outCode })
+  await page.waitForTimeout(2500) // 지역 배송비·적립금 XHR
+  await page.evaluate(() => { if (typeof AllCash === 'function') AllCash() }).catch(() => {})
+  await page.waitForTimeout(500)
+  const readPay = () => page.evaluate(() => {
+    const digits = (v) => { const s = String(v ?? '').replace(/[^0-9]/g, ''); return s ? parseInt(s, 10) : 0 }
+    let arr = null
+    try { arr = JSON.parse(document.querySelector('input[name="arr"]')?.value || 'null') } catch { /* noop */ }
+    const f = document.forms[1]
+    return {
+      balance: typeof Cash === 'number' ? Cash : null,              // 같은 id 의 input 이 있지만 var 선언이 우선
+      goods: typeof totalPrice === 'number' ? totalPrice : null,
+      ship: typeof DeliveryPrice === 'number' ? DeliveryPrice : null,
+      cash: digits(document.getElementById('Cash')?.value),
+      point: digits(document.getElementById('SaveCash')?.value),
+      lines: Array.isArray(arr) ? arr.map((x) => ({ idx: String(x.Idx), qty: Number(x.Value), price: Number(x.Price), opt: Number(x.OptionPrice) || 0 })) : null,
+      filled: !!(f?.receiverName?.value?.trim() && f?.Zipcode?.value?.trim() && f?.Address?.value?.trim() && f?.receiverPhone?.value?.trim() && f?.receiverPhone2?.value?.trim()),
+      outcode: f?.outcode?.value ?? '',
+    }
+  }).catch(() => null)
+  const p = await readPay()
+  if (!p || p.goods == null || p.ship == null) return { ok: false, msg: `주문서 금액 읽기 실패 — 열린 창에서 확인하세요${lastDialog()}` }
+  const orderTotal = p.goods + p.ship
+  const line = p.lines?.length === 1 ? p.lines[0] : null
+  const unit = line ? line.price + line.opt : null
+  const known = r.domeCost > 0 ? Math.round(r.domeCost / qty) : null // 등록 당시 도매가(판매가 산정 근거)
+  const problems = []
+  if (!line || line.idx !== goodsNo) problems.push(`주문서 상품이 #${goodsNo} 한 건이 아님`)
+  else {
+    if (line.qty !== qty) problems.push(`주문서 수량 ${line.qty}개 ≠ 매입 수량 ${qty}개`)
+    if (p.goods !== unit * qty) problems.push(`상품금액 ${p.goods.toLocaleString()}원 ≠ 단가 ${unit.toLocaleString()}원 × ${qty}`)
+    if (known && unit > known) problems.push(`도매가 인상 — 지금 ${unit.toLocaleString()}원 > 등록 기준 ${known.toLocaleString()}원(마진 재확인 필요)`)
+  }
+  if (!p.filled) problems.push('수령인 필수 칸(이름·우편번호·주소·전화 2칸) 중 빈 칸 있음')
+  if (p.outcode !== outCode) problems.push('외부주문코드 입력 실패')
+  const payNote = `상품 ${p.goods.toLocaleString()} + 배송 ${p.ship.toLocaleString()} = ${orderTotal.toLocaleString()}원 · 적립금 사용 ${p.cash.toLocaleString()}원 · 보유 ${p.balance?.toLocaleString() ?? '?'}원`
+  await page.bringToFront().catch(() => {})
+  if (!full) {
+    const warn = [...problems]
+    if (p.cash !== orderTotal) warn.push(p.balance != null && p.balance < orderTotal ? '적립금 부족 — 충전 후 [전액사용]을 다시 누르세요' : '적립금 사용액 ≠ 총 결제금액 — [전액사용]을 다시 누르세요')
+    return { ok: true, msg: `주문서 작성 완료 — 열린 도매아토즈 창에서 수령인과 "적립금 사용 = 총 결제금액"을 확인한 뒤 [결제하기]를 직접 누르세요. ${payNote}${warn.length ? ` ⚠ ${warn.join(' · ')}` : ''}` }
+  }
+
+  // ── 완주(적립금): 주문서 점검 → 금액 가드 → 잔액 → 적립금 = 결제금액 확인 → 결제하기 → 주문 목록에서 주문코드 확인 ──
+  // [결제하기] = 적립금 즉시 차감(실결제). 그래서 모든 점검을 통과하고 적립금이 결제금액을 정확히 덮을 때만 누른다.
+  if (problems.length) return { ok: false, msg: `완주 중단 — ${problems.join(' · ')} (열린 창에서 확인 후 직접 결제하거나 닫으세요)` }
+  const g = guardFail('도매아토즈', orderTotal || null, full.maxPay)
+  if (g) return { ok: false, msg: g }
+  if (p.balance == null) return { ok: false, msg: '적립금 잔액 읽기 실패 — 완주 중단. 열린 창에서 직접 확인하세요' }
+  if (p.balance < orderTotal) return { ok: false, msg: `적립금 부족 — 잔액 ${p.balance.toLocaleString()}원 < 결제금액 ${orderTotal.toLocaleString()}원. 도매아토즈 적립금을 충전한 뒤 다시 결제진행하세요` }
+  if (p.point !== 0 || p.cash !== orderTotal) return { ok: false, msg: `적립금 적용액이 결제금액과 다름 — 완주 중단(${payNote}, 포인트 ${p.point})` }
+  let balanceBefore = null
+  try { balanceBefore = await domeatozCash(site) } catch { /* 결과 판정 때 주문서 값으로 대신 */ }
+  const last = await readPay()
+  if (!last || last.goods + last.ship !== orderTotal || last.cash !== orderTotal) return { ok: false, msg: '결제 직전 재확인에서 금액이 바뀜 — 완주 중단(열린 창에서 확인)' }
+  await page.evaluate(() => document.getElementById('tt')?.click())
+  // 4) 완료 확인 — 주문 목록에 외부주문코드로 올라올 때까지(최대 약 45초)
+  let found = null
+  for (let i = 0; i < 15 && !found; i++) {
+    await page.waitForTimeout(3000)
+    try { found = (await domeatozFindOrders(site, outCode))[0] ?? null } catch { /* 다음 회차 */ }
+  }
+  let balanceAfter = null
+  try { balanceAfter = await domeatozCash(site) } catch { /* noop */ }
+  const before = balanceBefore ?? p.balance
+  const charged = balanceAfter != null ? before - balanceAfter : null
+  if (!found) {
+    // 적립금이 빠졌으면 주문은 들어간 것 — 발주완료로 기록해 같은 주문을 다시 결제하지 않게 한다(주문코드는 사람이 확인)
+    if (charged > 0) return { ok: true, done: true, depositPaid: true, orderNo: null, total: charged, unitCost: unit, depositBalanceAfter: balanceAfter, msg: `도매아토즈 적립금 ${charged.toLocaleString()}원 차감됐으나 주문 목록에서 아직 못 찾음 — 주문배송조회에서 주문코드를 확인해 기록하세요${lastDialog()}` }
+    return { ok: false, msg: `결제하기 후 주문 확인 실패(적립금 차감 없음) — 열린 창에서 상태를 확인하세요${lastDialog()}` }
+  }
+  const paid = (Number(found.IO_TotalPrice) || 0) + (Number(found.IO_DeliveryPrice) || 0)
+  const total = paid || orderTotal
+  const left = balanceAfter ?? before - total
+  const mismatch = paid && paid !== orderTotal ? ` ⚠ 주문 금액 ${paid.toLocaleString()}원 ≠ 주문서 ${orderTotal.toLocaleString()}원` : charged != null && charged !== total ? ` ⚠ 적립금 차감 ${charged.toLocaleString()}원 ≠ 주문 금액 ${total.toLocaleString()}원` : ''
+  return {
+    ok: true, done: true, depositPaid: true, orderNo: found.IO_OrderNumber ?? null, total, unitCost: unit, depositBalanceAfter: left,
+    msg: `도매아토즈 적립금 결제 완료 — 주문코드 ${found.IO_OrderNumber ?? '(확인필요)'} · ${total.toLocaleString()}원 차감 · 적립금 잔액 ${left.toLocaleString()}원${mismatch}`,
+  }
+}
+
 // ── 결제진행 실행(공용) — /run 핸들러와 원격 큐 폴러가 같이 쓴다 ──
 // fullMode=true: 무통장 완주 + 입금대기·주문번호·매입가 DB 기록. false: 직전 정지.
 // 수량은 매입 수량(purchaseQty = 주문 수량 × 묶음 수) — 쿠팡 주문 수량(shipping_count)을 그대로 쓰면 묶음 옵션이 덜 사진다
@@ -1007,6 +1169,7 @@ const RUN_FLOWS = {
   kwholesale: (r, full) => runFlowKwholesale(r.goodsNo, buyQty(r), r.recipient, r.detailUrl, full),
   cmtstory: (r, full) => runFlowGgsan(r.goodsNo, buyQty(r), r.recipient, full, CMTSTORY, r.godomallExpect),   // 건강산 무통장 흐름 재사용(호스트·계정만 다름)
   campingmoon: (r, full) => runFlowCafe24Cash(CAMPINGMOON_SITE, r.goodsNo, buyQty(r), r.recipient, r.detailUrl, full, { itemCode: r.itemCode, expectTotals: r.expectTotals }), // 옵션 select + 35% 할인 기대금액 가드
+  domeatoz: (r, full) => runFlowDomeatoz(r, full), // 적립금 결제 — 외부주문코드(쿠팡 주문번호)로 중복 방지·완료 확인
 }
 async function execPurchase(orderKey, fullMode) {
   const r = await resolveOrder(orderKey)
@@ -1040,16 +1203,25 @@ async function execPurchase(orderKey, fullMode) {
     const now = new Date().toISOString()
     const upd = { purchase_status: out.depositPaid ? 'ORDERED' : 'AWAITING_DEPOSIT', purchase_ordered_at: now, updated_at: now }
     // 기존 메모(주문별 매입처 변경 기록 등)는 보존하고 뒤에 붙인다 (r.order = resolveOrder의 select * 행)
-    if (out.depositPaid) upd.purchase_note = [r.order.purchase_note, `[예치금] ${out.total?.toLocaleString() ?? '?'}원 결제완료 · 잔액 약 ${out.depositBalanceAfter?.toLocaleString() ?? '?'}원`].filter(Boolean).join(' / ')
+    if (out.depositPaid) upd.purchase_note = [r.order.purchase_note, `[${depositLabel(r.source)}] ${out.total?.toLocaleString() ?? '?'}원 결제완료 · 잔액 약 ${out.depositBalanceAfter?.toLocaleString() ?? '?'}원`].filter(Boolean).join(' / ')
     if (out.total > 0) upd.purchase_total_cost = out.total
     // purchase_unit_cost를 안 채우면 어드민 PurchaseCostCell이 "운송비 = 합계 - 상품가×수량"으로 역산하면서
     // 상품가가 0 → 총 결제금액 전체가 운송비 칸에 들어가 보이는 문제가 있었다(2026-09-02 사용자 리포트,
     // ggsan/upickb2b/bio77 공통 — execPurchase가 이 셋을 전부 거치므로 여기 한 곳만 고치면 됨).
     // r.domeCost는 resolveOrder(쿠팡)에서만 listings.dome_price_krw × 수량으로 채워짐(네이버/토스는 스키마상 미보유).
-    if (r.domeCost > 0) {
+    if (out.unitCost > 0) {
+      // 흐름이 주문서에서 실제 단가를 읽어 온 경우(도매아토즈) — 등록 당시 도매가(domeCost)보다 정확하다
+      upd.purchase_unit_cost = Math.round(out.unitCost * buyQty(r) / (r.order.shipping_count || 1))
+    } else if (r.domeCost > 0) {
       // 단가는 "쿠팡 주문 1개(묶음이면 묶음 1세트)" 기준 — PurchaseCostCell 이 단가 × 주문 수량으로 상품가를 계산한다
       const qty = r.order.shipping_count || 1
       upd.purchase_unit_cost = Math.round(r.domeCost / qty)
+    } else if (out.total > 0 && r.godomallExpect?.totals?.length) {
+      // 주문별 매입처 오버라이드(리스팅 미조회)·네이버 주문은 domeCost 가 없다 → 완주 가드가 맞춘 기대 총액 후보의 공급가(매입처 상품표)로 채운다.
+      // 일치 후보가 없으면(도서산간 추가배송비로 통과) 대표 후보. (2026-10-18 엔쵸비 오버라이드 주문이 합계 26,000원만 남고 상품가·운송비 칸이 비던 것)
+      const ex = r.godomallExpect.totals
+      const hit = ex.find((e) => Math.abs(e.total - out.total) <= 10) ?? ex[0]
+      upd.purchase_unit_cost = Math.round(hit.unit * buyQty(r) / (r.order.shipping_count || 1))
     }
     // 무통장 완주(건강산·화장품스토리·K홀세일) — 주문서에서 고른 입금계좌를 메모에 남겨 행에서 바로 어디로 얼마를 보낼지 보이게(사용자 요청 2026-10-09)
     if (!out.depositPaid && out.bankAccount?.account) {
@@ -1196,10 +1368,10 @@ http.createServer(async (req, res) => {
         <tr><td style="padding:6px 8px;color:#666">수령인</td><td style="padding:6px 8px"><b>${esc(r.recipient.name)}</b> · ${esc(r.recipient.zip)}<br>${esc(r.recipient.addr1)} ${esc(r.recipient.addr2)}<br>${esc(r.recipient.phone)}</td></tr>
         </tbody></table>
         ${DEPOSIT_PAY_SOURCES.has(r.source)
-          ? `<p style="background:#fee2e2;color:#991b1b;padding:10px 12px;border-radius:8px">⚠ ${esc(r.sourceLabel)}는 <b>예치금으로만 결제</b>됩니다. <b>완주</b>는 예치금을 전액 적용해 결제금액이 <b>0원일 때만</b> [결제하기]를 누르며, 이때 <b>예치금이 즉시 차감</b>됩니다(잔액이 모자라면 누르지 않고 중단). 완료되면 주문상태를 <b>발주완료</b>로 기록하고 쿠팡 발주확인(상품준비중)까지 자동 등록합니다.</p>`
+          ? `<p style="background:#fee2e2;color:#991b1b;padding:10px 12px;border-radius:8px">⚠ ${esc(r.sourceLabel)}는 <b>${depositLabel(r.source)}으로 결제</b>합니다. <b>완주</b>는 ${depositLabel(r.source)}이 결제금액 전부를 덮을 때만 [결제하기]를 누르며, 이때 <b>${depositLabel(r.source)}이 즉시 차감</b>됩니다(잔액이 모자라면 누르지 않고 중단). 완료되면 주문상태를 <b>발주완료</b>로 기록하고 쿠팡 발주확인(상품준비중)까지 자동 등록합니다.</p>`
           : `<p style="background:#fef3c7;color:#92400e;padding:10px 12px;border-radius:8px">⚠ 두 방식 모두 <b>출금은 없습니다</b>(무통장입금). <b>완주</b>는 동의·결제하기까지 자동 진행해 주문을 생성하고 주문상태를 <b>💰입금대기</b>로 기록합니다 — 입금(이체)은 직접 하신 뒤 관리자에서 [입금완료]로 바꾸세요.</p>`}
         <p style="display:flex;gap:10px;flex-wrap:wrap">
-        <a href="/run?id=${esc(u.searchParams.get('id'))}&mode=full" style="display:inline-block;background:#059669;color:#fff;padding:12px 24px;border-radius:8px;text-decoration:none;font-weight:600">${DEPOSIT_PAY_SOURCES.has(r.source) ? '💳 결제 완주 (예치금 결제 + 발주완료 기록)' : '💳 결제 완주 (무통장 주문완료 + 입금대기 기록)'}</a>
+        <a href="/run?id=${esc(u.searchParams.get('id'))}&mode=full" style="display:inline-block;background:#059669;color:#fff;padding:12px 24px;border-radius:8px;text-decoration:none;font-weight:600">${DEPOSIT_PAY_SOURCES.has(r.source) ? `💳 결제 완주 (${depositLabel(r.source)} 결제 + 발주완료 기록)` : '💳 결제 완주 (무통장 주문완료 + 입금대기 기록)'}</a>
         <a href="/run?id=${esc(u.searchParams.get('id'))}" style="display:inline-block;background:#2563eb;color:#fff;padding:12px 24px;border-radius:8px;text-decoration:none;font-weight:600">결제 직전까지만 (직접 결제)</a></p>`)
       return
     }
@@ -1207,7 +1379,7 @@ http.createServer(async (req, res) => {
       const out = await execPurchase(u.searchParams.get('id'), u.searchParams.get('mode') === 'full')
       htmlPage(res, out.ok
         ? (out.done && out.depositPaid
-          ? `<h2>✓ ${esc(out.msg)}</h2><p style="background:#d1fae5;color:#065f46;padding:10px 12px;border-radius:8px">예치금으로 결제가 끝났습니다 — 입금(이체)할 것 없음. 관리자 주문상태가 <b>발주완료</b>로 기록됐고 쿠팡 발주확인이 곧 처리됩니다.</p>`
+          ? `<h2>✓ ${esc(out.msg)}</h2><p style="background:#d1fae5;color:#065f46;padding:10px 12px;border-radius:8px">${depositLabel(out.sourceKey)}으로 결제가 끝났습니다 — 입금(이체)할 것 없음. 관리자 주문상태가 <b>발주완료</b>로 기록됐고 쿠팡 발주확인이 곧 처리됩니다.</p>`
           : out.done
           ? `<h2>✓ ${esc(out.msg)}</h2><p style="background:#fef3c7;color:#92400e;padding:10px 12px;border-radius:8px">💰 관리자 주문상태가 <b>입금대기</b>로 기록됐습니다. <b>${esc(DEPOSIT_BANK_LABEL[out.sourceKey] ?? '매입처')} 계좌로 이체</b>한 뒤 관리자에서 <b>[입금완료]</b>를 눌러주세요.</p>${out.bankAccount?.account
             ? `<div style="margin:12px 0;padding:14px 16px;border:2px solid #f59e0b;border-radius:10px;background:#fffbeb"><div style="font-size:13px;color:#92400e;margin-bottom:6px">입금 계좌 (주문서에서 선택된 계좌 · 주문관리 메모에도 기록됨)</div><div style="font-size:22px;font-weight:700;letter-spacing:.5px">${esc(out.bankAccount.bank ?? '')} ${esc(out.bankAccount.account)}</div><div style="font-size:14px;margin-top:4px">예금주 <b>${esc(out.bankAccount.holder ?? '-')}</b> · 입금액 <b>${esc(out.total?.toLocaleString() ?? '?')}원</b> · 입금자명 <b>${esc(BIZ_INFO.ceo)}</b></div></div>`
