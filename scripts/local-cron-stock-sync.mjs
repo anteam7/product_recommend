@@ -123,8 +123,20 @@ const resumeCoupangSale = (spid) => DRY ? { status: 200 } : setVendorSale(spid, 
  * 등록된 캠핑문 리스팅(jimscanner_listing_items)만 로그인 세션으로 상세를 읽어 옵션(vendorItem / 토스 stock) 단위로 정지·재개한다.
  * 상품 전체 품절·재입고는 위 메인 루프(목록 아이콘)가 처리하므로 여기선 옵션만 본다. 토스는 remainingCount 0/99 로 품절·재개(토스 전용 숨김 API 와 별개).
  */
+// PostgREST 는 한 번에 최대 1,000행만 준다 — 대상이 그보다 많으면 뒤쪽이 조용히 잘린다.
+// 2026-10-27 발견: 활성 리스팅 1,380 중 401건(최근 등록분 — 캠핑문·도매아토즈 등)·캠핑문 옵션 1,115 중 115건이 매 회차 재고 점검 밖이었다.
+async function selectAll(build) {
+  const out = []
+  for (let from = 0; ; from += 1000) {
+    const { data, error } = await build().order('id').range(from, from + 999)
+    if (error) return { data: null, error }
+    out.push(...data)
+    if (data.length < 1000) return { data: out, error: null }
+  }
+}
+
 async function campingmoonOptionStage(session, conf) {
-  const { data: lis, error } = await sb.from('jimscanner_listing_items').select('*').eq('source', 'campingmoon').in('market', ['coupang', 'toss']).neq('status', 'REMOVED')
+  const { data: lis, error } = await selectAll(() => sb.from('jimscanner_listing_items').select('*').eq('source', 'campingmoon').in('market', ['coupang', 'toss']).neq('status', 'REMOVED'))
   if (error) throw new Error(error.message)
   if (!lis?.length) return
   const byGoods = new Map()
@@ -318,7 +330,9 @@ try {
   // STOPPED 도 포함해야 재입고를 감지할 수 있다. 예전에는 APPROVED/SELLING 만 봐서
   // 한 번 품절로 중지되면 영영 다시 조회되지 않았다(resumed 가 항상 0이었던 이유, 2026-09-19 발견).
   // 단 사람이 내린 건(auto_paused=false 인 STOPPED — 중복 등록 정리 등)은 건드리지 않는다.
-  const { data: listings } = await sb.from('jimscanner_coupang_listings').select('id, seller_product_id, source, source_goods_no, stock_status, auto_paused, status').in('status', ['APPROVED', 'SELLING', 'STOPPED'])
+  const { data: listings, error: lsErr } = await selectAll(() => sb.from('jimscanner_coupang_listings').select('id, seller_product_id, source, source_goods_no, stock_status, auto_paused, status').in('status', ['APPROVED', 'SELLING', 'STOPPED']))
+  // 조회 실패를 "활성 상품 없음"으로 끝내면 품절 감지가 조용히 멈춘다 → 오류로 기록
+  if (lsErr) throw new Error(`활성 리스팅 조회 실패: ${lsErr.message}`)
   const rows = (listings ?? []).filter((r) => r.status !== 'STOPPED' || r.auto_paused)
   if (rows.length === 0) {
     await sb.from('jimscanner_coupang_stock_sync_runs').update({ finished_at: new Date().toISOString(), total_checked: 0, status: 'success', duration_ms: Date.now() - startedAt }).eq('id', runId)
