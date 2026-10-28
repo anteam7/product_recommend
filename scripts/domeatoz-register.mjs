@@ -21,7 +21,7 @@ import { fileURLToPath } from 'node:url'
 import path from 'node:path'
 import { createClient } from '@supabase/supabase-js'
 import { decide, COUPANG_FEE } from './lib/domeatoz-price.mjs'
-import { purchaseSpecOf } from './lib/domeatoz-spec.mjs'
+import { purchaseSpecOf, specOf } from './lib/domeatoz-spec.mjs'
 import { buildPurchaseOptions } from './lib/coupang-purchase-options.mjs'
 import { fillSearchTags } from './lib/search-tags.mjs'
 
@@ -78,7 +78,7 @@ const cleanTitle = (row) => String(row.name_clean || row.name_raw || '').replace
 // ── 고시: 식품 고시만(가공식품 우선). 건강기능식품 고시는 MFDS 인증 정보를 요구해 쓰지 않는다(wellroot-register.mjs 실측) ──
 const FOOD_NOTICES = ['가공식품', '축산물', '농수산물', '농산물', '수산물']
 const pickNoticeCategory = (ncs) => { for (const n of FOOD_NOTICES) { const f = (ncs ?? []).find((x) => x.noticeCategoryName === n); if (f) return f } return null }
-const specText = (spec) => (spec ? `${spec.weightG != null ? `${spec.weightG}g` : `${spec.volumeMl}ml`}${spec.mode === 'piece' ? ` x ${spec.pieces}개` : ''}` : null)
+const specText = (spec) => (!spec ? null : spec.mode === 'count' ? `${spec.pieces}개` : `${spec.weightG != null ? `${spec.weightG}g` : `${spec.volumeMl}ml`}${spec.mode === 'piece' ? ` x ${spec.pieces}개` : ''}`)
 function fillNotice(dn, title, row, spec) {
   const imported = row.overseas === 'Y' || /^대상$|수입/.test(String(row.notice?.['수입품'] ?? '').replace(/대상아님/, ''))
   const maker = row.maker && row.maker !== '기타' ? row.maker : null
@@ -116,6 +116,27 @@ async function ensureImageSpec(url, key) {
 const BRAND_REQUIRED = /브랜드 정보가 필요|Brand ID와 Brand Name/
 const normBrand = (s) => (s || '').replace(/\s+/g, '').toLowerCase()
 const firstToken = (name) => (name || '').trim().split(/\s+/)[0] || ''
+/**
+ * 쿠팡 같은 상품 표기의 낱개 중량·용량 — 시세 조회가 남긴 규격 일치 상위 3건(market_top3 m:true) 중 같은 브랜드·같은 개수인 제목.
+ * 서로 ±5% 안에서 맞는 값이 2건 이상일 때만 그 값(가장 많이 맞는 값, 동률이면 작은 값) — 판매자 오기("54.907kg")는 혼자라 빠진다.
+ * 예 "남양 프렌치카페 카페믹스 50T, 1개, 50개입, 11g" · "… 11.1g" · "… 54.907kg" → 11g
+ */
+function unitMeasureFromMarket(row, pieces) {
+  const brand = normBrand(firstToken(row.name_clean))
+  const vals = (row.market_top3 || [])
+    .filter((t) => t.m && brand && normBrand(t.title).includes(brand))
+    .map((t) => specOf(t.title))
+    .filter((s) => !s.set && s.vol && s.count === pieces)
+    .map((s) => s.vol)
+  if (vals.length < 2 || new Set(vals.map((x) => x.u)).size > 1) return null
+  const nums = vals.map((x) => x.v)
+  const near = (v) => nums.filter((w) => w >= v * 0.95 && w <= v * 1.05).length
+  const ranked = nums.map((v) => [v, near(v)]).sort((a, b) => b[1] - a[1] || a[0] - b[0])
+  const [v, n] = ranked[0]
+  // 다른 중량 묶음이 같은 건수로 맞서면(11g 2건 vs 22g 2건) 어느 쪽인지 모르므로 보류
+  if (ranked.some(([w, m]) => m === n && (w < v * 0.95 || w > v * 1.05))) return null
+  return n >= 2 ? { v, u: vals[0].u } : null
+}
 const brandCache = new Map()
 async function resolveBrand(name) {
   const key = firstToken(name)
@@ -135,9 +156,16 @@ async function buildPayload(row, meta, cat, d) {
   const title = cleanTitle(row)
   const nc = pickNoticeCategory(meta.noticeCategories)
   if (!nc) throw new Error(`식품 고시 없는 카테고리(${(meta.noticeCategories ?? []).map((n) => n.noticeCategoryName).join(',') || '고시없음'})`)
-  const spec = purchaseSpecOf(title)
-  if (!spec) throw new Error('구매옵션 — 상품명에 용량(g·ml) 없음')
-  const opt = buildPurchaseOptions(meta.attributes ?? [], spec, 1)
+  let spec = purchaseSpecOf(title)
+  if (!spec) throw new Error('구매옵션 — 상품명에 용량(g·ml)·개수 없음')
+  let opt = buildPurchaseOptions(meta.attributes ?? [], spec, 1)
+  // 개수만 있는 이름("카페믹스 50T")인데 중량·용량 필수 카테고리 → 쿠팡 같은 상품 표기의 낱개 중량을 따른다(사장님 2026-10-28)
+  if (opt.error && spec.mode === 'count') {
+    const u = unitMeasureFromMarket(row, spec.pieces)
+    if (!u) throw new Error(`구매옵션 — ${opt.error} · 같은 브랜드 쿠팡 표기 중량 없음`)
+    spec = { mode: 'piece', weightG: u.u === 'g' ? u.v : null, volumeMl: u.u === 'ml' ? u.v : null, pieces: spec.pieces, perPack: spec.pieces, packs: 1 }
+    opt = buildPurchaseOptions(meta.attributes ?? [], spec, 1)
+  }
   if (opt.error) throw new Error(`구매옵션 — ${opt.error}`)
   const notices = buildNotices(nc, title, row, spec)
   const imgs = Array.isArray(row.images) ? row.images.filter(Boolean) : []

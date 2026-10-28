@@ -88,6 +88,28 @@ export function buildPurchaseOptions(categoryAttrs, spec, qty = 1, { sendEmpty =
   const qtyAttrs = attrs.filter(a => a.attributeTypeName === '수량' || a.attributeTypeName === '총 수량')
   const qtyName = (qtyAttrs.find(a => a.required === 'MANDATORY') ?? qtyAttrs.find(a => a.attributeTypeName === '수량') ?? qtyAttrs[0])?.attributeTypeName ?? '수량'
 
+  // count = 낱개 중량·용량을 모르는 개수만의 규격("카페믹스 50T" → 수량 50개). parseSpec 은 만들지 않고 호출부(도매아토즈)가 넘긴다.
+  // 중량·용량·정 수가 필수인 카테고리면 지어내지 않고 보류, 개당 수량(N개입) 3단 구조면 "50개입, 1개"
+  if (spec.mode === 'count') {
+    const pieces = Math.round(spec.pieces ?? 0)
+    if (!(pieces > 1)) return { error: `개수 규격 불명(${spec.pieces})` }
+    const need = [weightAttr, volumeAttr, tabAttr].find(a => a?.required === 'MANDATORY')
+    if (need) return { error: `개수만 있는 이름인데 ${need.attributeTypeName} 필수` }
+    const qtyAttr = attrs.find(a => a.attributeTypeName === qtyName)
+    const perPackValue = perPackAttr ? `${pieces}${pickUnit(perPackAttr.usableUnits, ['개입', '입', '개']) || '개입'}` : null
+    const qtyValue = `${perPackAttr ? qty : pieces * qty}${pickUnit(qtyAttr?.usableUnits, ['개', '박스', '세트', '팩']) || '개'}`
+    const out = []
+    for (const a of attrs) {
+      const name = a.attributeTypeName
+      if (a === perPackAttr) { out.push({ attributeTypeName: name, attributeValueName: perPackValue, exposed: 'EXPOSED' }); continue }
+      if (name === qtyName || (name === '총 수량' && alsoTotalQty)) { out.push({ attributeTypeName: name, attributeValueName: qtyValue, exposed: 'EXPOSED' }); continue }
+      if (name === '수량' || name === '총 수량') continue
+      if (a.required === 'MANDATORY') return { error: `처리 못 하는 필수 구매옵션: ${name}` }
+      if (sendEmpty) out.push({ attributeTypeName: name, attributeValueName: '', exposed: 'NONE' })
+    }
+    return { attributes: out, itemName: [perPackValue, qtyValue].filter(Boolean).join(' ') }
+  }
+
   // "900mg"처럼 한 알 무게만 있는 이름을 용기 중량으로 오인하지 않는다
   if (spec.mode === 'single' && spec.volumeMl == null && spec.weightG != null && spec.weightG < 5) return { error: `용기 규격 불명(한 알 무게 ${num(spec.weightG)}g만 있음)` }
 

@@ -1,14 +1,14 @@
 #!/usr/bin/env node
 /**
  * 도매아토즈 상품의 쿠팡 시세(규격 일치) 조회 + 가격 판정 리포트 — docs/plan-domeatoz.md §2·P1
- *   node scripts/domeatoz-market.mjs [--limit=N] [--only=idx,…] [--recheck] [--dry] [--backend=aside|cdp|chrome] [--gap=60000(하한)] [--cooldown=20] [--max-cooldowns=12]
+ *   node scripts/domeatoz-market.mjs [--limit=N] [--only=idx,…] [--recheck] [--dry] [--backend=aside|cdp|chrome] [--gap=180000(하한)] [--cooldown=20] [--max-cooldowns=12]
  *   결과: jimscanner_domeatoz_products.market_* + _workspace/domeatoz-select-<KST날짜>.md (DB 전체 기준으로 매번 다시 씀)
  *
  * 매칭(식품 규격): ① 상품명 핵심 단어(브랜드 제외) 2/3 이상이 쿠팡 제목에 포함 ② 규격 일치 —
  *   총량 = 첫 용량(ml·g, L·kg 환산) × 그 뒤 수량들의 곱(괄호 안 내역은 제외: "10g x 45T (15개입x3개)" = 450g).
  *   양쪽 다 용량이 있으면 총량 ±2%, 아니면 총 수량이 같아야 일치. 세트("+", "각N개")는 규격 비교 불가 → 검색 안 함(NO_MATCH).
  * 판정: lib/domeatoz-price.mjs decide() — 기준 시세 = 일치가 하위 25%(3건 이상) 또는 최저가, OK | STRUCTURAL | NO_MATCH.
- * 쿠팡 검색은 Aside CLI 로 1분에 1회 이하(60~68초 간격·재시도도 60초 뒤), 묶음 수 변형(… x 2개 / x 4개)은 끝 수량을 뗀 이름으로 한 번만 검색해 공유한다.
+ * 쿠팡 검색은 Aside CLI 로 3분에 1회 이하(180~188초 간격·재시도도 180초 뒤), 묶음 수 변형(… x 2개 / x 4개)은 끝 수량을 뗀 이름으로 한 번만 검색해 공유한다.
  * 연속 실패 3회 = 차단으로 보고 세션을 닫고 --cooldown 분 쉰 뒤 실패한 첫 상품부터 재개(최대 --max-cooldowns 회, 넘으면 중단 — 남은 건은 다음 실행에서 미조회로 다시 잡힘).
  */
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs'
@@ -29,7 +29,7 @@ const has = (k) => process.argv.includes(`--${k}`)
 const intArg = (k, d) => { const v = arg(k); if (v == null) return d; if (!/^\d+$/.test(v)) { console.error(`--${k} 는 0 이상 정수: ${v}`); process.exit(64) } return +v }
 const DRY = has('dry'), RECHECK = has('recheck')
 const LIMIT = intArg('limit', 0)
-const GAP = Math.max(60000, intArg('gap', 60000)) // 검색 1분에 1회 이하(사장님 지시 2026-10-26)
+const GAP = Math.max(180000, intArg('gap', 180000)) // 검색 3분에 1회 이하(사장님 지시 2026-10-26 1분 → 2026-10-28 3분)
 const ONLY = new Set(arg('only', '').split(',').map((s) => s.trim()).filter(Boolean))
 const KST = new Date(Date.now() + 9 * 3600e3).toISOString().slice(0, 10).replace(/-/g, '')
 const WS = path.join(ROOT, '_workspace'); mkdirSync(WS, { recursive: true })

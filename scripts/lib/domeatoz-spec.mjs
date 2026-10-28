@@ -47,11 +47,13 @@ export const queryOf = (name) => String(name).replace(/\([^)]*\)|\[[^\]]*\]/g, '
 /**
  * 쿠팡 구매옵션용 규격 — lib/coupang-purchase-options.mjs buildPurchaseOptions 의 spec 형식으로.
  * 쿠팡 식품 norm "142g, 5개" = 개당 중량(첫 용량) + 수량(뒤 수량들의 곱). 공용 parseSpec 은 '개'를 수량으로 안 읽어
- * "초코하임 142g 5개"를 "142g, 1개"로 만든다 → 도매아토즈는 specOf 로 읽는다. 용량이 없거나 세트면 null(등록 보류).
+ * "초코하임 142g 5개"를 "142g, 1개"로 만든다 → 도매아토즈는 specOf 로 읽는다. 세트거나 용량·수량 둘 다 없으면 null(등록 보류).
+ * 용량 없이 개수만 있는 이름("카페믹스 50T" 스틱·티백)은 수량만 — "50개"(사장님 2026-10-28 "T 옵션은 수량 50개처럼 개수로").
  */
 export function purchaseSpecOf(name) {
   const s = specOf(name)
-  if (s.set || !s.vol) return null
+  if (s.set) return null
+  if (!s.vol) return s.count > 1 ? { mode: 'count', weightG: null, volumeMl: null, pieces: s.count } : null
   const weightG = s.vol.u === 'g' ? s.vol.v : null, volumeMl = s.vol.u === 'ml' ? s.vol.v : null
   return s.count > 1
     ? { mode: 'piece', weightG, volumeMl, pieces: s.count, perPack: s.count, packs: 1 }
