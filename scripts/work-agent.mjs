@@ -8,12 +8,13 @@
  * 실행(PC 상주): node --env-file=.env.local scripts/work-agent.mjs
  * 보안: 구독 사용 위해 ANTHROPIC_API_KEY 제거. cwd=레포 루트. bypassPermissions 라 에스컬레이션 규칙이 안전장치.
  */
-import { spawn } from 'node:child_process'
+import { spawn } from '../../agent-fallback/child-process.mjs'
 import readline from 'node:readline'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
 import { createClient } from '@supabase/supabase-js'
+import { makeBeater } from './lib/heartbeat.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const REPO = path.join(__dirname, '..')
@@ -22,10 +23,18 @@ const env = Object.fromEntries(
     .map((l) => { const i = l.indexOf('='); let v = l.slice(i + 1).trim(); if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) v = v.slice(1, -1); return [l.slice(0, i).trim(), v] }),
 )
 const sb = createClient(env.NEXT_PUBLIC_SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY)
+const beat = makeBeater(sb, 'work-agent') // 오케스트레이터 process_alive 감시용 (≤60초 1회)
+// runJob이 최대 30분 블로킹하므로 루프 선두 beat만으로는 긴 작업 중 "사망" 오탐 → 루프와 독립된 주기 신호
+setInterval(() => { beat().catch(() => {}) }, 30_000).unref()
 const POLL_MS = Number(env.WORK_AGENT_POLL_MS || 5000)
 const TURN_TIMEOUT_MS = Number(env.WORK_AGENT_TIMEOUT_MS || 30 * 60 * 1000) // 한 턴 최대 30분
 // 전역 ~/.claude/settings.json 의 model(fable) 대신 opus 고정. .env.local 로 override 가능.
 const CLI_MODEL = env.WORK_AGENT_MODEL || 'opus'
+// 전역 effortLevel(xhigh) 대신 실행기 전용 effort. .env.local 로 override 가능.
+const CLI_EFFORT = env.WORK_AGENT_EFFORT || 'medium'
+// 실행기 전용 설정: 전역·플러그인 훅(편집 리뷰·SessionStart) 끄기 + 자동 압축 기준 200K.
+// `--settings=<path>` 한 토큰으로 넘긴다(claude-fallback.cjs 파서가 값을 프롬프트로 오인하지 않게).
+const CLI_SETTINGS = path.join(__dirname, 'work-agent.settings.json')
 
 // 자율 + 위험·결정만 에스컬레이션. claude --append-system-prompt 로 매 호출에 적용.
 const RULES = [
@@ -63,7 +72,7 @@ function runClaude(prompt, resumeSession, onProgress) {
     const childEnv = { ...process.env }
     delete childEnv.ANTHROPIC_API_KEY; delete childEnv.ANTHROPIC_AUTH_TOKEN; delete childEnv.ANTHROPIC_BASE_URL
     // RULES는 stdin 프롬프트에 포함(멀티라인 인자를 win32 shell에 넘기면 깨짐). args는 단순 플래그만.
-    const args = ['-p', '--output-format', 'stream-json', '--verbose', '--permission-mode', 'bypassPermissions', '--model', CLI_MODEL]
+    const args = ['-p', '--output-format', 'stream-json', '--verbose', '--permission-mode', 'bypassPermissions', '--model', CLI_MODEL, '--effort', CLI_EFFORT, `--settings=${CLI_SETTINGS}`]
     if (resumeSession) args.unshift('--resume', resumeSession)
     const child = spawn('claude', args, { cwd: REPO, env: childEnv, shell: process.platform === 'win32' })
     let sessionId = resumeSession || null, finalText = '', lastText = '', stderr = ''
@@ -119,8 +128,8 @@ async function runJob(job) {
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
-console.log(`work-agent 가동: 큐 폴링 ${POLL_MS}ms · cwd=${REPO}`)
+console.log(`work-agent 가동: 큐 폴링 ${POLL_MS}ms · 모델 ${CLI_MODEL} · effort ${CLI_EFFORT} · cwd=${REPO}`)
 for (;;) {
-  try { const job = await claimNext(); if (job) { console.log(`[${new Date().toISOString()}] 작업 ${job.id} (${job.prevStatus})`); await runJob(job) } else await sleep(POLL_MS) }
+  try { await beat(); const job = await claimNext(); if (job) { console.log(`[${new Date().toISOString()}] 작업 ${job.id} (${job.prevStatus})`); await runJob(job) } else await sleep(POLL_MS) }
   catch (e) { console.error('루프 오류:', e instanceof Error ? e.message : e); await sleep(POLL_MS) }
 }
