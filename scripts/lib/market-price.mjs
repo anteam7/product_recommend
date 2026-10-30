@@ -88,6 +88,16 @@ function _extractCoupangPrices() {
   })
   return out
 }
+// 결과 0건이 '진짜 없음'인지 '차단/빈 페이지'인지 구분하는 진단(페이지 안에서 실행). noResultMsg = 쿠팡의 "검색결과가 없" 안내 문구 존재.
+function _diagCoupang() {
+  const body = (document.body && document.body.innerText) || ''
+  return { noResultMsg: /검색\s*결과가?\s*없|일치하는\s*상품이\s*없|에\s*대한\s*검색결과/.test(body) && !document.querySelector('a[href*="/vp/products/"]'), bodyLen: body.length, title: document.title }
+}
+/** 0건인데 진짜 없음 안내도 없으면 차단 의심(emptyReason='suspect'), 안내가 있으면 'confirmed-empty'. 결과가 있으면 필드 없음. */
+function _withEmptyReason(res, diag) {
+  if (res.items.length === 0) res.emptyReason = diag && diag.noResultMsg ? 'confirmed-empty' : 'suspect'
+  return res
+}
 function _coupangResult(got) {
   const prices = got.map((g) => g.price).filter((n) => n > 0).sort((a, b) => a - b)
   const lo = Math.floor(prices.length * 0.1), hi = Math.ceil(prices.length * 0.9)
@@ -131,7 +141,7 @@ function _makePageSearch(page, timeoutMs) {
         await doSearchOnce(kw)
         if (/Access Denied/i.test(await page.title())) return null
       }
-      const out = _coupangResult(await page.evaluate(_extractCoupangPrices))
+      const out = _withEmptyReason(_coupangResult(await page.evaluate(_extractCoupangPrices)), await page.evaluate(_diagCoupang).catch(() => null))
       if (scroll) await humanScroll()
       return out
     } catch { return null }
@@ -248,7 +258,8 @@ function _asideSearchCode(kw) {
   }
   const extract = ${_extractCoupangPrices.toString()};
   const got = await page.evaluate(extract);
-  console.log(${JSON.stringify(ASIDE_MARK)} + JSON.stringify({ blocked: false, url: page.url(), got }));
+  const diag = await page.evaluate(${_diagCoupang.toString()}).catch(() => null);
+  console.log(${JSON.stringify(ASIDE_MARK)} + JSON.stringify({ blocked: false, url: page.url(), got, diag }));
 })()`
 }
 /**
@@ -267,7 +278,7 @@ export async function openCoupangSessionViaAside({ timeoutMs = 125000, quiet = f
     try {
       const r = await asideRepl(_asideSearchCode(kw), { timeoutMs })
       if (!r || r.blocked) return null
-      return _coupangResult(Array.isArray(r.got) ? r.got : [])
+      return _withEmptyReason(_coupangResult(Array.isArray(r.got) ? r.got : []), r.diag)
     } catch { return null }
   }
   async function close() { /* 사용자 브라우저 탭은 그대로 둔다 */ }

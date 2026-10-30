@@ -73,7 +73,8 @@ try {
         let r = null
         for (let t = 1; t <= 2 && !r; t++) { r = await session.search(q); if (!r && t === 1) await sleep(GAP) } // 재시도도 검색 간격을 지킨다
         searched = true; searches++
-        if (!r) failed = true
+        // 0건은 '진짜 없음' 안내가 확인된 때만 정상. 그 외(차단·권한없음·결과 DOM 없음)는 조회 실패 — NO_MATCH/market_checked_at 저장 금지(2026-10-30)
+        if (!r || ((r.items || []).length === 0 && r.emptyReason !== 'confirmed-empty')) failed = true
         else { raw = r.items || []; cache.set(q, raw) }
       }
       matched = raw.filter((it) => it.price > 0 && titleMatches(p.name_clean, spec, it.title))
@@ -81,12 +82,12 @@ try {
     if (failed) {
       if (failStreak++ === 0) failStart = ti // 이번 연속 실패의 첫 상품 — 휴식 뒤 여기부터 다시
       failTotal++
-      console.log(`  ⚠ ${p.idx} 검색 실패/차단: ${q}`)
+      console.log(`  ⚠ ${p.idx} 검색 실패/차단 의심(0건·빈 페이지 포함, 저장 안 함): ${q}`)
       if (failStreak >= 3) {
         // 차단: 세션을 닫고 쉬었다가 같은 상품부터 다시. 쉬는 횟수 상한이면 중단(남은 건은 다음 실행에서 미조회로 다시 잡힘)
         await session.close().catch(() => {}); session = null
         if (++cooldowns > MAX_COOLDOWNS) { console.log(`  ⚠ 차단 휴식 ${MAX_COOLDOWNS}회 초과 — 중단`); break }
-        console.log(`  ⏸ 연속 실패 ${failStreak}회 — ${COOLDOWN_MIN}분 휴식(${cooldowns}/${MAX_COOLDOWNS}, 지금까지 검색 ${searches}회)`)
+        console.log(`  ⏸ 차단 의심: 연속 실패 ${failStreak}회 — ${COOLDOWN_MIN}분 휴식(${cooldowns}/${MAX_COOLDOWNS}, 지금까지 검색 ${searches}회)`)
         await sleep(COOLDOWN_MIN * 60e3)
         failStreak = 0
         if (!(await openSession())) { console.log('  ⚠ 휴식 뒤에도 세션 불가 — 중단'); break }
