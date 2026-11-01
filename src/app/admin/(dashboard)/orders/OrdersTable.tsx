@@ -3,6 +3,7 @@ import { PurchaseStatusCell as CoupangPurchaseStatusCell } from './coupang/Purch
 import { InvoiceCell as CoupangInvoiceCell } from './coupang/InvoiceCell'
 import { GgsanTrackingCell } from './coupang/GgsanTrackingCell'
 import { DepositInfo } from './coupang/DepositInfo'
+import { parsePurchaseNote } from './depositNote'
 import PurchaseButton from './coupang/PurchaseButton'
 import { PurchaseStatusCell as NaverPurchaseStatusCell } from './naver/PurchaseStatusCell'
 import { InvoiceCell as NaverInvoiceCell } from './naver/InvoiceCell'
@@ -124,6 +125,7 @@ export function OrdersTable({ rows, emptyText }: { rows: UnifiedOrder[]; emptyTe
                     quantity={o.quantity}
                     revenue={o.revenue}
                     fee={o.fee}
+                    mileageUsed={parsePurchaseNote(o.purchaseNote).mileageUsed}
                   />
                 </td>
 

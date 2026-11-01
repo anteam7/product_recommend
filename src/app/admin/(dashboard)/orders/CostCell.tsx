@@ -17,6 +17,8 @@ interface Props {
   revenue: number | null
   /** 수수료 — 쿠팡·토스는 요율(추정), 네이버는 주문 API 실값 */
   fee: Fee
+  /** 매입처 적립금 사용액(purchase_note "[적립금] N원 사용") — 매입 원가엔 포함, 이체할 금액에선 빠진다 */
+  mileageUsed?: number | null
 }
 
 /**
@@ -24,7 +26,7 @@ interface Props {
  * 운송비는 DB 별도 컬럼 없이 purchase_total_cost 에 녹여 저장(운송비 = 합계 − 상품가×수량).
  * 실수익 = 결제금액 − 매입원가 − 수수료 − 납부부가세((결제금액−매입원가)÷11, margin.ts)
  */
-export function CostCell({ endpoint, id, unitCost, totalCost, quantity, revenue: revenueIn, fee }: Props) {
+export function CostCell({ endpoint, id, unitCost, totalCost, quantity, revenue: revenueIn, fee, mileageUsed }: Props) {
   const router = useRouter()
   const qty = quantity ?? 1
   // 상품가를 모르면(unitCost=null) 합계 전체를 운송비로 오인식하므로(2026-09-02 사용자 리포트) 상품가가 실제로 저장돼 있을 때만 역산한다.
@@ -92,6 +94,12 @@ export function CostCell({ endpoint, id, unitCost, totalCost, quantity, revenue:
         <div className="text-[10px] text-gray-500">
           매입 소요 <strong className="tabular-nums text-gray-700">{cost.toLocaleString()}</strong>{qty > 1 ? ` (×${qty})` : ''}
         </div>
+        {mileageUsed ? (
+          // 적립금은 이미 낸 돈(실수익엔 원가로 반영) — 이체할 금액은 나머지뿐이라 합계를 보고 과입금하지 않게 나눠 보인다
+          <div className="text-[10px] font-semibold text-orange-700 tabular-nums">
+            = 적립금 {mileageUsed.toLocaleString()} + 입금 {Math.max(0, cost - mileageUsed).toLocaleString()}
+          </div>
+        ) : null}
         {hasCost ? (
           <>
             <div className="text-[10px] text-gray-400 tabular-nums">

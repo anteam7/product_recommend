@@ -47,3 +47,14 @@ export function decide(wholesale, ship, prices, { fee = COUPANG_FEE } = {}) {
   const net = price ? Math.round(netProfit(price, cost, fee)) : null
   return { cost, floor, target, ref, ceiling, price, net, margin: price ? +(net / price).toFixed(3) : null, verdict }
 }
+
+/**
+ * 시세 판정 없이 등록할 가격 — 사장님 2026-10-30 "시세조회하지말고 등록해, 시세조회 때문에 등록이 안 되는 게 더 안 좋다".
+ * 시세가 OK 면 decide 그대로(목표 이하로 이미 깎인 값), 그 밖(미조회·NO_MATCH·STRUCTURAL)은 목표가(순마진 10%, 하한 이상) · verdict 'TARGET'.
+ */
+export function decideNoMarket(wholesale, ship, prices, { fee = COUPANG_FEE } = {}) {
+  const d = decide(wholesale, ship, prices, { fee })
+  if (d.verdict === 'OK' || d.verdict === 'NO_COST') return d
+  const net = Math.round(netProfit(d.target, d.cost, fee))
+  return { ...d, price: d.target, net, margin: +(net / d.target).toFixed(3), verdict: 'TARGET' }
+}

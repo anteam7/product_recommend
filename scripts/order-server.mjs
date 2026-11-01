@@ -71,7 +71,7 @@ const CMTSTORY = { base: env.CMTSTORY_BASE_URL || 'https://www.cmtstory.com', us
 // 예치금 결제 매입처 — 완주 = 예치금 즉시 차감(실결제)이라 결과 상태가 입금대기가 아니라 발주완료(ORDERED)
 // 도매아토즈는 같은 선충전 방식인데 사이트 용어가 '적립금'이라 화면·메모 문구만 DEPOSIT_PAY_LABEL 로 바꾼다
 const DEPOSIT_PAY_SOURCES = new Set(['wellroot', 'domeatoz'])
-const DEPOSIT_PAY_LABEL = { wellroot: '예치금', domeatoz: '적립금' }
+const DEPOSIT_PAY_LABEL = { wellroot: '예치금', domeatoz: '적립금', campingmoon: '적립금' } // 캠핑문 = 무통장 매입처지만 적립금이 전액을 덮으면 결제완료(2026-11-01)
 const depositLabel = (src) => DEPOSIT_PAY_LABEL[src] ?? '예치금'
 
 // 주문 → 매입처(source) + goods_no + 수령인 해석
@@ -130,11 +130,11 @@ async function supplierOptionInfo(src, li, qty) {
   const { data: it } = await sb.from('jimscanner_campingmoon_items').select('option_price, add_price, product_no').eq('item_code', li.item_code).maybeSingle()
   const { data: p } = await sb.from('jimscanner_campingmoon_products').select('sale_price').eq('product_no', li.goods_no).maybeSingle()
   const unit = it?.option_price || ((p?.sale_price || 0) + (it?.add_price || 0))
-  if (!unit) return { itemCode: li.item_code || null }
+  if (!unit) return { itemCode: li.item_code || null, optionValue: li.option_value || null }
   const SHIP = 3000, R = 0.65
   const expectTotals = [{ base: 'total(상품+배송비)×0.65', total: Math.round((unit * qty + SHIP) * R) }, { base: 'product(상품×0.65+배송비)', total: Math.round(unit * qty * R + SHIP) }]
   if (unit * qty >= 150000) expectTotals.push({ base: '15만원↑ 무료배송', total: Math.round(unit * qty * R) })
-  return { itemCode: li.item_code || null, expectTotals, domeCost: Math.round(unit * qty * R + SHIP) }
+  return { itemCode: li.item_code || null, optionValue: li.option_value || null, expectTotals, domeCost: Math.round(unit * qty * R + SHIP) }
 }
 
 // 쿠팡 주문 행의 묶음 수 — raw_payload.orderItems 중 이 행의 vendorItemId 의 업체상품코드 접미사.
@@ -832,7 +832,7 @@ const KWHOLESALE_BASE = env.KWHOLESALE_BASE_URL || 'https://kwholesale.co.kr'
 // Cafe24 무통장 공용 플로우 — K홀세일(2026-09-27)·캠핑문(2026-10-14). site={base,user,pass,label}. opts.itemCode = 옵션 select 값(캠핑문 색상/사이즈 item_code),
 // opts.expectTotals = 주문서 결제예정금액 기대값 배열(캠핑문 35% 회원할인은 주문서에서만 적용되므로 ±10원 안에 들어야 완주) — 매입처마다 함수를 복사하지 않는다(등록표 원칙)
 const KWHOLESALE_SITE = { base: KWHOLESALE_BASE, user: env.KWHOLESALE_USER, pass: env.KWHOLESALE_PASS, label: 'K홀세일' }
-const CAMPINGMOON_SITE = { base: env.CAMPINGMOON_BASE_URL || 'https://campingmoon.co.kr', user: env.CAMPINGMOON_USER, pass: env.CAMPINGMOON_PASS, label: '캠핑문' }
+const CAMPINGMOON_SITE = { base: env.CAMPINGMOON_BASE_URL || 'https://campingmoon.co.kr', user: env.CAMPINGMOON_USER, pass: env.CAMPINGMOON_PASS, label: '캠핑문', useMileage: true }
 const runFlowKwholesale = (goodsNo, qty, recipient, detailUrl, full = null) => runFlowCafe24Cash(KWHOLESALE_SITE, goodsNo, qty, recipient, detailUrl, full)
 async function runFlowCafe24Cash(site, goodsNo, qty, recipient, detailUrl, full = null, opts = {}) {
   const KWHOLESALE_BASE = site.base, L = site.label
@@ -862,30 +862,43 @@ async function runFlowCafe24Cash(site, goodsNo, qty, recipient, detailUrl, full 
   await page.waitForTimeout(1500)
   const denied = dialogs.slice(before).find((m) => /회원만|접근\s*권한|권한이\s*없/.test(m))
   if (denied) return { ok: false, msg: `${L} 구매 불가 상품 — ${denied.replace(/\s+/g, ' ').slice(0, 60)} (매장전용 등, 쿠팡 판매중지 검토)` }
-  // 2-b) 옵션(색상/사이즈) 선택 — item_code 가 select 값. 라벨에 [품절]이면 매입처 옵션 품절(쿠팡 옵션 품절 처리 대상)
+  // 2-b) 옵션(색상/사이즈) 선택 — select 값은 item_code 이거나 옵션값 글자(캠핑문 #1516 "45cm"·"49cm", 2026-11-01 주문 3103985528377 이 이걸로 실패).
+  //      글자형은 페이지 option_stock_data(item_code → option_value)로 값을 찾는다. 라벨에 [품절]이면 매입처 옵션 품절(쿠팡 옵션 품절 처리 대상)
   if (opts.itemCode) {
-    const picked = await page.evaluate((code) => {
+    const picked = await page.evaluate(({ code, value }) => {
       // 캠핑문은 1축(option1)만 쓴다(2026-10-14 정찰: 2축·추가옵션 0건). option1 이 없을 때만 첫 옵션 select
       const sel = document.querySelector('select[name="option1"]') || document.querySelector('select[name^="option"]')
       // 옵션 없는 단일상품도 Cafe24 는 기본 품목코드(product_code+000A)를 둔다 → 고를 것 없이 진행(2026-10-20 #4471 내열 장갑, 등록분 338건이 단일상품)
       if (!sel && window.has_option === 'F' && /000A$/.test(code)) return { ok: true, single: true }
       if (!sel) return { ok: false, why: '옵션 select 없음' }
-      const o = [...sel.options].find((x) => x.value === code)
-      if (!o) return { ok: false, why: `옵션 ${code} 없음(현재: ${[...sel.options].map((x) => x.value).filter((v) => v && v !== '*' && v !== '**').join(',').slice(0, 80)})` }
+      let stock = window.option_stock_data
+      try { if (typeof stock === 'string') stock = JSON.parse(stock) } catch { stock = null }
+      const want = [code, stock?.[code]?.option_value, value].filter(Boolean)
+      const o = want.map((w) => [...sel.options].find((x) => x.value === w)).find(Boolean)
+      if (!o) return { ok: false, why: `옵션 ${code}${value ? `(${value})` : ''} 없음(현재: ${[...sel.options].map((x) => x.value).filter((v) => v && v !== '*' && v !== '**').join(',').slice(0, 80)})` }
       if (/\[\s*품절\s*\]|\(\s*품절\s*\)/.test(o.textContent || '')) return { ok: false, why: `옵션 품절: ${o.textContent.trim()}` }
-      sel.value = code; sel.dispatchEvent(new Event('change', { bubbles: true }))
-      return { ok: true, label: o.textContent.trim() }
-    }, opts.itemCode)
+      sel.value = o.value; sel.dispatchEvent(new Event('change', { bubbles: true }))
+      return { ok: true, label: o.textContent.trim(), value: o.value }
+    }, { code: opts.itemCode, value: opts.optionValue ?? null })
     if (!picked.ok) return { ok: false, msg: `${L} 옵션 선택 실패 — ${picked.why}` }
     if (!picked.single) {
       await page.waitForTimeout(900)
-      // 사이트 스크립트가 값을 되돌리는 경우 대비 — 실제 선택값 재확인
-      const nowVal = await page.evaluate(() => (document.querySelector('select[name="option1"]') || document.querySelector('select[name^="option"]'))?.value).catch(() => null)
-      if (nowVal !== opts.itemCode) return { ok: false, msg: `${L} 옵션 선택이 유지되지 않음(현재 ${nowVal}) — 열린 창에서 직접 진행` }
+      // 사이트 스크립트가 값을 되돌리는 경우 대비 — 실제 선택값 + 선택상품 행의 품목코드(item_code[])가 주문 옵션인지 재확인
+      const now = await page.evaluate(() => ({
+        val: (document.querySelector('select[name="option1"]') || document.querySelector('select[name^="option"]'))?.value,
+        items: [...document.querySelectorAll('input[name="item_code[]"]')].map((e) => e.value),
+      })).catch(() => null)
+      if (now?.val !== picked.value) return { ok: false, msg: `${L} 옵션 선택이 유지되지 않음(현재 ${now?.val}) — 열린 창에서 직접 진행` }
+      if (now.items.length && !now.items.includes(opts.itemCode)) return { ok: false, msg: `${L} 선택된 품목코드 ${now.items.join(',')} ≠ 주문 옵션 ${opts.itemCode} — 열린 창에서 직접 진행` }
     }
-    // 옵션 선택 후 생기는 선택상품 수량칸(quantity_opt[])에 수량. 없으면 아래 공통 수량 입력으로
   }
-  if (qty > 1) await page.evaluate((q) => { const el = document.querySelector('input#quantity, input[name="quantity_opt[]"]'); if (el) { el.value = String(q); el.dispatchEvent(new Event('change', { bubbles: true })); el.dispatchEvent(new Event('blur', { bubbles: true })) } }, qty)
+  // 수량 — 옵션을 고르면 선택상품 행의 수량칸(quantity_opt[])이 실제 주문 수량, 옵션 없는 상품은 #quantity
+  if (qty > 1) await page.evaluate((q) => {
+    const opt = [...document.querySelectorAll('input[name="quantity_opt[]"]')]
+    for (const el of opt.length ? opt : [document.querySelector('input#quantity')].filter(Boolean)) {
+      el.value = String(q); el.dispatchEvent(new Event('change', { bubbles: true })); el.dispatchEvent(new Event('blur', { bubbles: true }))
+    }
+  }, qty)
   // 3) BUY IT NOW = product_submit(1, …) → 주문서
   await page.evaluate(() => {
     const b = [...document.querySelectorAll('a, button')].find((x) => /product_submit\(\s*1\s*,/.test(x.getAttribute('onclick') || '') && x.offsetParent !== null)
@@ -930,26 +943,77 @@ async function runFlowCafe24Cash(site, goodsNo, qty, recipient, detailUrl, full 
   }, { phone: recipient.phone, contact: env.ORDER_CONTACT_PHONE || '' })
   await op.bringToFront().catch(() => {})
   const phoneWarn = phoneOk ? '' : ' ⚠ 수령인 전화번호 국번이 주문서 선택지에 없어 비워 뒀습니다 — 직접 입력하세요.'
-  if (!full) return { ok: true, msg: `주문서 작성 완료 — 열린 ${L} 창에서 금액·배송지 확인 후 무통장입금으로 [결제하기]를 직접 누르세요.${phoneWarn}` }
+  // 결제예정금액 — 버튼 글자 → 옛 기본 스킨(캠핑문)은 #btn_payment 가 금액 없는 <img> 라 Cafe24 표준 '총 결제예정 금액' 칸(할인·배송비·적립금 반영, 적립금 전액이면 "0") → 본문 '최종 결제 금액'
+  const readPayTotal = () => op.evaluate(() => {
+    const m = /([\d,]{3,})\s*원/.exec(document.querySelector('#btn_payment')?.innerText || '')
+    if (m) return parseInt(m[1].replace(/,/g, ''), 10)
+    const v = /^[\d,]+$/.exec((document.querySelector('#total_order_sale_price_view')?.textContent || '').trim())
+    if (v) return parseInt(v[0].replace(/,/g, ''), 10)
+    const m2 = /최종\s*결제\s*금액[^0-9]{0,30}([\d,]{3,})\s*원/.exec(document.body.innerText)
+    return m2 ? parseInt(m2[1].replace(/,/g, ''), 10) : null
+  }).catch(() => null)
+  // 4-b) 적립금 먼저(site.useMileage = 캠핑문, 사장님 2026-11-01 "적립금이 있으면 적립금 먼저"). 주문서 실측(2026-11-01, 결제 미실행):
+  //   #input_mile 에 넣고 Tab → 결제예정금액이 그만큼 준다. 배송비는 적립금으로 못 내서 보통 배송비만 무통장으로 남고,
+  //   배송비 0원(15만원↑ 등)일 때만 전액 적립금 = 결제금액 "0"·결제수단 칸 비활성·[결제하기]가 곧 주문 완료(안내문).
+  //   가용 적립금보다 많으면 "사용가능 적립금보다 많습니다" 후 0 으로 되돌림. 1회 최대 사용액·최소 보유액 안내문이 있으면 그 안에서만.
+  const orderTotal = await readPayTotal() // 적립금 적용 전 = 실제 매입액(금액 가드·매입가 기록 기준)
+  let mile = null, shipFee = null // shipFee = 주문서 배송비 → 매입가 기록을 상품가·운송비로 나눈다(없으면 등록 당시 도매가 기준 domeCost)
+  if (site.useMileage && orderTotal > 0) {
+    const info = await op.evaluate(() => {
+      const t = document.body.innerText, n = (re) => { const m = re.exec(t); return m ? parseInt(m[1].replace(/,/g, ''), 10) : null }
+      const el = document.querySelector('#input_mile')
+      return {
+        usable: !!el && !el.disabled && el.offsetParent !== null,
+        balance: n(/총\s*사용가능\s*적립금\s*:\s*([\d,]+)\s*원/) ?? n(/가용적립금\s*:\s*([\d,]+)\s*원/),
+        max: n(/1회\s*구매시\s*적립금\s*최대\s*사용금액은\s*([\d,]+)\s*원/),
+        min: n(/적립금은\s*최소\s*([\d,]+)\s*이상일\s*때/),
+        // 배송비(기본 + 지역 추가) — "적립금 사용 시 배송비는 적립금으로 사용 할 수 없습니다"
+        ship: ['#total_ship_price_id', '#total_local_ship_price_id'].reduce((s, q) => { const m = /([\d,]+)\s*원/.exec(document.querySelector(q)?.textContent || ''); return s == null || !m ? null : s + parseInt(m[1].replace(/,/g, ''), 10) }, 0),
+      }
+    }).catch(() => null)
+    // 배송비는 적립금으로 못 낸다 → 상품 몫(주문액 − 배송비)까지만. job 623(2026-11-01): 29,000원 중 26,550원 적용·남은 2,450원 무통장 →
+    // 서버가 "선택한 결제수단의 최소 결제 가능금액은 배송비를 제외하고 0원" 으로 거절(주문 미생성). 배송비를 못 읽으면 적립금은 쓰지 않는다
+    shipFee = info?.ship ?? null
+    const cap = shipFee == null ? 0 : orderTotal - shipFee
+    const want = info?.usable && info.balance > 0 && info.balance >= (info.min ?? 0) && cap > 0 ? Math.min(info.balance, info.max ?? cap, cap) : 0
+    if (want > 0) {
+      const typed = await op.locator('#input_mile').fill(String(want)).then(() => op.locator('#input_mile').press('Tab')).then(() => true).catch(() => false)
+      if (!typed) return { ok: false, msg: `${L} 적립금 입력칸(#input_mile)에 입력하지 못함 — 열린 창에서 확인${lastDialog()}` }
+      await op.waitForTimeout(1500)
+      const used = parseInt(String(await op.locator('#input_mile').inputValue().catch(() => '0')).replace(/\D/g, '') || '0', 10)
+      const pay = await readPayTotal()
+      if (used !== want || pay == null || Math.abs(orderTotal - used - pay) > 10) return { ok: false, msg: `${L} 적립금 적용 확인 실패 — ${want.toLocaleString()}원 입력 → 적용 ${used.toLocaleString()}원 · 결제예정 ${pay?.toLocaleString() ?? '?'}원(적용 전 ${orderTotal.toLocaleString()}원) — 열린 창에서 확인${lastDialog()}` }
+      mile = { used, balance: info.balance, pay }
+    }
+  }
+  const mileOnly = mile?.pay === 0
+  const mileNote = mile ? ` · 적립금 ${mile.used.toLocaleString()}원 사용(잔액 약 ${(mile.balance - mile.used).toLocaleString()}원)` : ''
+  if (!full) return { ok: true, msg: mileOnly
+    ? `주문서 작성 완료 — 주문액 ${orderTotal.toLocaleString()}원 전액 적립금 적용(잔액 약 ${(mile.balance - mile.used).toLocaleString()}원). 열린 ${L} 창에서 결제금액 0원·배송지 확인 후 [결제하기]를 직접 누르세요.${phoneWarn}`
+    : `주문서 작성 완료 — 열린 ${L} 창에서 금액·배송지 확인 후 무통장입금으로 [결제하기]를 직접 누르세요.${mileNote ? `${mileNote} → 남은 ${mile.pay.toLocaleString()}원만 무통장` : ''}${phoneWarn}` }
   if (!phoneOk) return { ok: false, msg: `수령인 전화번호를 주문서에 넣지 못함 — 완주 중단(열린 창에서 직접 진행)${phoneWarn}` }
 
   // ── 완주(무통장): 무통장 확인 → 입금은행(유일 계좌) + 입금자명 → 필수 동의 → 금액 가드 → 결제하기(+확인 레이어) → 주문번호 ──
-  const isCash = await op.evaluate(() => {
-    const cash = document.querySelector('input[name=addr_paymethod][value=cash]')
-    if (cash && !cash.checked) { cash.checked = true; cash.click(); cash.dispatchEvent(new Event('change', { bubbles: true })) }
-    return cash ? cash.checked : false
-  })
-  if (!isCash) return { ok: false, msg: '무통장입금 결제수단을 찾지 못함 — 완주 중단(열린 창에서 직접 진행)' }
-  await op.waitForTimeout(600)
-  const bankOk = await op.evaluate((depositor) => {
-    const sel = document.querySelector('select#bankaccount')
-    if (sel && (!sel.value || sel.value === '-1')) { const o = [...sel.options].find((x) => x.value && x.value !== '-1'); if (o) { sel.value = o.value; sel.dispatchEvent(new Event('change', { bubbles: true })) } }
-    const pn = document.querySelector('#pname, input[name=pname]')
-    if (pn) { pn.value = depositor; pn.dispatchEvent(new Event('input', { bubbles: true })); pn.dispatchEvent(new Event('change', { bubbles: true })) }
-    return !!(sel && sel.value && sel.value !== '-1' && pn && pn.value)
-  }, BIZ_INFO.ceo)
-  if (!bankOk) return { ok: false, msg: '입금은행/입금자명 입력 실패 — 완주 중단(열린 창에서 직접 진행)' }
-  const bankAccount = parseBankOption(await op.evaluate(() => { const s = document.querySelector('select#bankaccount'); return s ? (s.options[s.selectedIndex]?.text || '') : '' }).catch(() => ''))
+  //    적립금이 전액을 덮으면(결제금액 0원) 결제수단 칸이 비활성이라 무통장·입금은행 단계 없이 동의 → 가드 → 결제하기
+  let bankAccount = null
+  if (!mileOnly) {
+    const isCash = await op.evaluate(() => {
+      const cash = document.querySelector('input[name=addr_paymethod][value=cash]')
+      if (cash && !cash.checked) { cash.checked = true; cash.click(); cash.dispatchEvent(new Event('change', { bubbles: true })) }
+      return cash ? cash.checked : false
+    })
+    if (!isCash) return { ok: false, msg: '무통장입금 결제수단을 찾지 못함 — 완주 중단(열린 창에서 직접 진행)' }
+    await op.waitForTimeout(600)
+    const bankOk = await op.evaluate((depositor) => {
+      const sel = document.querySelector('select#bankaccount')
+      if (sel && (!sel.value || sel.value === '-1')) { const o = [...sel.options].find((x) => x.value && x.value !== '-1'); if (o) { sel.value = o.value; sel.dispatchEvent(new Event('change', { bubbles: true })) } }
+      const pn = document.querySelector('#pname, input[name=pname]')
+      if (pn) { pn.value = depositor; pn.dispatchEvent(new Event('input', { bubbles: true })); pn.dispatchEvent(new Event('change', { bubbles: true })) }
+      return !!(sel && sel.value && sel.value !== '-1' && pn && pn.value)
+    }, BIZ_INFO.ceo)
+    if (!bankOk) return { ok: false, msg: '입금은행/입금자명 입력 실패 — 완주 중단(열린 창에서 직접 진행)' }
+    bankAccount = parseBankOption(await op.evaluate(() => { const s = document.querySelector('select#bankaccount'); return s ? (s.options[s.selectedIndex]?.text || '') : '' }).catch(() => ''))
+  }
   // 약관 — 활성·표시된 [필수]만(숨은 비회원가입 동의 등은 건드리지 않음, 웰루트와 같은 규칙)
   await op.evaluate(() => {
     const shown = (c) => c.offsetParent !== null || document.querySelector(`label[for="${c.id}"]`)?.offsetParent != null
@@ -964,26 +1028,23 @@ async function runFlowCafe24Cash(site, goodsNo, qty, recipient, detailUrl, full 
     if (pa && !pa.checked && !pa.disabled) pa.click()
   })
   await op.waitForTimeout(500)
-  const total = await op.evaluate(() => {
-    const m = /([\d,]{3,})\s*원/.exec(document.querySelector('#btn_payment')?.innerText || '')
-    if (m) return parseInt(m[1].replace(/,/g, ''), 10)
-    // 옛 기본 스킨(캠핑문): #btn_payment 가 금액 없는 <img> → Cafe24 표준 '총 결제예정 금액' 칸(할인·배송비 반영)
-    const v = /^[\d,]{3,}$/.exec((document.querySelector('#total_order_sale_price_view')?.textContent || '').trim())
-    if (v) return parseInt(v[0].replace(/,/g, ''), 10)
-    const m2 = /최종\s*결제\s*금액[^0-9]{0,30}([\d,]{3,})\s*원/.exec(document.body.innerText)
-    return m2 ? parseInt(m2[1].replace(/,/g, ''), 10) : null
-  }).catch(() => null)
-  const g = guardFail(L, total, full.maxPay)
+  const total = await readPayTotal() // 남은 결제액(적립금을 안 쓰면 주문액과 같다)
+  // 금액 가드는 적립금 적용 전 주문액 기준 — 적립금은 결제 수단일 뿐 매입액이 아니다
+  const g = guardFail(L, orderTotal, full.maxPay)
   if (g) return { ok: false, msg: g }
   // 기대 금액 가드(캠핑문): 35% 회원할인 적용 결제예정금액이 계산식 후보 중 하나와 ±10원 안에 있어야 한다 — 첫 주문이 할인 기준(배송비 포함 여부)을 확정한다
-  if (Array.isArray(opts.expectTotals) && opts.expectTotals.length && total != null) {
-    const hit = opts.expectTotals.find((e) => Math.abs(e.total - total) <= 10)
-    if (!hit) return { ok: false, msg: `${L} 결제예정금액 ${total.toLocaleString()}원이 기대값(${opts.expectTotals.map((e) => `${e.base}:${e.total.toLocaleString()}`).join(' / ')})과 다름 — 완주 중단(열린 창에서 확인, 할인 기준·옵션 가산액 점검)` }
-    console.log(`[order-server] ${L} 결제예정금액 ${total} = ${hit.base} 기준 기대값 일치`)
+  if (Array.isArray(opts.expectTotals) && opts.expectTotals.length) {
+    const hit = opts.expectTotals.find((e) => Math.abs(e.total - orderTotal) <= 10)
+    if (!hit) return { ok: false, msg: `${L} 결제예정금액 ${orderTotal.toLocaleString()}원이 기대값(${opts.expectTotals.map((e) => `${e.base}:${e.total.toLocaleString()}`).join(' / ')})과 다름 — 완주 중단(열린 창에서 확인, 할인 기준·옵션 가산액·수량 점검)` }
+    console.log(`[order-server] ${L} 결제예정금액 ${orderTotal} = ${hit.base} 기준 기대값 일치${mileNote}`)
   }
-  // 클릭 직전 재확인 — 여전히 무통장이어야 누른다(카드/PG 자동결제 금지)
-  const stillCash = await op.evaluate(() => document.querySelector('input[name=addr_paymethod][value=cash]')?.checked === true)
-  if (!stillCash) return { ok: false, msg: '결제수단이 무통장입금이 아님 — 완주 중단(열린 창에서 직접 진행)' }
+  // 남은 결제액 = 주문액 − 적립금이어야 누른다(동의·결제수단 단계에서 적립금이 풀렸는지)
+  if (total == null || Math.abs(orderTotal - (mile?.used ?? 0) - total) > 10) return { ok: false, msg: `${L} 결제예정금액 ${total?.toLocaleString() ?? '?'}원 ≠ 주문액 ${orderTotal.toLocaleString()}원 − 적립금 ${(mile?.used ?? 0).toLocaleString()}원 — 완주 중단(열린 창에서 확인)` }
+  // 클릭 직전 재확인 — 남은 결제액이 있으면 무통장이어야 누른다(카드/PG 자동결제 금지). 0원(적립금 전액)은 위에서 확인
+  if (!mileOnly) {
+    const stillCash = await op.evaluate(() => document.querySelector('input[name=addr_paymethod][value=cash]')?.checked === true)
+    if (!stillCash) return { ok: false, msg: '결제수단이 무통장입금이 아님 — 완주 중단(열린 창에서 직접 진행)' }
+  }
   await op.evaluate(() => document.querySelector('#btn_payment')?.click())
   await op.waitForTimeout(1800)
   await op.evaluate(() => { const b = document.querySelector('#ec-shop_btn_layer_payment'); if (b && b.offsetParent !== null) b.click() }).catch(() => {})
@@ -996,7 +1057,11 @@ async function runFlowCafe24Cash(site, goodsNo, qty, recipient, detailUrl, full 
     return m ? m[1] : null
   }).catch(() => null)
   if (!done && !orderNo) return { ok: false, msg: `결제하기 이후 완료 페이지 확인 실패 — 열린 ${L} 창에서 주문 상태를 직접 확인하세요${lastDialog()}` }
-  return { ok: true, done: true, orderNo, total, bankAccount, msg: `무통장 주문 완료 — 주문번호 ${orderNo ?? '(파싱 실패, 창에서 확인)'} · 총액 ${total.toLocaleString()}원 · 입금대기(${bankAccount?.text || '농협 다인내추럴 계좌'}로 이체 후 [입금완료])` }
+  // total = 주문액(매입가 기록), 적립금 전액 = 이미 결제됨(발주완료, 예치금 매입처와 같은 처리), 일부 = 남은 cashDue 만 무통장 입금대기
+  // unitCost = 주문서 기준 상품가(1개, 할인 반영·배송비 제외) — 없으면 execPurchase 가 domeCost(배송비 포함)를 수량으로 나눠 운송비가 0 으로 보인다
+  const unitCost = shipFee != null && qty > 0 ? (orderTotal - shipFee) / qty : undefined
+  if (mileOnly) return { ok: true, done: true, depositPaid: true, orderNo, total: orderTotal, unitCost, depositBalanceAfter: mile.balance - mile.used, msg: `${L} 적립금 결제 완료 — 주문번호 ${orderNo ?? '(파싱 실패, 창에서 확인)'} · 주문액 ${orderTotal.toLocaleString()}원 전액 적립금(잔액 약 ${(mile.balance - mile.used).toLocaleString()}원)` }
+  return { ok: true, done: true, orderNo, total: orderTotal, unitCost, cashDue: total, mileageUsed: mile?.used ?? 0, bankAccount, msg: `무통장 주문 완료 — 주문번호 ${orderNo ?? '(파싱 실패, 창에서 확인)'} · 총액 ${orderTotal.toLocaleString()}원${mile ? `${mileNote} → 입금 ${total.toLocaleString()}원` : ''} · 입금대기(${bankAccount?.text || '농협 다인내추럴 계좌'}로 이체 후 [입금완료])` }
 }
 
 // Playwright: 도매아토즈(domeatoz.com, 자체 Express 서버) 주문서 자동 작성 → 결제 직전 정지 / full 지정 시 적립금 전액결제 완주
@@ -1168,7 +1233,7 @@ const RUN_FLOWS = {
   wellroot: (r, full) => runFlowWellroot(r.goodsNo, buyQty(r), r.recipient, r.detailUrl, full),
   kwholesale: (r, full) => runFlowKwholesale(r.goodsNo, buyQty(r), r.recipient, r.detailUrl, full),
   cmtstory: (r, full) => runFlowGgsan(r.goodsNo, buyQty(r), r.recipient, full, CMTSTORY, r.godomallExpect),   // 건강산 무통장 흐름 재사용(호스트·계정만 다름)
-  campingmoon: (r, full) => runFlowCafe24Cash(CAMPINGMOON_SITE, r.goodsNo, buyQty(r), r.recipient, r.detailUrl, full, { itemCode: r.itemCode, expectTotals: r.expectTotals }), // 옵션 select + 35% 할인 기대금액 가드
+  campingmoon: (r, full) => runFlowCafe24Cash(CAMPINGMOON_SITE, r.goodsNo, buyQty(r), r.recipient, r.detailUrl, full, { itemCode: r.itemCode, optionValue: r.optionValue, expectTotals: r.expectTotals }), // 옵션 select + 35% 할인 기대금액 가드 + 적립금 먼저
   domeatoz: (r, full) => runFlowDomeatoz(r, full), // 적립금 결제 — 외부주문코드(쿠팡 주문번호)로 중복 방지·완료 확인
 }
 async function execPurchase(orderKey, fullMode) {
@@ -1226,7 +1291,7 @@ async function execPurchase(orderKey, fullMode) {
     // 무통장 완주(건강산·화장품스토리·K홀세일) — 주문서에서 고른 입금계좌를 메모에 남겨 행에서 바로 어디로 얼마를 보낼지 보이게(사용자 요청 2026-10-09)
     if (!out.depositPaid && out.bankAccount?.account) {
       const b = out.bankAccount
-      upd.purchase_note = [r.order.purchase_note, `[무통장] ${b.bank ?? ''} ${b.account}${b.holder ? ` (예금주 ${b.holder})` : ''} ${out.total?.toLocaleString() ?? '?'}원 입금`].filter(Boolean).join(' / ')
+      upd.purchase_note = [r.order.purchase_note, out.mileageUsed ? `[적립금] ${out.mileageUsed.toLocaleString()}원 사용` : null, `[무통장] ${b.bank ?? ''} ${b.account}${b.holder ? ` (예금주 ${b.holder})` : ''} ${(out.cashDue ?? out.total)?.toLocaleString() ?? '?'}원 입금`].filter(Boolean).join(' / ')
     }
     // 77bio 가상계좌 완주 시 입금 계좌 정보를 기록해둬야 사람이 어디로 얼마를 보낼지 알 수 있다.
     if (out.virtualAccount?.account) {
@@ -1382,7 +1447,7 @@ http.createServer(async (req, res) => {
           ? `<h2>✓ ${esc(out.msg)}</h2><p style="background:#d1fae5;color:#065f46;padding:10px 12px;border-radius:8px">${depositLabel(out.sourceKey)}으로 결제가 끝났습니다 — 입금(이체)할 것 없음. 관리자 주문상태가 <b>발주완료</b>로 기록됐고 쿠팡 발주확인이 곧 처리됩니다.</p>`
           : out.done
           ? `<h2>✓ ${esc(out.msg)}</h2><p style="background:#fef3c7;color:#92400e;padding:10px 12px;border-radius:8px">💰 관리자 주문상태가 <b>입금대기</b>로 기록됐습니다. <b>${esc(DEPOSIT_BANK_LABEL[out.sourceKey] ?? '매입처')} 계좌로 이체</b>한 뒤 관리자에서 <b>[입금완료]</b>를 눌러주세요.</p>${out.bankAccount?.account
-            ? `<div style="margin:12px 0;padding:14px 16px;border:2px solid #f59e0b;border-radius:10px;background:#fffbeb"><div style="font-size:13px;color:#92400e;margin-bottom:6px">입금 계좌 (주문서에서 선택된 계좌 · 주문관리 메모에도 기록됨)</div><div style="font-size:22px;font-weight:700;letter-spacing:.5px">${esc(out.bankAccount.bank ?? '')} ${esc(out.bankAccount.account)}</div><div style="font-size:14px;margin-top:4px">예금주 <b>${esc(out.bankAccount.holder ?? '-')}</b> · 입금액 <b>${esc(out.total?.toLocaleString() ?? '?')}원</b> · 입금자명 <b>${esc(BIZ_INFO.ceo)}</b></div></div>`
+            ? `<div style="margin:12px 0;padding:14px 16px;border:2px solid #f59e0b;border-radius:10px;background:#fffbeb"><div style="font-size:13px;color:#92400e;margin-bottom:6px">입금 계좌 (주문서에서 선택된 계좌 · 주문관리 메모에도 기록됨)</div><div style="font-size:22px;font-weight:700;letter-spacing:.5px">${esc(out.bankAccount.bank ?? '')} ${esc(out.bankAccount.account)}</div><div style="font-size:14px;margin-top:4px">예금주 <b>${esc(out.bankAccount.holder ?? '-')}</b> · 입금액 <b>${esc((out.cashDue ?? out.total)?.toLocaleString() ?? '?')}원</b> · 입금자명 <b>${esc(BIZ_INFO.ceo)}</b></div></div>`
             : ''}`
           : `<h2>✓ ${esc(out.msg)}</h2><p>열린 ${esc(out.sourceLabel ?? '매입처')} 창으로 가서 결제를 마치세요. 이 탭은 닫으셔도 됩니다.</p>`)
         : `<h2>✗ ${esc(out.msg)}</h2><p>다시 시도하거나 매입처에서 직접 주문하세요.</p>`)

@@ -182,3 +182,4 @@ node --env-file=.env.local scripts/naver-price-compete.mjs [--limit=N]
 | 2026-07-03 | 주문 sync IP차단 복구 + 매핑 수정 | - | local-cron-naver-orders-sync.mjs | 7/2~ GW.IP_NOT_ALLOWED 43회 실패→IP 재등록, 중첩 응답구조 매핑 수정, error_message 기록 추가, 첫 실주문 수집 확인 |
 | 2026-07-03 | 주문↔매입 관리 메뉴 신설 | - | /admin/naver-orders | 쿠팡 미러: 발주확인 자동호출·결제진행(id 자동판별)·매입원가/실수익·송장 내부기록, DDL naver_orders_purchase.sql |
 | 2026-07-03 | 쿠팡 판매실적 상품 노출 전환 | 9건 | _naver-expose-suspended.mjs | naver-register-coupang-sold.mjs로 SUSPENSION 등록된 9건 → 전시 ON 전환(GET→PUT), 전건 전시=ON·판매=SALE 검증, DB status_type=SALE 동기화 |
+| 2026-10-30 | 상품 종류 교체 — 유픽·건강산 전량 삭제(비셀러 유지) | 535건 | naver-delete-products.mjs --keep-source=beseller | 사장님 지시. 네이버 실제 목록 기준(추적행 없던 6/11 유픽 등록분 177건 포함), 진행 중 주문 0, 삭제 전 원상품 JSON 백업 _workspace/naver-backup-20261030/, 추적행 제거·주문 기록 유지 |

@@ -1,11 +1,13 @@
 #!/usr/bin/env node
 /**
  * 도매아토즈(삼일유통) → 쿠팡 등록 — 1 상품(idx) = 1 쿠팡 상품(단일 item). docs/plan-domeatoz.md P2 (2026-10-26)
- *   node scripts/domeatoz-register.mjs --dry [--only=3087174,2863414] [--limit=N] [--no-approval] [--show-payload]
+ *   node scripts/domeatoz-register.mjs --dry [--only=3087174,2863414] [--limit=N] [--no-approval] [--show-payload] [--no-market]
  *
  *  - 대상: jimscanner_domeatoz_products active · 자동제외 없음 · register_excluded=false · 시세 조회됨 · 판정 OK
  *    (판정은 저장된 시세 요약으로 재현: 기준 = market_p25 ?? market_low → lib/domeatoz-price.mjs decide). STRUCTURAL·NO_MATCH 는 등록 안 함.
  *    시세 조회(domeatoz-market.mjs)가 뒤에서 돌며 OK 가 늘어나므로 register-drip.sh 로 회차마다 새 OK 를 이어 붙인다(사장님 2026-10-26 "확인된 것 먼저, 확인될 때마다 추가").
+ *  - --no-market: 시세 미조회·NO_MATCH·STRUCTURAL 도 목표가(순마진 10%)로 등록(decideNoMarket, OK 는 시세가 그대로·먼저).
+ *    사장님 2026-10-30 "시세조회하지말고 등록해" — 3분 1검색 시세 대조가 느려 등록이 멈추는 게 더 나쁘다.
  *  - 묶음 수 변형(… x 2개 / x 6개)은 도매아토즈에서 각각 다른 상품이라 쿠팡도 따로 올린다 — 하나로 묶으면 나중에 확인된 변형을 붙일 때
  *    판매중 상품 수정(임시저장 강등)이 필요하고, 주문↔매입 연결(listings.source_goods_no = idx)도 깨진다.
  *  - 가격: decide().price = clamp(목표 10%, 하한 7%·2,000원, 기준 시세 −1%). 원가 = 도매가 + 배송비(주문 1건당 3,000).
@@ -20,7 +22,7 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
 import { createClient } from '@supabase/supabase-js'
-import { decide, COUPANG_FEE } from './lib/domeatoz-price.mjs'
+import { decide, decideNoMarket, COUPANG_FEE } from './lib/domeatoz-price.mjs'
 import { purchaseSpecOf, specOf } from './lib/domeatoz-spec.mjs'
 import { buildPurchaseOptions } from './lib/coupang-purchase-options.mjs'
 import { fillSearchTags } from './lib/search-tags.mjs'
@@ -40,7 +42,7 @@ const MAX_TITLE_LEN = 100
 const PRIVACY_NOTICE = '[개인정보 처리 위탁 안내] 이 상품은 공급사에서 직접 발송됩니다. 배송을 위해 주문 시 입력하신 수령인 정보(이름·연락처·주소)가 공급사에 전달됩니다. 제주·도서산간 지역은 배송이 제한될 수 있습니다.'
 
 const args = process.argv.slice(2)
-const DRY = args.includes('--dry'), NO_APPROVAL = args.includes('--no-approval')
+const DRY = args.includes('--dry'), NO_APPROVAL = args.includes('--no-approval'), NO_MARKET = args.includes('--no-market')
 const argOf = (k) => args.find((a) => a.startsWith(`--${k}=`))?.split('=').slice(1).join('=')
 const LIMIT = +(argOf('limit') || 0) || 0
 const ONLY = (argOf('only') || '').split(',').map((s) => s.trim()).filter((s) => /^\d{1,9}$/.test(s))
@@ -169,9 +171,14 @@ async function buildPayload(row, meta, cat, d) {
   if (opt.error) throw new Error(`구매옵션 — ${opt.error}`)
   const notices = buildNotices(nc, title, row, spec)
   const imgs = Array.isArray(row.images) ? row.images.filter(Boolean) : []
-  const rep0 = row.thumb_url || imgs[0]
-  if (!rep0) throw new Error('대표 이미지 없음')
-  const rep = await ensureImageSpec(rep0, `domeatoz/${row.idx}/rep`)
+  const repCands = [...new Set([row.thumb_url, ...imgs].filter(Boolean))].slice(0, 5)
+  if (!repCands.length) throw new Error('대표 이미지 없음')
+  // 404·410 = 공급사가 지운 이미지 → 다음 이미지로. 전부 지워졌으면 결정적 실패(제외) — 일시 장애로 세면 매 회차 같은 건에서 멈춘다(2026-10-30 858건 정지)
+  let rep = null
+  for (const u of repCands) {
+    try { rep = await ensureImageSpec(u, `domeatoz/${row.idx}/rep`); break } catch (e) { if (!/\((404|410)\)$/.test(e.message)) throw e }
+  }
+  if (!rep) throw new Error(`대표 이미지 없음 — 공급사 이미지 ${repCands.length}장 모두 404`)
   const contentImgs = []
   for (const u of (Array.isArray(row.detail_images) ? row.detail_images : []).slice(0, 10)) if (typeof u === 'string' && await downloadable(u)) contentImgs.push(u)
   // 상세 이미지가 없으면 추가 이미지 → 대표 이미지 순으로 채운다 — 쿠팡은 상세 1장 이상 필수(없으면 승인반려)
@@ -212,7 +219,10 @@ async function resolveCategory(row, title) {
 
 // ── 대상 ──
 async function fetchAll(build) { const PAGE = 1000, out = []; for (let from = 0; ; from += PAGE) { const { data, error } = await build().range(from, from + PAGE - 1); if (error) throw new Error(error.message); out.push(...(data ?? [])); if ((data ?? []).length < PAGE) return out } }
-let rows = await fetchAll(() => sb.from(TABLE).select('*').eq('status', 'active').is('auto_excluded_reason', null).eq('register_excluded', false).not('market_checked_at', 'is', null).order('idx'))
+let rows = await fetchAll(() => {
+  const q = sb.from(TABLE).select('*').eq('status', 'active').is('auto_excluded_reason', null).eq('register_excluded', false)
+  return (NO_MARKET ? q : q.not('market_checked_at', 'is', null)).order('idx')
+})
 if (ONLY.length) rows = rows.filter((r) => ONLY.includes(String(r.idx)))
 let existing
 try { existing = await fetchAll(() => sb.from('jimscanner_coupang_listings').select('source_goods_no, status, last_synced_at').eq('source', SOURCE).order('id')) } catch (e) { console.error('기등록 조회 실패:', e.message); process.exit(1) }
@@ -220,16 +230,16 @@ try { existing = await fetchAll(() => sb.from('jimscanner_coupang_listings').sel
 const existingSet = new Set(existing.filter((r) => r.status !== 'FAILED' || (r.last_synced_at && Date.now() - Date.parse(r.last_synced_at) < 24 * 3600e3)).map((r) => String(r.source_goods_no)))
 const skipped = []
 const candidates = rows
-  .map((r) => { const ref = r.market_p25 ?? r.market_low; return { ...r, _d: decide(r.wholesale_price, r.delivery_price, ref ? [ref] : []) } })
+  .map((r) => { const ref = r.market_p25 ?? r.market_low; return { ...r, _d: (NO_MARKET ? decideNoMarket : decide)(r.wholesale_price, r.delivery_price, ref ? [ref] : []) } })
   .filter((r) => {
     if (existingSet.has(String(r.idx))) { skipped.push([r.idx, '이미 등록됨']); return false }
-    if (r._d.verdict !== 'OK') { skipped.push([r.idx, `시세 ${r._d.verdict}`]); return false }
+    if (r._d.verdict !== 'OK' && r._d.verdict !== 'TARGET') { skipped.push([r.idx, `시세 ${r._d.verdict}`]); return false }
     const block = nameBlock(cleanTitle(r))
     if (block) { skipped.push([r.idx, `상품명 🚫 ${block}`]); return false }
     return true
   })
-  .sort((a, b) => b._d.net - a._d.net) // 순이익 큰 것부터
-console.log(`=== 도매아토즈 → 쿠팡 등록 ${DRY ? '[DRY]' : ''}${NO_APPROVAL ? ' [승인요청 안 함]' : ''} · 수수료 ${(COUPANG_FEE * 100).toFixed(1)}%${LIMIT ? ` · 이번 실행 성공 ${LIMIT}건까지` : ''} ===`)
+  .sort((a, b) => (a._d.verdict === 'OK' ? 0 : 1) - (b._d.verdict === 'OK' ? 0 : 1) || b._d.net - a._d.net) // 시세 OK 먼저, 그 안에선 순이익 큰 것부터
+console.log(`=== 도매아토즈 → 쿠팡 등록 ${DRY ? '[DRY]' : ''}${NO_APPROVAL ? ' [승인요청 안 함]' : ''}${NO_MARKET ? ' [시세 판정 없이 목표가]' : ''} · 수수료 ${(COUPANG_FEE * 100).toFixed(1)}%${LIMIT ? ` · 이번 실행 성공 ${LIMIT}건까지` : ''} ===`)
 console.log(`후보 ${candidates.length}건 (제외 ${skipped.length} · 기등록 ${existingSet.size})`)
 if (skipped.length) { const g = skipped.reduce((m, [no, why]) => { const k = why.replace(/\(.*$/, ''); (m[k] ??= []).push(no); return m }, {}); for (const [why, nos] of Object.entries(g)) console.log(`  · ${why}: ${nos.length}건 (${nos.slice(0, 8).join(',')}${nos.length > 8 ? '…' : ''})`) }
 console.log('')
