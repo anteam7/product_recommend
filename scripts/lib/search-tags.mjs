@@ -148,14 +148,16 @@ function ruleTags({ name, brand, category, candidates }) {
   return [...seedKeywords({ name, brand, category }), ...picked]
 }
 
-function callClaude(prompt, { model, timeoutMs = 150000 } = {}) {
+// cwd·allowedTools: 이미지 판독처럼 파일을 읽혀야 할 때만(domeatoz-spec-from-images.mjs — 이미지 폴더를 cwd 로, Read 만 허용)
+export function callClaude(prompt, { model, timeoutMs = 150000, cwd = os.tmpdir(), allowedTools = null } = {}) {
   // claude CLI 는 ANTHROPIC_API_KEY 가 보이면 구독 대신 API 키로 인증 → 자식 env 에서 제거([[claude_cli_subprocess_env]]).
   // cwd 는 임시 폴더 — 레포 CLAUDE.md("AGENTS.md 먼저 읽기")가 붙어 도구를 쓰려 들지 않게.
   // --strict-mcp-config(+ --mcp-config 없음) = MCP 서버를 하나도 안 띄움: 없으면 플러그인 MCP(gitkraken 등)가 호출마다 떠서 안 죽고 쌓인다(2026-10-16 시험 24회 → 26쌍 잔류)
   const env = { ...process.env }
   delete env.ANTHROPIC_API_KEY; delete env.ANTHROPIC_AUTH_TOKEN; delete env.ANTHROPIC_BASE_URL
   return new Promise((resolve, reject) => {
-    const child = spawn('claude', ['-p', '--strict-mcp-config', '--output-format', 'json', '--model', model], { cwd: os.tmpdir(), env, stdio: ['pipe', 'pipe', 'pipe'], shell: process.platform === 'win32' })
+    const args = ['-p', '--strict-mcp-config', '--output-format', 'json', '--model', model, ...(allowedTools ? ['--allowedTools', allowedTools] : [])]
+    const child = spawn('claude', args, { cwd, env, stdio: ['pipe', 'pipe', 'pipe'], shell: process.platform === 'win32' })
     let out = '', err = ''
     const timer = setTimeout(() => { child.kill(); reject(new Error(`claude ${timeoutMs / 1000}s 초과`)) }, timeoutMs)
     child.stdout.on('data', (d) => { out += d })
@@ -179,7 +181,7 @@ function callClaude(prompt, { model, timeoutMs = 150000 } = {}) {
  * 응답에서 첫 번째 완결 JSON 객체 — sonnet 은 JSON 뒤에 설명·두 번째 블록을 덧붙이기도 해서 첫 { ~ 마지막 } 을 통째로 파싱하면
  * "Unexpected non-whitespace character after JSON" 으로 깨진다(2026-10-30 도매아토즈 드립). 못 찾으면 throw(호출부 catch 가 규칙 검색어로).
  */
-function firstJsonObject(text) {
+export function firstJsonObject(text) {
   for (let s = text.indexOf('{'); s >= 0; s = text.indexOf('{', s + 1)) {
     let depth = 0, str = false, esc = false
     for (let i = s; i < text.length; i++) {

@@ -4,7 +4,8 @@
  *   총량 = 첫 용량(ml·g, L·kg 환산) × 그 뒤 수량들의 곱(괄호 안 내역은 제외: "10g x 45T (15개입x3개)" = 450g).
  *   세트("+", "각N개")는 규격 비교 불가.
  */
-const VOL = /(\d+(?:\.\d+)?)\s*(ml|mL|ML|g|G|kg|KG|Kg|l|L)(?![a-zA-Z])/
+// 단위 뒤 영문자는 단위가 아님(…"gold" 등) — 단, 곱하기 x 는 붙여 쓴다("355mlx48캔"·"30gx30스틱", 2026-11-01 이걸로 7건 등록 실패)
+const VOL = /(\d+(?:\.\d+)?)\s*(ml|mL|ML|g|G|kg|KG|Kg|l|L)(?![a-wyzA-WYZ])/
 const VOL_G = new RegExp(VOL.source, 'g')
 const CNT_G = /[x×*]\s*(\d+)|(\d+)\s*(?:개입|개|입|캔|병|매|팩|PET|pet|번들|롤|포|봉지|봉|박스|BOX|box|EA|ea|스틱|컵|통|T|P|p)(?![a-zA-Z가-힣])/g
 function normVol(n, u) {

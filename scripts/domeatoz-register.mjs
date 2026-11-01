@@ -154,18 +154,33 @@ async function rejectComment(spid) {
   try { const h = await api('GET', `/v2/providers/seller_api/apis/api/v1/marketplace/seller-products/${spid}/histories`); return (h.body?.data ?? []).find((x) => /반려/.test(x.statusName || '') && x.comment)?.comment || null } catch { return null }
 }
 
+// 상세 이미지 표시사항에서 읽은 낱개 규격(domeatoz-spec-from-images.mjs — 이미지 글자·이름 개수로 검증된 것만, rejected 는 못 쓴 응답)
+const UNIT_SPEC = (() => { try { return JSON.parse(readFileSync(path.join(__dirname, 'lib', 'domeatoz-unit-spec.json'), 'utf8')) } catch { return {} } })()
+function imageSpecOf(idx) {
+  const u = UNIT_SPEC[idx]
+  if (!u || u.rejected || !(u.per > 0) || !(u.pieces >= 1) || !['g', 'ml'].includes(u.unit)) return null
+  const weightG = u.unit === 'g' ? u.per : null, volumeMl = u.unit === 'ml' ? u.per : null
+  return u.pieces > 1 ? { mode: 'piece', weightG, volumeMl, pieces: u.pieces, perPack: u.pieces, packs: 1 } : { mode: 'single', weightG, volumeMl, packs: 1 }
+}
+
 async function buildPayload(row, meta, cat, d) {
   const title = cleanTitle(row)
   const nc = pickNoticeCategory(meta.noticeCategories)
   if (!nc) throw new Error(`식품 고시 없는 카테고리(${(meta.noticeCategories ?? []).map((n) => n.noticeCategoryName).join(',') || '고시없음'})`)
-  let spec = purchaseSpecOf(title)
+  const img = imageSpecOf(row.idx)
+  // 세트 이름("딸기 192g + 사과 192g 각2개") 등 이름으로 규격을 못 만들면 상세 이미지 표시사항의 낱개 규격(2026-11-01)
+  let spec = purchaseSpecOf(title) ?? img
   if (!spec) throw new Error('구매옵션 — 상품명에 용량(g·ml)·개수 없음')
   let opt = buildPurchaseOptions(meta.attributes ?? [], spec, 1)
-  // 개수만 있는 이름("카페믹스 50T")인데 중량·용량 필수 카테고리 → 쿠팡 같은 상품 표기의 낱개 중량을 따른다(사장님 2026-10-28)
+  // 개수만 있는 이름("카페믹스 50T")인데 중량·용량 필수 카테고리 → 상세 이미지 표시사항의 낱개 중량(같은 개수일 때),
+  // 없으면 쿠팡 같은 상품 표기의 낱개 중량을 따른다(사장님 2026-10-28)
   if (opt.error && spec.mode === 'count') {
-    const u = unitMeasureFromMarket(row, spec.pieces)
-    if (!u) throw new Error(`구매옵션 — ${opt.error} · 같은 브랜드 쿠팡 표기 중량 없음`)
-    spec = { mode: 'piece', weightG: u.u === 'g' ? u.v : null, volumeMl: u.u === 'ml' ? u.v : null, pieces: spec.pieces, perPack: spec.pieces, packs: 1 }
+    if (img && img.pieces === spec.pieces) spec = img
+    else {
+      const u = unitMeasureFromMarket(row, spec.pieces)
+      if (!u) throw new Error(`구매옵션 — ${opt.error} · 상세 이미지·같은 브랜드 쿠팡 표기 중량 없음`)
+      spec = { mode: 'piece', weightG: u.u === 'g' ? u.v : null, volumeMl: u.u === 'ml' ? u.v : null, pieces: spec.pieces, perPack: spec.pieces, packs: 1 }
+    }
     opt = buildPurchaseOptions(meta.attributes ?? [], spec, 1)
   }
   if (opt.error) throw new Error(`구매옵션 — ${opt.error}`)
@@ -220,7 +235,9 @@ async function resolveCategory(row, title) {
 // ── 대상 ──
 async function fetchAll(build) { const PAGE = 1000, out = []; for (let from = 0; ; from += PAGE) { const { data, error } = await build().range(from, from + PAGE - 1); if (error) throw new Error(error.message); out.push(...(data ?? [])); if ((data ?? []).length < PAGE) return out } }
 let rows = await fetchAll(() => {
-  const q = sb.from(TABLE).select('*').eq('status', 'active').is('auto_excluded_reason', null).eq('register_excluded', false)
+  // --dry --only 는 등록 제외 상품도 미리 볼 수 있다(제외 사유를 고친 뒤 해제 전 확인) — 실제 등록은 제외 해제 후에만
+  const q0 = sb.from(TABLE).select('*').eq('status', 'active').is('auto_excluded_reason', null)
+  const q = DRY && ONLY.length ? q0 : q0.eq('register_excluded', false)
   return (NO_MARKET ? q : q.not('market_checked_at', 'is', null)).order('idx')
 })
 if (ONLY.length) rows = rows.filter((r) => ONLY.includes(String(r.idx)))
