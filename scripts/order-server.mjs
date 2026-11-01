@@ -1209,7 +1209,7 @@ async function runFlowDomeatoz(r, full = null) {
   const charged = balanceAfter != null ? before - balanceAfter : null
   if (!found) {
     // 적립금이 빠졌으면 주문은 들어간 것 — 발주완료로 기록해 같은 주문을 다시 결제하지 않게 한다(주문코드는 사람이 확인)
-    if (charged > 0) return { ok: true, done: true, depositPaid: true, orderNo: null, total: charged, unitCost: unit, depositBalanceAfter: balanceAfter, msg: `도매아토즈 적립금 ${charged.toLocaleString()}원 차감됐으나 주문 목록에서 아직 못 찾음 — 주문배송조회에서 주문코드를 확인해 기록하세요${lastDialog()}` }
+    if (charged > 0) return { ok: true, done: true, depositPaid: true, orderNo: null, total: charged, unitCost: unit, depositBalanceAfter: balanceAfter, depositBalanceExact: true, msg: `도매아토즈 적립금 ${charged.toLocaleString()}원 차감됐으나 주문 목록에서 아직 못 찾음 — 주문배송조회에서 주문코드를 확인해 기록하세요${lastDialog()}` }
     return { ok: false, msg: `결제하기 후 주문 확인 실패(적립금 차감 없음) — 열린 창에서 상태를 확인하세요${lastDialog()}` }
   }
   const paid = (Number(found.IO_TotalPrice) || 0) + (Number(found.IO_DeliveryPrice) || 0)
@@ -1217,7 +1217,7 @@ async function runFlowDomeatoz(r, full = null) {
   const left = balanceAfter ?? before - total
   const mismatch = paid && paid !== orderTotal ? ` ⚠ 주문 금액 ${paid.toLocaleString()}원 ≠ 주문서 ${orderTotal.toLocaleString()}원` : charged != null && charged !== total ? ` ⚠ 적립금 차감 ${charged.toLocaleString()}원 ≠ 주문 금액 ${total.toLocaleString()}원` : ''
   return {
-    ok: true, done: true, depositPaid: true, orderNo: found.IO_OrderNumber ?? null, total, unitCost: unit, depositBalanceAfter: left,
+    ok: true, done: true, depositPaid: true, orderNo: found.IO_OrderNumber ?? null, total, unitCost: unit, depositBalanceAfter: left, depositBalanceExact: balanceAfter != null,
     msg: `도매아토즈 적립금 결제 완료 — 주문코드 ${found.IO_OrderNumber ?? '(확인필요)'} · ${total.toLocaleString()}원 차감 · 적립금 잔액 ${left.toLocaleString()}원${mismatch}`,
   }
 }
@@ -1268,7 +1268,7 @@ async function execPurchase(orderKey, fullMode) {
     const now = new Date().toISOString()
     const upd = { purchase_status: out.depositPaid ? 'ORDERED' : 'AWAITING_DEPOSIT', purchase_ordered_at: now, updated_at: now }
     // 기존 메모(주문별 매입처 변경 기록 등)는 보존하고 뒤에 붙인다 (r.order = resolveOrder의 select * 행)
-    if (out.depositPaid) upd.purchase_note = [r.order.purchase_note, `[${depositLabel(r.source)}] ${out.total?.toLocaleString() ?? '?'}원 결제완료 · 잔액 약 ${out.depositBalanceAfter?.toLocaleString() ?? '?'}원`].filter(Boolean).join(' / ')
+    if (out.depositPaid) upd.purchase_note = [r.order.purchase_note, `[${depositLabel(r.source)}] ${out.total?.toLocaleString() ?? '?'}원 결제완료 · 잔액 ${out.depositBalanceExact ? '' : '약 '}${out.depositBalanceAfter?.toLocaleString() ?? '?'}원`].filter(Boolean).join(' / ')
     if (out.total > 0) upd.purchase_total_cost = out.total
     // purchase_unit_cost를 안 채우면 어드민 PurchaseCostCell이 "운송비 = 합계 - 상품가×수량"으로 역산하면서
     // 상품가가 0 → 총 결제금액 전체가 운송비 칸에 들어가 보이는 문제가 있었다(2026-09-02 사용자 리포트,

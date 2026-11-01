@@ -8,12 +8,21 @@ import { parsePurchaseNote } from '../depositNote'
 // 이 값이 안 보이면 사람이 어디로 얼마를 보내야 할지 알 수 없다. 입금 후 [✓입금완료] 처리 전제 조건.
 export function DepositInfo({ note, awaiting }: { note: string; awaiting: boolean }) {
   const [copied, setCopied] = useState(false)
-  const { deposit, mileageUsed, rest } = parsePurchaseNote(note)
+  const { deposit, prepaid, mileageUsed, rest } = parsePurchaseNote(note)
   const restLine = rest.length ? <div className="mt-1 text-[11px] text-gray-500 line-clamp-2">📝 {rest.join(' / ')}</div> : null
   const mileageLine = mileageUsed ? `적립금 ${mileageUsed.toLocaleString()}원 사용` : null
+  // 선충전 결제(도매아토즈 적립금·웰루트 예치금) — 결제 후 남은 잔액을 결제 행마다 보여 충전할 때를 알게(사장님 2026-11-01)
+  const prepaidLine = prepaid ? (
+    <div className="mt-1 inline-flex flex-wrap items-center gap-x-1 rounded border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[11px] text-emerald-900">
+      <span>🎟 {prepaid.label} {prepaid.paid.toLocaleString()}원 결제</span>
+      {prepaid.balanceAfter != null && (
+        <span className="font-semibold">· 남은 {prepaid.label} {prepaid.approx ? '약 ' : ''}{prepaid.balanceAfter.toLocaleString()}원</span>
+      )}
+    </div>
+  ) : null
   if (!deposit) {
     // 결제 기록이 아닌 메모(매입처 변경 기록 등)는 조용히 한 줄로만
-    return <>{mileageLine && <div className="mt-1 text-[11px] text-gray-500">🎟 {mileageLine}</div>}{restLine}</>
+    return <>{prepaidLine}{mileageLine && <div className="mt-1 text-[11px] text-gray-500">🎟 {mileageLine}</div>}{restLine}</>
   }
   const { bank, account, holder, amount, deadline } = deposit
 
@@ -31,6 +40,7 @@ export function DepositInfo({ note, awaiting }: { note: string; awaiting: boolea
         <div className="mt-1 text-[10px] text-gray-400">
           입금계좌 {bank} <span className="font-mono">{account}</span> · {amount.toLocaleString()}원{mileageLine ? ` (${mileageLine})` : ''}
         </div>
+        {prepaidLine}
         {restLine}
       </>
     )
@@ -53,6 +63,7 @@ export function DepositInfo({ note, awaiting }: { note: string; awaiting: boolea
           예금주 {holder || '-'}{deadline ? ` · ${deadline}까지 입금` : ''} — 이체 후 [✓ 입금완료]
         </div>
       </div>
+      {prepaidLine}
       {restLine}
     </>
   )

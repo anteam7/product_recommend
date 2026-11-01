@@ -29,10 +29,19 @@ test('77바이오 가상계좌 — 기한 포함', () => {
   assert.equal(parsePurchaseNote('[가상계좌] 기업은행 07500000000003 (예금주 (주)매입처) 14,300원을 2026-09-18 까지 입금').deposit?.holder, '(주)매입처')
 })
 
-test('결제 기록이 아닌 메모·적립금 전액 결제는 그대로 남긴다', () => {
-  const p = parsePurchaseNote('[적립금] 29,000원 결제완료 · 잔액 약 550원')
+test('도매아토즈 적립금 결제 — 남은 적립금(사이트 값 / 계산값은 약)', () => {
+  const p = parsePurchaseNote('[적립금] 11,311원 결제완료 · 잔액 85,874원')
+  assert.deepEqual(p.prepaid, { label: '적립금', paid: 11311, balanceAfter: 85874, approx: false })
   assert.equal(p.deposit, null)
-  assert.equal(p.mileageUsed, null)
-  assert.deepEqual(p.rest, ['[적립금] 29,000원 결제완료 · 잔액 약 550원'])
-  assert.deepEqual(parsePurchaseNote(null), { deposit: null, mileageUsed: null, rest: [] })
+  assert.deepEqual(p.rest, [])
+  assert.deepEqual(parsePurchaseNote('[예치금] 20,090원 결제완료 · 잔액 약 50,795원').prepaid, { label: '예치금', paid: 20090, balanceAfter: 50795, approx: true })
+  assert.deepEqual(parsePurchaseNote('[적립금] 13,000원 결제완료 · 잔액 약 ?원').prepaid, { label: '적립금', paid: 13000, balanceAfter: null, approx: false })
+})
+
+test('결제 기록이 아닌 메모는 그대로 남긴다', () => {
+  const p = parsePurchaseNote('주문코드 확인 필요')
+  assert.equal(p.deposit, null)
+  assert.equal(p.prepaid, null)
+  assert.deepEqual(p.rest, ['주문코드 확인 필요'])
+  assert.deepEqual(parsePurchaseNote(null), { deposit: null, prepaid: null, mileageUsed: null, rest: [] })
 })
