@@ -35,6 +35,16 @@ export function createCoupangOrdersSyncOps({ sb, env, log = () => {} }) {
     return kst.toISOString().slice(0, 10) // yyyy-MM-dd
   }
   const sleep = (ms) => new Promise((s) => setTimeout(s, ms))
+  // jsonb 는 키 순서를 바꿔 저장하므로 키를 정렬해 비교한다
+  const canon = (v) => Array.isArray(v) ? `[${v.map(canon).join(',')}]`
+    : v && typeof v === 'object' ? `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${canon(v[k])}`).join(',')}}`
+    : JSON.stringify(v ?? null)
+  // 바뀐 주문만 기록 — 매시 31일치 전 주문(raw_payload 포함)을 다시 쓰던 게 Disk IO 고갈의 한 원인(2026-11-05).
+  // 쿠팡 응답(raw_payload)과 우리 컬럼(listing_id, 송장 등록 때 낙관 반영한 shipping_status 등)이 모두 같을 때만 건너뛴다.
+  const ORDER_COLS = 'order_item_id, order_id, vendor_id, shipment_box_id, listing_id, seller_product_id, vendor_item_id, product_name, option_name, shipping_count, sale_price, order_price, discount_amount, shipping_status, receiver_name, receiver_phone, receiver_address, receiver_zip_code, raw_payload'
+  const NOT_COMPARED = new Set(['order_item_id', 'raw_payload', 'ordered_at', 'last_synced_at']) // ordered_at 은 형식이 달라 raw_payload 로 대신 비교
+  const sameAsStored = (prev, row, payloadKey) => !!prev && canon(prev.raw_payload) === payloadKey
+    && Object.keys(row).every((k) => NOT_COMPARED.has(k) || String(prev[k] ?? '') === String(row[k] ?? ''))
 
   /**
    * 취소·반품 반영 + 창 밖 멈춘 주문 갱신 (2026-09-27).
@@ -155,11 +165,22 @@ export function createCoupangOrdersSyncOps({ sb, env, log = () => {} }) {
     }
     const listingMap = new Map(listings.map((l) => [l.seller_product_id, l.id]))
 
+    // 저장된 주문 — 비교를 못 하면(조회 실패) 예전처럼 전부 upsert
+    const itemIds = [...new Set(orderItemsAll.flatMap((o) => (o.orderItems ?? []).map((it) => it.vendorItemPackageId || o.shipmentBoxId)).filter(Boolean))]
+    const stored = new Map()
+    for (let i = 0; i < itemIds.length; i += 200) {
+      const { data, error } = await sb.from('jimscanner_coupang_orders').select(ORDER_COLS).in('order_item_id', itemIds.slice(i, i + 200))
+      if (error) { log(`  저장된 주문 조회 실패 — 이번 회차는 전부 기록: ${error.message}`); stored.clear(); break }
+      for (const s of data ?? []) stored.set(String(s.order_item_id), s)
+    }
+
     let inserted = 0
+    let unchanged = 0
     let errors = errorSamples.length
     for (const order of orderItemsAll) {
       try {
         const items = order.orderItems ?? []
+        const payloadKey = canon(order)
         for (const it of items) {
           // vendorItemPackageId는 비-패키지 상품에서 0(falsy)이라 ??로는 못 거름 → ||로 주문 단위 shipmentBoxId 사용
           const orderItemId = it.vendorItemPackageId || order.shipmentBoxId
@@ -187,6 +208,7 @@ export function createCoupangOrdersSyncOps({ sb, env, log = () => {} }) {
             raw_payload: order,
             last_synced_at: new Date().toISOString(),
           }
+          if (sameAsStored(stored.get(String(orderItemId)), row, payloadKey)) { unchanged++; continue }
           const { error } = await sb.from('jimscanner_coupang_orders').upsert(row, { onConflict: 'order_item_id' })
           if (error) {
             errors++
@@ -215,7 +237,7 @@ export function createCoupangOrdersSyncOps({ sb, env, log = () => {} }) {
     } else log('  목록 조회 일부 실패 — 취소·반품 반영(reconcile)은 이번 회차 생략')
 
     const durationMs = Date.now() - t0
-    log(`[coupang-orders-sync/${triggeredBy}] total=${total} inserted=${inserted} errors=${errors} reconcile(checked=${reconciled.checked} cancelled=${reconciled.cancelled} refreshed=${reconciled.refreshed}${reconciled.pending ? ` pending=${reconciled.pending}` : ''}) (${(durationMs / 1000).toFixed(1)}s)`)
+    log(`[coupang-orders-sync/${triggeredBy}] total=${total} inserted=${inserted} unchanged=${unchanged} errors=${errors} reconcile(checked=${reconciled.checked} cancelled=${reconciled.cancelled} refreshed=${reconciled.refreshed}${reconciled.pending ? ` pending=${reconciled.pending}` : ''}) (${(durationMs / 1000).toFixed(1)}s)`)
 
     if (runId) {
       try {
@@ -231,7 +253,7 @@ export function createCoupangOrdersSyncOps({ sb, env, log = () => {} }) {
       } catch { /* noop */ }
     }
 
-    return { total, inserted, errors, errorSamples, durationMs, cancelled: reconciled.cancelled, refreshed: reconciled.refreshed }
+    return { total, inserted, unchanged, errors, errorSamples, durationMs, cancelled: reconciled.cancelled, refreshed: reconciled.refreshed }
   }
 
   return { syncRecentOrders }

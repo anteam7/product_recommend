@@ -181,7 +181,7 @@ Project ref `obxvucyhzlakensopalf` — 연결은 **Pooler(6543)만 가능**(직�
 | sold_count, view_count | integer | |
 | request_payload, last_response | jsonb | 등록 시 보낸 payload / 쿠팡 응답 원문 (디버깅용) |
 | registered_at, approved_at, last_synced_at | timestamptz | |
-| stock_status, last_stock_check, stock_sold_out_at, coupang_sale_stopped_at, auto_paused | | 재고 동기화 크론이 갱신 |
+| stock_status, last_stock_check, stock_sold_out_at, coupang_sale_stopped_at, auto_paused | | 재고 동기화 크론이 갱신 — 상태가 바뀌거나 판매중지·재개했을 때만 기록(2026-11-05 Disk IO 절감, last_stock_check 는 마지막 *변경* 시각) |
 
 ### `jimscanner_coupang_orders` — 주문
 | 컬럼 | 비고 |

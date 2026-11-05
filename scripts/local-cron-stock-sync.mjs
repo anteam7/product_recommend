@@ -439,7 +439,9 @@ try {
         // 정상 판매중 — 팔려서 줄어든 수량을 MIN_QTY 이상으로 되채운다(주문이 끊기지 않게)
         refilled += await ensureQuantity(row.seller_product_id)
       }
-      if (!DRY) await sb.from('jimscanner_coupang_listings').update(updates).eq('id', row.id)
+      // 바뀐 게 있을 때만 기록 — 매시 전 행 UPDATE 가 Disk IO 의 절반을 차지해 DB 가 멈췄다(2026-11-05)
+      const changed = status !== row.stock_status || Object.keys(updates).length > 2
+      if (!DRY && changed) await sb.from('jimscanner_coupang_listings').update(updates).eq('id', row.id)
       await sleep(200)
     } catch (e) { errors++; if (errors <= 3) console.log(`  row ${row.source_goods_no} error: ${e instanceof Error ? e.message : e}`) }
   }
