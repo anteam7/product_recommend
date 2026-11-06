@@ -23,7 +23,8 @@ const LOG = path.join(DIR, 'server.log')
 const PROJECT = 'jimscanner-personal'
 const CONTRACT = 'coupang-partner-links/v2'
 const PORT = 39211
-const WINDOW_MS = 5 * 60 * 1000
+// 브로커는 5분마다 오므로 직전 회차 결과(4~5분 전)는 창 밖이어야 한다 — 5분 창이면 한 회차씩 건너뛰어 실제로는 1분에 1건이 됐다(2026-11-05 실측)
+const WINDOW_MS = 3 * 60 * 1000
 const PER_WINDOW = 10 // 30초에 1건(사장님 2026-11-05 "30초나 20초에 한 번도 돼"). 브로커 회차당 20회 상한을 짐스캐너(회차당 ~6회)와 나눠 쓰므로 20초(15건)는 짐스캐너 몫을 깎는다
 const STATUSES = new Set(['OK', 'NOT_LINKABLE', 'FAILED', 'INVALID_REQUEST'])
 
@@ -59,8 +60,9 @@ function needsResult(t, rec, now) {
 function requestList(q, now) {
   // 쿠팡을 실제로 부른 결과만 센다 — 브로커 캐시(6시간) 재전송은 processedAt 이 처음 시각이라 창 밖으로 빠진다
   const recent = Object.values(q.records).filter((r) => r.processedAt && now - Date.parse(r.processedAt) < WINDOW_MS).length
+  // 먼저 넣은 묶음부터, 같은 묶음 안에서는 파일 순서(order)대로 — 순서가 곧 우선순위
   const pending = Object.entries(q.targets).filter(([id, t]) => needsResult(t, q.records[id], now))
-    .sort((a, b) => (a[1].addedAt < b[1].addedAt ? -1 : a[1].addedAt > b[1].addedAt ? 1 : a[0] < b[0] ? -1 : 1))
+    .sort((a, b) => (a[1].addedAt < b[1].addedAt ? -1 : a[1].addedAt > b[1].addedAt ? 1 : (a[1].order ?? 0) - (b[1].order ?? 0) || (a[0] < b[0] ? -1 : 1)))
   return { pending, room: Math.max(0, PER_WINDOW - recent) }
 }
 
@@ -167,12 +169,12 @@ if (cmd === 'serve') {
   let added = 0, changed = 0, skipped = 0, total = 0
   withLock(() => {
     const q = load()
-    for (const t of list) {
+    for (const [i, t] of list.entries()) {
       const keyword = String(t?.keyword ?? '').trim()
       if (typeof t?.id !== 'string' || !t.id || t.id.length > 200 || BAD_IDS.has(t.id) || !keyword || keyword.length > 100) { skipped++; continue }
       const prev = Object.hasOwn(q.targets, t.id) ? q.targets[t.id] : null
       if (!prev) added++; else if (prev.keyword !== keyword) changed++
-      q.targets[t.id] = { keyword, limit: Math.min(10, Math.max(1, Number(t.limit) || 10)), meta: t.meta ?? prev?.meta ?? null, addedAt: prev?.addedAt ?? now }
+      q.targets[t.id] = { keyword, limit: Math.min(10, Math.max(1, Number(t.limit) || 10)), meta: t.meta ?? prev?.meta ?? null, addedAt: prev?.addedAt ?? now, order: prev?.order ?? i }
     }
     save(q)
     total = Object.keys(q.targets).length

@@ -77,6 +77,13 @@ export function createDomeatozApi(env) {
       }
       return [...byNo.values()]
     },
+    /** 상품 1건 상세(가이드 /productInfo — 배송비·옵션·고시·인증·쿠팡 카테고리 코드). 응답 idx 가 다르면 throw */
+    async productInfo(idx) {
+      const j = await call('POST', '/productInfo', { productCode: domeatozProductCode(idx) })
+      const d = Array.isArray(j.data) ? j.data[0] : j.data
+      if (!d || String(d.idx) !== String(idx)) throw new Error(`/productInfo ${idx} 응답 이상(idx ${d?.idx ?? '없음'})`)
+      return d
+    },
     /** 주문번호 한 건(가이드 23번 /orderListSearch '주문번호' — 상품 줄 orderList 포함). 없으면 null */
     async orderByNo(orderNumber, { days = 60 } = {}) {
       for (const [beginDay, endDay] of windows(days)) {
@@ -87,6 +94,16 @@ export function createDomeatozApi(env) {
       return null
     },
   }
+}
+
+/** 상품코드 = 'AZ' + idx 8자리(삼일유통 DB 전 행 실측 2026-11-06) */
+export const domeatozProductCode = (idx) => 'AZ' + String(idx).padStart(8, '0')
+/** 판매 옵션(옵션품절 isSoldOut 'Y' = 정상 — 가이드 표기 그대로). 옵션 없는 상품은 [] */
+export const domeatozLiveOptions = (info) => (Number(info?.arOption?.optionType || 0) > 0 ? (info.arOption.items ?? []).filter((x) => x.isSoldOut === 'Y') : [])
+/** /productInfo 결과 → 재고 판정: 정상(1)이고 옵션이 없거나 판매 옵션이 하나라도 있으면 in_stock */
+export function domeatozStockOf(info) {
+  const hasOpt = Number(info?.arOption?.optionType || 0) > 0
+  return Number(info?.productState) === 1 && (!hasOpt || domeatozLiveOptions(info).length > 0) ? 'in_stock' : 'sold_out'
 }
 
 // 택배사명 → 쿠팡 코드표(lib/coupang-carrier-map.mjs)가 아는 이름. 모르는 이름은 원문 그대로(쿠팡 등록 단계에서 미매핑으로 사람 확인)

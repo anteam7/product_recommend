@@ -28,6 +28,7 @@ import { createClient } from '@supabase/supabase-js'
 import { makeSession, cafe24Login, cafe24BuildStockMap, mallLogin, mallCheckStock } from './lib/supplier-stock.mjs'
 import { tossSetStock } from './lib/toss-api.mjs'
 import { makeDomeatozSession, domeatozLogin, domeatozListSupplier } from './lib/domeatoz-site.mjs'
+import { createDomeatozApi, domeatozStockOf } from './lib/domeatoz-api.mjs'
 import { coupangClient, repriceCoupangListing, fetchNaverChannelProducts, syncNaverUpickListing, refreshUpickCatalog, loadUpickProducts } from './lib/upick-price-sync.mjs'
 import { naverApi } from './lib/naver-api.mjs'
 import { logExecution } from './lib/execution-log.mjs'
@@ -58,6 +59,8 @@ const NAVER_MIN_QTY = +(env.NAVER_MIN_QTY || 3)
 const NAVER_TARGET_QTY = +(env.NAVER_TARGET_QTY || 10)
 // 가격반영은 유픽 상세를 last_seen_at 기준으로 이 시간 안에 읽은 상품만 믿는다(오래된 값으로 가격을 바꾸지 않게).
 const PRICE_FRESH_HOURS = 72
+// 도매아토즈: 한 공급사의 재고 대상이 이 수 이상이면 공급사 목록을 훑고(삼일유통), 적으면 /productInfo 상품별(고른 다른 공급사 상품, 2026-11-06)
+const DOMEATOZ_LIST_MIN = 30
 
 // 공급처별 사이트
 const SUPPLIERS = {
@@ -363,23 +366,45 @@ try {
         console.log(`[local-cron-stock] ${conf.label} 로그인 OK (${srcRows.length}건 라이브 조회)`)
         await beatOnce(sb, `supplier:${src}`, 'ok', { kind: 'mall', targets: srcRows.length })
       } else if (conf.kind === 'domeatoz') {
-        // 대상 상품의 공급사 목록 전체를 훑는다. 목록에서 사라진 대상(공급사 삭제)은 품절 — 목록 함수가 끝을 못 찾으면 throw 하므로 잘린 목록으로 내리지 않는다
+        // 대상이 많은 공급사(삼일유통)는 공급사 목록 전체를 한 번 훑는다. 목록에서 사라진 대상(공급사 삭제)은 품절 — 목록 함수가 끝을 못 찾으면 throw 하므로 잘린 목록으로 내리지 않는다.
+        // 대상이 적은 공급사(domeatoz-adopt.mjs 로 고른 다른 공급사 상품, 2026-11-06)는 OPEN API /productInfo 상품별 — 공급사 하나가 3천~9천 개라 목록을 훑으면 매시 수백 쪽.
+        //   상품별: 정상 + (옵션 없음 또는 판매 옵션 1개 이상) = 재고, "상품을 찾을수 없습니다"(삭제) = 품절, 그 밖 조회 실패는 unknown(아무 조치 안 함).
+        //   ⚠ 옵션 하나만 품절된 것은 아직 쿠팡 item 단위로 내리지 않는다(상품 전체가 품절일 때만 판매중지).
         const site = makeDomeatozSession()
         await domeatozLogin(site, conf)
         const nos = [...new Set(srcRows.map((r) => String(r.source_goods_no)))]
-        const { data: codeRows, error: codeErr } = await sb.from(conf.table).select('supplier_code').in('idx', nos)
+        const { data: codeRows, error: codeErr } = await sb.from(conf.table).select('idx, supplier_code').in('idx', nos)
         if (codeErr) throw new Error(`공급사 코드 조회 실패: ${codeErr.message}`)
+        const byCode = new Map()
+        for (const r of codeRows ?? []) if (r.supplier_code) { if (!byCode.has(r.supplier_code)) byCode.set(r.supplier_code, []); byCode.get(r.supplier_code).push(String(r.idx)) }
         const map = new Map()
-        for (const code of new Set((codeRows ?? []).map((r) => r.supplier_code).filter(Boolean))) {
-          for (const x of await domeatozListSupplier(site, code)) map.set(String(x.IDX), Number(x.ProductState) === 1 ? 'in_stock' : 'sold_out')
+        let listed = 0, listHit = 0, apiChecked = 0, apiFail = 0, apiGone = 0, dzApi = null
+        for (const [code, codeNos] of byCode) {
+          if (codeNos.length >= DOMEATOZ_LIST_MIN) {
+            const listMap = new Map()
+            for (const x of await domeatozListSupplier(site, code)) listMap.set(String(x.IDX), Number(x.ProductState) === 1 ? 'in_stock' : 'sold_out')
+            listed += codeNos.length
+            listHit += codeNos.filter((n) => listMap.has(n)).length
+            if (listMap.size) for (const n of codeNos) map.set(n, listMap.get(n) ?? 'sold_out')
+          } else {
+            dzApi ??= createDomeatozApi(env)
+            for (const n of codeNos) {
+              try { map.set(n, domeatozStockOf(await dzApi.productInfo(n))); apiChecked++ } catch (e) {
+                const msg = e instanceof Error ? e.message : String(e)
+                // 공급사가 지운 상품 = "해당 상품을 찾을수 없습니다"(2026-11-06 실측) → 목록 경로의 '목록에서 사라짐'과 같이 품절
+                if (/상품을\s*찾을\s*수\s*없/.test(msg)) { map.set(n, 'sold_out'); apiChecked++; apiGone++; console.log(`[local-cron-stock] 도매아토즈 #${n} 공급사에서 삭제됨("${msg.slice(-30)}") → 품절 처리`) }
+                else { apiFail++; if (apiFail <= 3) console.log(`[local-cron-stock] ⚠ 도매아토즈 #${n} 상품 조회 실패(이번 회차 판단 보류): ${msg}`) }
+              }
+              await sleep(1000) // 연달아 부르면 가끔 ECONNRESET
+            }
+          }
         }
-        const hit = nos.filter((n) => map.has(n)).length
-        if (map.size) for (const n of nos) if (!map.has(n)) map.set(n, 'sold_out')
         stockMaps[src] = map
+        const hit = listHit + apiChecked
         const soldN = nos.filter((n) => map.get(n) === 'sold_out').length
-        console.log(`[local-cron-stock] ${conf.label} 목록 ${map.size - (nos.length - hit)}건 · 대상 ${nos.length}건 중 품절 ${soldN}(목록에 없음 ${nos.length - hit})`)
-        if (hit === 0) skipped.push(`${conf.label}(목록 0건 매칭)`)
-        await beatOnce(sb, `supplier:${src}`, hit === 0 ? 'fail' : 'ok', { kind: 'domeatoz', mapSize: map.size, soldOut: soldN, targets: nos.length, hit })
+        console.log(`[local-cron-stock] ${conf.label} 대상 ${nos.length}건 — 목록 확인 ${listed}건(목록에 없음 ${listed - listHit}) · 상품별 확인 ${apiChecked}건(삭제 ${apiGone} · 실패 ${apiFail}) · 품절 ${soldN}`)
+        if (hit === 0) skipped.push(`${conf.label}(목록·상품 조회 0건 매칭)`)
+        await beatOnce(sb, `supplier:${src}`, hit === 0 ? 'fail' : 'ok', { kind: 'domeatoz', mapSize: map.size, soldOut: soldN, targets: nos.length, hit, apiChecked, apiGone, apiFail })
       } else {
         await cafe24Login(session, conf)
         sessions[src] = session  // 유픽은 5) 가격반영에서 상세 재조회에 다시 쓴다

@@ -15,6 +15,9 @@
  *  - 구매옵션: lib/domeatoz-spec.mjs purchaseSpecOf(상품명) → lib/coupang-purchase-options.mjs ("142g 5개" → 개당 중량 142g · 수량 5개). 용량 없는 이름은 보류.
  *  - 이미지: 대표 = thumb_url(500px 미만이면 패딩 후 site-assets), 상세 = detail_images(esmplus, 공통 배너는 수집기가 제외) — 원본 detail_html 은 쓰지 않는다.
  *  - 기록: jimscanner_coupang_listings 1행(source 'domeatoz', source_goods_no = idx). 승인 후 재고는 coupang-followup-approvals.mjs --source=domeatoz.
+ *  - 일반 상품(2026-11-06, 식품 밖 — 다른 공급사 상품을 domeatoz-adopt.mjs 로 받은 것): 고시 = 분류별(의류·가방·자동차용품·주방용품) → '기타 재화',
+ *    필수 속성 = 옵션 축(색상/사이즈)·상품명(수량 "10개"·길이 "80cm")·없으면 색상 '혼합색상'/사이즈 'FREE', 수치를 못 읽으면 보류.
+ *    옵션 1개 = item 1개(판매 옵션만, 옵션별 추가금 반영) + jimscanner_listing_items 매핑. 판매 옵션 10개 초과는 제외(사장님 2026-11-06 "옵션이 많은 상품은 제외해").
  */
 import crypto from 'node:crypto'
 import sharp from 'sharp'
@@ -95,6 +98,90 @@ function fillNotice(dn, title, row, spec) {
 }
 const buildNotices = (nc, title, row, spec) => (nc.noticeCategoryDetailNames ?? []).filter((d) => d.required === 'MANDATORY').map((d) => ({ noticeCategoryName: nc.noticeCategoryName, noticeCategoryDetailName: d.noticeCategoryDetailName, content: fillNotice(d.noticeCategoryDetailName, title, row, spec) }))
 
+// ── 일반 상품(식품 밖, domeatoz-adopt.mjs 로 받은 다른 공급사 상품) ──
+const MAX_OPTIONS = 10 // 판매 옵션 10개 초과 제외 — 사장님 2026-11-06 "옵션이 많은 상품은 제외해"(반팔티 색상×사이즈 44개)
+const isFoodRow = (row) => row.group_1 === '식품'
+// 고시: 도매아토즈 분류(중·소·세분류·상품명)로 맞는 고시 → '기타 재화' → 전기·어린이·화학 등이 아닌 첫 고시(campingmoon-register 와 같은 취지)
+const GENERAL_NOTICE_PREF = [[/의류|티셔츠|셔츠|바지|점퍼|조끼|원피스|니트|코트|자켓|재킷/, '의류'], [/가방|백팩|크로스백|파우치|지갑/, '가방'], [/자동차/, '자동차용품'], [/주방|조리|식기/, '주방용품'], [/신발|운동화|구두/, '구두/신발'], [/스포츠|레저|캠핑|등산|낚시/, '스포츠용품']]
+const NOT_GENERAL_NOTICE = /전기|전자|어린이|화학|살생물|의료|화장품|가공식품|건강기능|축산|농|수산|영상가전|사무용기기|가구/
+function pickGeneralNotice(ncs, row) {
+  const g = [row.group_2, row.group_3, row.group_4, row.name_clean].filter(Boolean).join(' ')
+  for (const [re, name] of GENERAL_NOTICE_PREF) if (re.test(g)) { const f = (ncs ?? []).find((n) => n.noticeCategoryName.startsWith(name)); if (f) return f }
+  return (ncs ?? []).find((n) => n.noticeCategoryName === '기타 재화') || (ncs ?? []).find((n) => !NOT_GENERAL_NOTICE.test(n.noticeCategoryName)) || null
+}
+// 도매아토즈 고시 항목 순서(가이드 noticeCategory.xlsx — 실측: 1 의류 · 3 가방). 그 밖 고시는 값을 쓰지 않는다(순서 미확인)
+const DZ_NOTICE_KEYS = { 1: ['소재', '색상', '치수', '제조자', '세탁', '제조연월', '품질보증', 'AS'], 3: ['종류', '소재', '색상', '크기', '제조자', '취급', '품질보증', 'AS'] }
+const NOTICE_PLACEHOLDER = /상세(정보|페이지|설명)|별도\s*표기|참조|^\s*$/
+function dzNotice(row, key) {
+  const keys = DZ_NOTICE_KEYS[row.notice?.code], i = keys ? keys.indexOf(key) : -1
+  const v = i >= 0 ? String(row.notice?.items?.[i] ?? '').trim() : ''
+  return v && !NOTICE_PLACEHOLDER.test(v) ? v.slice(0, 200) : null
+}
+/** 도매아토즈 원산지 표기("국외|아시아|중국"·"국내|강원|강릉시"·"국내산"·"MADE IN Malaysia") → 제조국 */
+function originText(s) {
+  const t = String(s ?? '').trim()
+  if (!t || /국내외|상세/.test(t)) return '상세설명 참조'
+  if (/^국내|국내산|대한민국|^한국/.test(t)) return '대한민국'
+  const parts = t.split('|').map((x) => x.trim()).filter(Boolean)
+  return (parts[parts.length - 1] || '').replace(/^made\s+in\s*/i, '') || '상세설명 참조'
+}
+const sizeFromTitle = (t) => { const m = String(t).match(/(\d+(?:\.\d+)?)\s*(mm|cm|m|인치)(?![a-z가-힣])/i); return m ? `${m[1]}${m[2]}` : null }
+const setCountOf = (t) => { const m = String(t).match(/(\d{1,3})\s*(?:개|p|pcs|매|입)(?![a-z가-힣])/i); const n = m ? Number(m[1]) : 1; return n >= 1 && n <= 500 ? n : 1 }
+// 색상 필수인데 옵션에 색상이 없을 때: 상품명 색상어 → 재질 추정 → '혼합색상'(쿠팡 표준값, '단일색상'은 거절 — campingmoon-register 실측 2026-10-14)
+const COLOR_WORDS = [['블랙', /블랙|검정|검은/], ['화이트', /화이트|흰색|백색/], ['그레이', /그레이|회색/], ['실버', /실버|은색|스텐|스테인리스|알루미늄|메탈/], ['우드', /우드|원목/], ['브라운', /브라운|갈색/], ['베이지', /베이지/], ['네이비', /네이비|남색/], ['블루', /블루|파랑/], ['그린', /그린|초록/], ['레드', /레드|빨강/], ['핑크', /핑크|분홍/], ['옐로우', /옐로우|노랑/], ['골드', /골드|금색/], ['투명', /투명|클리어/]]
+const colorFromTitle = (title) => (COLOR_WORDS.find(([, re]) => re.test(title || '')) || [])[0] || '혼합색상'
+const pickUnit = (units, prefs) => { if (!units?.length) return ''; for (const x of prefs) if (units.includes(x)) return x; return units[0] }
+function fillGeneralNotice(dn, title, row, ctx) {
+  if (/품명|모델명|제품명/.test(dn)) return row.model_name ? `${title} (${row.model_name})` : title
+  if (/종류/.test(dn)) return dzNotice(row, '종류') || row.group_3 || '상세설명 참조'
+  if (/소재|재질/.test(dn)) return dzNotice(row, '소재') || '상세설명 참조'
+  if (/색상/.test(dn)) return ctx.colors || dzNotice(row, '색상') || '상세설명 참조'
+  if (/치수|크기|사이즈/.test(dn)) return ctx.sizes || dzNotice(row, '치수') || dzNotice(row, '크기') || sizeFromTitle(title) || '상세설명 참조'
+  if (/제조국|원산지/.test(dn)) return originText(row.origin)
+  if (/제조자|수입자|제조사/.test(dn)) return row.maker && row.maker !== '기타' ? row.maker : '상세설명 참조'
+  if (/세탁|취급/.test(dn)) return dzNotice(row, '세탁') || dzNotice(row, '취급') || '상세설명 참조'
+  if (/제조연월|출시/.test(dn)) return dzNotice(row, '제조연월') || '상세설명 참조'
+  if (/품질보증/.test(dn)) return '관련 법 및 소비자분쟁해결기준에 따름'
+  if (/A\/?S|전화|상담|책임자/.test(dn)) return COMPANY_CONTACT
+  if (/수입.*(기구|용기)|식품위생/.test(dn)) return originText(row.origin) === '대한민국' ? '해당없음(국내 제조)' : '상세설명 참조'
+  if (/인증|허가|KC/.test(dn)) return '해당사항 없음' // KC 의심 상품은 domeatoz-adopt.mjs 가 받지 않는다
+  return '상세설명 참조'
+}
+/** 도매아토즈 옵션 한 줄(itemName [1차, 2차]) → {color, size}. 색상·사이즈가 아닌 축은 쿠팡 속성에 못 넣으므로 {error} */
+function optionAxesOf(row, o) {
+  const names = row.options?.optionName ?? [], vals = o?.itemName ?? []
+  const out = { color: null, size: null }
+  for (let i = 0; i < names.length; i++) {
+    const nm = String(names[i] || '').trim(), v = String(vals[i] || '').trim()
+    if (!nm || !v) continue
+    if (/색상|컬러|색/.test(nm)) out.color = v
+    else if (/사이즈|크기|size/i.test(nm)) out.size = v
+    else return { error: `옵션 축 '${nm}' 매핑 규칙 없음` }
+  }
+  return out
+}
+/** item 필수 속성 — 옵션 축·상품명에서 채우고, 수치를 못 읽으면 {error}(지어내지 않는다) */
+function buildGeneralAttributes(meta, row, ax, title) {
+  const out = []
+  for (const a of meta.attributes ?? []) {
+    if (a.required !== 'MANDATORY') continue
+    const nm = a.attributeTypeName, exposed = a.exposed === 'EXPOSED' ? 'EXPOSED' : 'NONE'
+    let v
+    if (/수량/.test(nm) && a.dataType === 'NUMBER') v = `${setCountOf(title)}${pickUnit(a.usableUnits, ['개', '세트', '팩', '박스'])}`
+    else if (/색상|컬러/.test(nm)) v = ax.color || colorFromTitle(title)
+    else if (/사이즈|크기/.test(nm) && a.dataType !== 'NUMBER') v = ax.size || sizeFromTitle(title) || 'FREE'
+    else if (a.dataType === 'NUMBER' && a.usableUnits?.length) {
+      const unitAlt = [...a.usableUnits].sort((x, y) => y.length - x.length).map((u) => u.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')
+      const m = title.match(new RegExp(`(\\d+(?:\\.\\d+)?)\\s*(${unitAlt})(?![a-z가-힣])`, 'i'))
+      if (!m) return { error: `필수 수치 속성 '${nm}'(${a.usableUnits.join('/')}) 값을 상품명에서 못 읽음` }
+      v = `${m[1]}${a.usableUnits.find((u) => u.toLowerCase() === m[2].toLowerCase()) || m[2]}`
+    } else if (a.dataType === 'STRING') v = /모델|품번/.test(nm) && row.model_name ? row.model_name : '상세설명 참조'
+    else return { error: `필수 속성 '${nm}'(${a.dataType}) 처리 규칙 없음` }
+    out.push({ attributeTypeName: nm, attributeValueName: String(v).slice(0, 30), exposed })
+  }
+  return { attributes: out }
+}
+
 const BUCKET = 'site-assets', IMG_MIN = 500, IMG_MAX = 5000
 /** 쿠팡 대표 이미지 규격(최소 500x500·최대 5000x5000·10MB) 보정 — campingmoon-register.mjs 와 같은 규칙. DRY 는 업로드 없이 원본 URL */
 async function ensureImageSpec(url, key) {
@@ -163,7 +250,72 @@ function imageSpecOf(idx) {
   return u.pieces > 1 ? { mode: 'piece', weightG, volumeMl, pieces: u.pieces, perPack: u.pieces, packs: 1 } : { mode: 'single', weightG, volumeMl, packs: 1 }
 }
 
+/** 대표 이미지(규격 보정) + 상세 이미지(내려받기 되는 것만, 없으면 추가 이미지 → 대표) — 식품·일반 공용 */
+async function pickImages(row) {
+  const imgs = Array.isArray(row.images) ? row.images.filter(Boolean) : []
+  const repCands = [...new Set([row.thumb_url, ...imgs].filter(Boolean))].slice(0, 5)
+  if (!repCands.length) throw new Error('대표 이미지 없음')
+  // 404·410 = 공급사가 지운 이미지 → 다음 이미지로. 전부 지워졌으면 결정적 실패(제외) — 일시 장애로 세면 매 회차 같은 건에서 멈춘다(2026-10-30 858건 정지)
+  let rep = null
+  for (const u of repCands) {
+    try { rep = await ensureImageSpec(u, `domeatoz/${row.idx}/rep`); break } catch (e) { if (!/\((404|410)\)$/.test(e.message)) throw e }
+  }
+  if (!rep) throw new Error(`대표 이미지 없음 — 공급사 이미지 ${repCands.length}장 모두 404`)
+  const contentImgs = []
+  for (const u of (Array.isArray(row.detail_images) ? row.detail_images : []).slice(0, 10)) if (typeof u === 'string' && await downloadable(u)) contentImgs.push(u)
+  // 상세 이미지가 없으면 추가 이미지 → 대표 이미지 순으로 채운다 — 쿠팡은 상세 1장 이상 필수(없으면 승인반려)
+  if (!contentImgs.length) for (const u of imgs.slice(1, 5)) if (await downloadable(u)) contentImgs.push(u)
+  if (!contentImgs.length) { console.log('  ℹ 상세 이미지 없음 → 대표 이미지를 상세로 사용'); contentImgs.push(rep) }
+  const contents = [...contentImgs.map((u) => ({ contentsType: 'IMAGE_NO_SPACE', contentDetails: [{ content: u, detailType: 'IMAGE' }] })), { contentsType: 'TEXT', contentDetails: [{ content: PRIVACY_NOTICE, detailType: 'TEXT' }] }]
+  return { rep, contentImgs, contents }
+}
+const itemBase = (row, rep, notices, contents) => ({
+  maximumBuyCount: 0, maximumBuyForPerson: 0, maximumBuyForPersonPeriod: 1, outboundShippingTimeDay: OUTBOUND_DAYS, unitCount: 1,
+  adultOnly: 'EVERYONE', taxType: row.tax_type === '면세' ? 'FREE' : 'TAX', parallelImported: 'NOT_PARALLEL_IMPORTED', overseasPurchased: 'NOT_OVERSEAS_PURCHASED', pccNeeded: false,
+  emptyBarcode: true, emptyBarcodeReason: '바코드 없음', images: [{ imageOrder: 0, imageType: 'REPRESENTATION', vendorPath: rep }], notices, contents, offerCondition: 'NEW',
+})
+const productPayload = (row, title, cat, items) => ({
+  vendorId: VENDOR_ID, sellerProductName: title, displayProductName: title, displayCategoryCode: cat.code,
+  generalProductName: title, productGroup: title.split(/\s+/).slice(0, 3).join(' '), manufacture: row.maker && row.maker !== '기타' ? row.maker : '상세설명 참조',
+  saleStartedAt: new Date().toISOString().slice(0, 19), saleEndedAt: '2099-12-31T00:00:00',
+  deliveryMethod: 'SEQUENCIAL', deliveryCompanyCode: DELIVERY_COMPANY, deliveryChargeType: 'FREE', deliveryCharge: 0, freeShipOverAmount: 0, deliveryChargeOnReturn: RETURN_CHARGE,
+  remoteAreaDeliverable: 'N', unionDeliveryType: 'NOT_UNION_DELIVERY', returnCenterCode: RETURN_CENTER_CODE, returnChargeName: RETURN_CHARGE_NAME, companyContactNumber: COMPANY_CONTACT,
+  returnZipCode: RETURN_ZIP_CODE, returnAddress: RETURN_ADDRESS, returnAddressDetail: RETURN_ADDRESS_DETAIL, returnCharge: RETURN_CHARGE, outboundShippingPlaceCode: OUTBOUND_SHIPPING_PLACE_CODE,
+  vendorUserId: 'anteam7', requested: false, items, notices: [], requiredDocuments: [],
+})
+
+/** 일반 상품 payload — 판매 옵션마다 item(옵션별 추가금 반영 목표가), 옵션 없으면 단품 item 1개. 실패는 '일반 상품 —' 접두(결정적 → 자동 제외) */
+async function buildGeneralPayload(row, meta, cat) {
+  const title = cleanTitle(row)
+  const nc = pickGeneralNotice(meta.noticeCategories, row)
+  if (!nc) throw new Error(`일반 상품 — 쓸 수 있는 고시 없음(${(meta.noticeCategories ?? []).map((n) => n.noticeCategoryName).join(',') || '고시없음'})`)
+  const hasOpt = row.option_type === 'Y'
+  const opts = hasOpt ? (row.options?.items ?? []).map((o, i) => ({ ...o, _k: i + 1 })).filter((o) => o.isSoldOut === 'Y') : [null]
+  if (hasOpt && !opts.length) throw new Error('일반 상품 — 판매 옵션 없음(전부 품절)')
+  if (opts.length > MAX_OPTIONS) throw new Error(`일반 상품 — 옵션 많음(판매 옵션 ${opts.length}개 > ${MAX_OPTIONS})`)
+  const lines = []
+  for (const o of opts) {
+    const ax = o ? optionAxesOf(row, o) : { color: null, size: null }
+    if (ax.error) throw new Error(`일반 상품 — ${ax.error}`)
+    const attr = buildGeneralAttributes(meta, row, ax, title)
+    if (attr.error) throw new Error(`일반 상품 — ${attr.error}`)
+    const d = decideNoMarket(row.wholesale_price + (Number(o?.addPrice) || 0), row.delivery_price, [])
+    if (!d.price) throw new Error('일반 상품 — 가격 계산 불가(도매가 없음)')
+    lines.push({ o, ax, attributes: attr.attributes, d, label: o ? (o.itemName ?? []).filter(Boolean).join(' ') : '단품', sku: o ? `${SOURCE}:${row.idx}:o${o._k}` : `${SOURCE}:${row.idx}` })
+  }
+  const uniq = (xs) => [...new Set(xs.filter(Boolean))].join(', ')
+  const notices = (nc.noticeCategoryDetailNames ?? []).filter((x) => x.required === 'MANDATORY').map((x) => ({ noticeCategoryName: nc.noticeCategoryName, noticeCategoryDetailName: x.noticeCategoryDetailName, content: fillGeneralNotice(x.noticeCategoryDetailName, title, row, { colors: uniq(lines.map((l) => l.ax.color)), sizes: uniq(lines.map((l) => l.ax.size)) }) }))
+  const { rep, contentImgs, contents } = await pickImages(row)
+  const items = lines.map((l) => ({ itemName: l.label.slice(0, 100), originalPrice: l.d.price, salePrice: l.d.price, ...itemBase(row, rep, notices, contents), externalVendorSku: l.sku, attributes: l.attributes }))
+  // 노출 속성 조합이 같은 item 2개는 쿠팡이 거절 — 옵션 축이 속성에 안 맞는 것
+  const combos = items.map((it) => JSON.stringify(it.attributes.filter((a) => a.exposed === 'EXPOSED').map((a) => [a.attributeTypeName, a.attributeValueName])))
+  if (new Set(combos).size !== combos.length) throw new Error('일반 상품 — 옵션 조합 중복(노출 속성이 같은 item 2개)')
+  const cheapest = lines.reduce((m, l) => (l.d.price < m.d.price ? l : m), lines[0])
+  return { payload: productPayload(row, title, cat, items), title, contentCount: contentImgs.length, noticeName: nc.noticeCategoryName, lines: hasOpt ? lines : null, d: cheapest.d }
+}
+
 async function buildPayload(row, meta, cat, d) {
+  if (!isFoodRow(row)) return buildGeneralPayload(row, meta, cat)
   const title = cleanTitle(row)
   const nc = pickNoticeCategory(meta.noticeCategories)
   if (!nc) throw new Error(`식품 고시 없는 카테고리(${(meta.noticeCategories ?? []).map((n) => n.noticeCategoryName).join(',') || '고시없음'})`)
@@ -185,38 +337,9 @@ async function buildPayload(row, meta, cat, d) {
   }
   if (opt.error) throw new Error(`구매옵션 — ${opt.error}`)
   const notices = buildNotices(nc, title, row, spec)
-  const imgs = Array.isArray(row.images) ? row.images.filter(Boolean) : []
-  const repCands = [...new Set([row.thumb_url, ...imgs].filter(Boolean))].slice(0, 5)
-  if (!repCands.length) throw new Error('대표 이미지 없음')
-  // 404·410 = 공급사가 지운 이미지 → 다음 이미지로. 전부 지워졌으면 결정적 실패(제외) — 일시 장애로 세면 매 회차 같은 건에서 멈춘다(2026-10-30 858건 정지)
-  let rep = null
-  for (const u of repCands) {
-    try { rep = await ensureImageSpec(u, `domeatoz/${row.idx}/rep`); break } catch (e) { if (!/\((404|410)\)$/.test(e.message)) throw e }
-  }
-  if (!rep) throw new Error(`대표 이미지 없음 — 공급사 이미지 ${repCands.length}장 모두 404`)
-  const contentImgs = []
-  for (const u of (Array.isArray(row.detail_images) ? row.detail_images : []).slice(0, 10)) if (typeof u === 'string' && await downloadable(u)) contentImgs.push(u)
-  // 상세 이미지가 없으면 추가 이미지 → 대표 이미지 순으로 채운다 — 쿠팡은 상세 1장 이상 필수(없으면 승인반려)
-  if (!contentImgs.length) for (const u of imgs.slice(1, 5)) if (await downloadable(u)) contentImgs.push(u)
-  if (!contentImgs.length) { console.log('  ℹ 상세 이미지 없음 → 대표 이미지를 상세로 사용'); contentImgs.push(rep) }
-  const contents = [...contentImgs.map((u) => ({ contentsType: 'IMAGE_NO_SPACE', contentDetails: [{ content: u, detailType: 'IMAGE' }] })), { contentsType: 'TEXT', contentDetails: [{ content: PRIVACY_NOTICE, detailType: 'TEXT' }] }]
-  const item = {
-    itemName: opt.itemName.slice(0, 100), originalPrice: d.price, salePrice: d.price,
-    maximumBuyCount: 0, maximumBuyForPerson: 0, maximumBuyForPersonPeriod: 1, outboundShippingTimeDay: OUTBOUND_DAYS, unitCount: 1,
-    adultOnly: 'EVERYONE', taxType: row.tax_type === '면세' ? 'FREE' : 'TAX', parallelImported: 'NOT_PARALLEL_IMPORTED', overseasPurchased: 'NOT_OVERSEAS_PURCHASED', pccNeeded: false,
-    externalVendorSku: `${SOURCE}:${row.idx}`, emptyBarcode: true, emptyBarcodeReason: '바코드 없음',
-    images: [{ imageOrder: 0, imageType: 'REPRESENTATION', vendorPath: rep }], notices, attributes: opt.attributes, contents, offerCondition: 'NEW',
-  }
-  const payload = {
-    vendorId: VENDOR_ID, sellerProductName: title, displayProductName: title, displayCategoryCode: cat.code,
-    generalProductName: title, productGroup: title.split(/\s+/).slice(0, 3).join(' '), manufacture: row.maker && row.maker !== '기타' ? row.maker : '상세설명 참조',
-    saleStartedAt: new Date().toISOString().slice(0, 19), saleEndedAt: '2099-12-31T00:00:00',
-    deliveryMethod: 'SEQUENCIAL', deliveryCompanyCode: DELIVERY_COMPANY, deliveryChargeType: 'FREE', deliveryCharge: 0, freeShipOverAmount: 0, deliveryChargeOnReturn: RETURN_CHARGE,
-    remoteAreaDeliverable: 'N', unionDeliveryType: 'NOT_UNION_DELIVERY', returnCenterCode: RETURN_CENTER_CODE, returnChargeName: RETURN_CHARGE_NAME, companyContactNumber: COMPANY_CONTACT,
-    returnZipCode: RETURN_ZIP_CODE, returnAddress: RETURN_ADDRESS, returnAddressDetail: RETURN_ADDRESS_DETAIL, returnCharge: RETURN_CHARGE, outboundShippingPlaceCode: OUTBOUND_SHIPPING_PLACE_CODE,
-    vendorUserId: 'anteam7', requested: false, items: [item], notices: [], requiredDocuments: [],
-  }
-  return { payload, title, contentCount: contentImgs.length, noticeName: nc.noticeCategoryName }
+  const { rep, contentImgs, contents } = await pickImages(row)
+  const item = { itemName: opt.itemName.slice(0, 100), originalPrice: d.price, salePrice: d.price, ...itemBase(row, rep, notices, contents), externalVendorSku: `${SOURCE}:${row.idx}`, attributes: opt.attributes }
+  return { payload: productPayload(row, title, cat, [item]), title, contentCount: contentImgs.length, noticeName: nc.noticeCategoryName, lines: null, d }
 }
 
 async function resolveCategory(row, title) {
@@ -264,7 +387,7 @@ console.log('')
 const summary = { success: 0, fail: 0, approved: 0, errors: [] }
 const logDir = path.join(__dirname, '..', '_tmp_domeatoz_register'); if (!DRY && !existsSync(logDir)) mkdirSync(logDir, { recursive: true })
 // 등록 전 단계의 결정적 실패(고시·규격·이미지 없음)는 상품에 제외 사유를 남겨 다음 회차 후보에서 빠지게 한다(원인 고치면 DB 에서 해제)
-const DETERMINISTIC = /식품 고시 없는|구매옵션 —|대표 이미지 없음/
+const DETERMINISTIC = /식품 고시 없는|구매옵션 —|대표 이미지 없음|일반 상품 —/
 const excludeProduct = async (row, reason) => {
   if (DRY) return
   const { error } = await sb.from(TABLE).update({ register_excluded: true, register_excluded_reason: `자동: ${reason}`.slice(0, 200), updated_at: new Date().toISOString() }).eq('idx', row.idx)
@@ -274,17 +397,21 @@ let done = 0, streak = 0 // 연속 오류 6건이면 이번 회차 중단 — AP
 for (let i = 0; i < candidates.length; i++) {
   if (LIMIT > 0 && done >= LIMIT) break
   if (streak >= 6) { console.log(`연속 오류 ${streak}건 → 이번 회차 중단(일시 장애 의심, 다음 회차에 재시도)`); break }
-  const row = candidates[i], d = row._d, idx = `[${i + 1}/${candidates.length}]`
+  const row = candidates[i], idx = `[${i + 1}/${candidates.length}]`
+  let d = row._d
   try {
     const title = cleanTitle(row)
     const cat = await resolveCategory(row, title)
     const meta = await getCategoryMeta(cat.code)
     const built = await buildPayload(row, meta, cat, d)
+    d = built.d ?? d // 일반 상품은 옵션별 가격 중 가장 낮은 item 기준으로 기록
     if (DRY) {
       if (args.includes('--show-payload')) writeFileSync(path.join(process.env.TEMP || __dirname, `domeatoz-payload-${row.idx}.json`), JSON.stringify(built.payload, null, 2))
       const it = built.payload.items[0]
-      console.log(`${idx} (dry) ${row.idx} ${built.title.slice(0, 34).padEnd(34)} [${cat.code}${cat.cached ? '' : '*'} ${String(cat.name ?? '').slice(0, 14)}] 고시 ${built.noticeName} 상세 ${built.contentCount}장 ${it.taxType}`)
+      console.log(`${idx} (dry) ${row.idx} ${built.title.slice(0, 34).padEnd(34)} [${cat.code}${cat.cached ? '' : '*'} ${String(cat.name ?? '').slice(0, 14)}] 고시 ${built.noticeName} 상세 ${built.contentCount}장 ${it.taxType}${built.payload.items.length > 1 ? ` · item ${built.payload.items.length}개` : ''}`)
       console.log(`        도매 ${row.wholesale_price}+배송 ${row.delivery_price} → 원가 ${d.cost} · 하한 ${d.floor} · 시세 ${d.ref} → 판매 ${d.price} 순이익 ${d.net} (${(d.margin * 100).toFixed(1)}%) | ${it.attributes.filter((a) => a.attributeValueName).map((a) => `${a.attributeTypeName}=${a.attributeValueName}`).join(' ')}`)
+      if (built.lines) for (const l of built.lines) console.log(`          · ${l.sku} ${l.label} ${l.d.price}원 | ${l.attributes.map((a) => `${a.attributeTypeName}=${a.attributeValueName}`).join(' ')}`)
+      if (!isFoodRow(row)) console.log(`        고시: ${built.payload.items[0].notices.map((n) => `${n.noticeCategoryDetailName.slice(0, 14)}=${String(n.content).slice(0, 24)}`).join(' | ')}`)
       done++
       continue
     }
@@ -314,7 +441,13 @@ for (let i = 0; i < candidates.length; i++) {
     if (insertErr) { summary.fail++; streak += 6; summary.errors.push({ no: row.idx, title: built.title.slice(0, 36), reason: `listings insert 실패: ${insertErr.message}` }); console.log(`${idx} ⚠ ${row.idx} 등록 success=${success} 이나 DB insert 실패: ${insertErr.message} — 회차 중단`); continue }
     if (!success) { summary.fail++; streak++; const reason = String(r.body?.message ?? JSON.stringify(r.body)).slice(0, 160); summary.errors.push({ no: row.idx, title: built.title.slice(0, 36), cat: cat.code, reason }); console.log(`${idx} ✗ ${row.idx} [${cat.code}] ${built.title.slice(0, 30)} | ${reason}`); await sleep(500); continue }
     summary.success++; done++; streak = 0
-    console.log(`${idx} ✓ ${row.idx} ${built.title.slice(0, 30).padEnd(30)} | ${d.price.toLocaleString()}원 순이익 ${d.net} sellerPID ${sellerProductId}`)
+    console.log(`${idx} ✓ ${row.idx} ${built.title.slice(0, 30).padEnd(30)} | ${d.price.toLocaleString()}원 순이익 ${d.net} sellerPID ${sellerProductId}${built.lines ? ` · 옵션 ${built.lines.length}개` : ''}`)
+    // 옵션 상품: item ↔ 도매아토즈 옵션 매핑(주문 해석·승인 후 vendorItemId 채움 — coupang-followup-approvals ③-b)
+    if (built.lines) {
+      const liRows = built.lines.map((l) => ({ market: 'coupang', listing_key: String(sellerProductId), external_sku: l.sku, source: SOURCE, goods_no: String(row.idx), item_code: `o${l.o._k}`, option_value: l.label, pack_qty: 1, sale_price: l.d.price, cost_price: l.d.cost, status: 'ACTIVE' }))
+      const { error: liErr } = await sb.from('jimscanner_listing_items').upsert(liRows, { onConflict: 'market,listing_key,external_sku' })
+      if (liErr) console.log(`      ⚠ 옵션 매핑(listing_items) 기록 실패: ${liErr.message} — 주문은 상품 단위로 보임`)
+    }
     if (!NO_APPROVAL) {
       let appr
       for (let attempt = 0; attempt < 3; attempt++) { await sleep(1500); appr = await api('PUT', `/v2/providers/seller_api/apis/api/v1/marketplace/seller-products/${sellerProductId}/approvals`); if (appr.status === 200 && (appr.body?.code === 'SUCCESS' || appr.body?.code === 200)) break; if (!/임시저장.*상태.*상품만/.test(appr.body?.message ?? '')) break }
