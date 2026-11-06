@@ -72,7 +72,8 @@ async function downloadable(u) { try { const r = await fetch(u, { headers: { 'Us
 
 // ── 상품명 검사(coupang-name-audit RULES 요약 — campingmoon-register.mjs 와 같은 규칙) ──
 const NAME_RULES = [
-  { key: '광고성', re: /(최저가|초특가|특가|핫딜|세일|할인|사은품|무료\s*증정|1\s*\+\s*1|당일\s*발송|당일\s*배송|무료\s*배송|품절\s*임박|한정\s*수량|이벤트|행사)/ },
+  // '행사'는 판촉 문맥만(할인행사·행사상품·행사중) — "행사용 신발커버"·"PVC 행사 목걸이"처럼 용도를 말하는 이름이 막히던 것(2026-11-06)
+  { key: '광고성', re: /(최저가|초특가|특가|핫딜|세일|할인|사은품|무료\s*증정|1\s*\+\s*1|당일\s*발송|당일\s*배송|무료\s*배송|품절\s*임박|한정\s*수량|이벤트|행사\s*(?:상품|중|가(?![a-z가-힣])|진행)|(?:특가|기획|감사|오픈)\s*행사)/ },
   { key: '금지특수문자', re: /[※☆★♥♡▶◀◆■□【】〈〉「」『』]|[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}]/u },
   { key: 'URL/연락처', re: /(https?:\/\/|www\.|\.com|\.co\.kr|01[016-9][- ]?\d{3,4}[- ]?\d{4})/i },
   { key: '타플랫폼', re: /(네이버|스마트\s*스토어|11번가|지마켓|g마켓|옥션|위메프|티몬|인터파크|아마존)/i },
@@ -126,7 +127,7 @@ function originText(s) {
   return (parts[parts.length - 1] || '').replace(/^made\s+in\s*/i, '') || '상세설명 참조'
 }
 const sizeFromTitle = (t) => { const m = String(t).match(/(\d+(?:\.\d+)?)\s*(mm|cm|m|인치)(?![a-z가-힣])/i); return m ? `${m[1]}${m[2]}` : null }
-const setCountOf = (t) => { const m = String(t).match(/(\d{1,3})\s*(?:개|p|pcs|매|입)(?![a-z가-힣])/i); const n = m ? Number(m[1]) : 1; return n >= 1 && n <= 500 ? n : 1 }
+const setCountOf = (t) => { const m = String(t).match(/(\d{1,3})\s*(?:개|p|pcs|매|입|세트|팩)(?![a-z가-힣])/i); const n = m ? Number(m[1]) : 1; return n >= 1 && n <= 500 ? n : 1 }
 // 색상 필수인데 옵션에 색상이 없을 때: 상품명 색상어 → 재질 추정 → '혼합색상'(쿠팡 표준값, '단일색상'은 거절 — campingmoon-register 실측 2026-10-14)
 const COLOR_WORDS = [['블랙', /블랙|검정|검은/], ['화이트', /화이트|흰색|백색/], ['그레이', /그레이|회색/], ['실버', /실버|은색|스텐|스테인리스|알루미늄|메탈/], ['우드', /우드|원목/], ['브라운', /브라운|갈색/], ['베이지', /베이지/], ['네이비', /네이비|남색/], ['블루', /블루|파랑/], ['그린', /그린|초록/], ['레드', /레드|빨강/], ['핑크', /핑크|분홍/], ['옐로우', /옐로우|노랑/], ['골드', /골드|금색/], ['투명', /투명|클리어/]]
 const colorFromTitle = (title) => (COLOR_WORDS.find(([, re]) => re.test(title || '')) || [])[0] || '혼합색상'
@@ -147,36 +148,76 @@ function fillGeneralNotice(dn, title, row, ctx) {
   if (/인증|허가|KC/.test(dn)) return '해당사항 없음' // KC 의심 상품은 domeatoz-adopt.mjs 가 받지 않는다
   return '상세설명 참조'
 }
-/** 도매아토즈 옵션 한 줄(itemName [1차, 2차]) → {color, size}. 색상·사이즈가 아닌 축은 쿠팡 속성에 못 넣으므로 {error} */
+/** 도매아토즈 옵션 한 줄(itemName [1차, 2차]) → {color, size, raw}. 색상·사이즈가 아닌 축('타입'·'종류'·'선택'·'수량'·'용량' 등)의 값은 raw 로 모아
+ *  buildGeneralAttributes 가 수치 속성(수량·용량)에 먼저 쓰고, 남으면 사이즈 → 그 밖 노출 문자 속성 → 색상 순으로 넣는다(campingmoon-register 와 같은 취지, 2026-11-06 — 10건이 축 이름만으로 제외됐다) */
 function optionAxesOf(row, o) {
   const names = row.options?.optionName ?? [], vals = o?.itemName ?? []
-  const out = { color: null, size: null }
+  const out = { color: null, size: null, raw: null }
+  const rest = []
   for (let i = 0; i < names.length; i++) {
     const nm = String(names[i] || '').trim(), v = String(vals[i] || '').trim()
-    if (!nm || !v) continue
+    if (!v) continue
     if (/색상|컬러|색/.test(nm)) out.color = v
     else if (/사이즈|크기|size/i.test(nm)) out.size = v
-    else return { error: `옵션 축 '${nm}' 매핑 규칙 없음` }
+    else rest.push(v)
   }
+  if (rest.length) out.raw = rest.join(' ').replace(/^\s*\d{1,2}\s*\)\s*|^\s*\d{1,2}\.\s+(?!\d)/, '').trim() || null // "01) A형" → "A형"
   return out
+}
+const escRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+/** 수치 속성 값 "{숫자}{단위}" 를 text 에서 — 단위는 쿠팡 허용 단위만(긴 것 먼저) */
+function numberAttrFrom(text, units) {
+  const unitAlt = [...units].sort((x, y) => y.length - x.length).map(escRe).join('|')
+  const m = String(text || '').match(new RegExp(`(\\d+(?:\\.\\d+)?)\\s*(${unitAlt})(?![a-z가-힣])`, 'i'))
+  return m ? `${m[1]}${units.find((u) => u.toLowerCase() === m[2].toLowerCase()) || m[2]}` : null
 }
 /** item 필수 속성 — 옵션 축·상품명에서 채우고, 수치를 못 읽으면 {error}(지어내지 않는다) */
 function buildGeneralAttributes(meta, row, ax, title) {
+  const mand = (meta.attributes ?? []).filter((a) => a.required === 'MANDATORY')
+  const isSize = (a) => /사이즈|크기/.test(a.attributeTypeName) && a.dataType !== 'NUMBER'
+  const isColor = (a) => /색상|컬러/.test(a.attributeTypeName)
+  // 판매 단위 수 '수량'·'총 수량'만 — '개당 수량'(묶음 안 낱개 수, 단위 개입)은 일반 수치 속성으로 읽는다(못 읽으면 제외, 2026-11-06 '1개입' 지어내던 것)
+  //   쿠팡 속성명 실측(메타 캐시 517개): 수량 455·총 수량 217·팩 수량·박스 수량 = 판매 단위 / 개당 수량 76·팩당 수량 53·총 캡슐/정 수량·박스 내 패키지 수량·서빙 수량 = 묶음 안
+  const PER_UNIT_COUNT = /개당|팩당|박스\s*내|캡슐|서빙/
+  const isCount = (a) => { const n = String(a.attributeTypeName ?? ''); return /수량/.test(n) && !PER_UNIT_COUNT.test(n) && a.dataType === 'NUMBER' }
+  const hasPerPack = mand.some((a) => /(개당|팩당)\s*수량/.test(String(a.attributeTypeName ?? '')))
+  // 일반 축 값(raw)이 수치 속성(수량 "16개"·용량 "500ml")으로 읽히면 그걸로 옵션이 구분된다. 아니면 넣을 속성을 하나 고른다
+  let rawUsed = !ax.raw
+  const fromRaw = new Map()
+  if (ax.raw) for (const a of mand) {
+    if (a.dataType !== 'NUMBER' || !a.usableUnits?.length) continue
+    // 수량(판매 단위 수)은 옵션 값이 개수 그 자체("2개"·"3세트")일 때만 — "8롤(120매)+디스펜서" 의 120 은 한 묶음 안의 매수(개당 수량)다(2026-11-06 dry: 수량=120개 오기입)
+    const v = isCount(a) ? (/^\s*\d{1,3}\s*(?:개|p|pcs|ea|세트|팩)\s*$/i.test(ax.raw) ? `${setCountOf(ax.raw.replace(/ea$/i, '개'))}${pickUnit(a.usableUnits, ['개', '세트', '팩', '박스'])}` : null) : numberAttrFrom(ax.raw, a.usableUnits)
+    if (v) { fromRaw.set(a.attributeTypeName, v); rawUsed = true }
+  }
+  // 색 같은 값("색상랜덤"·"브라운")은 색상으로, 그 밖은 사이즈 → 노출 문자 속성(모델명·품번 제외 — "색상랜덤"이 모델명에 들어가던 것) → 색상
+  const colorish = ax.raw && (/색상|컬러|랜덤/.test(ax.raw) || COLOR_WORDS.some(([, re]) => re.test(ax.raw)))
+  // 사이즈 속성이 있으면 값 전체는 사이즈로("브라운38-39"), 색은 색상어만 색상으로 — 사이즈가 없을 때만 색 같은 값을 색상에
+  const rawTarget = rawUsed ? null
+    : ((colorish && !ax.color && !mand.some(isSize) ? mand.find(isColor) : null) ?? mand.find(isSize) ?? mand.find((a) => a.dataType === 'STRING' && a.exposed === 'EXPOSED' && !isColor(a) && !/모델|품번/.test(a.attributeTypeName)) ?? mand.find(isColor))?.attributeTypeName ?? null
+  if (!rawUsed && !rawTarget) return { error: `옵션 값 '${ax.raw}'을 넣을 쿠팡 속성이 없음` }
   const out = []
-  for (const a of meta.attributes ?? []) {
-    if (a.required !== 'MANDATORY') continue
+  for (const a of mand) {
     const nm = a.attributeTypeName, exposed = a.exposed === 'EXPOSED' ? 'EXPOSED' : 'NONE'
     let v
-    if (/수량/.test(nm) && a.dataType === 'NUMBER') v = `${setCountOf(title)}${pickUnit(a.usableUnits, ['개', '세트', '팩', '박스'])}`
-    else if (/색상|컬러/.test(nm)) v = ax.color || colorFromTitle(title)
-    else if (/사이즈|크기/.test(nm) && a.dataType !== 'NUMBER') v = ax.size || sizeFromTitle(title) || 'FREE'
+    if (fromRaw.has(nm)) v = fromRaw.get(nm)
+    else if (nm === rawTarget) v = ax.raw
+    // 개당 수량이 따로 있으면 이름의 "10개입"은 그쪽 몫 — 판매 단위는 1(안 그러면 10개입 × 10개로 읽힌다)
+    else if (isCount(a)) v = `${hasPerPack ? 1 : setCountOf(title)}${pickUnit(a.usableUnits, ['개', '세트', '팩', '박스'])}`
+    else if (isColor(a)) v = ax.color || (ax.raw && COLOR_WORDS.some(([, re]) => re.test(ax.raw)) ? colorFromTitle(ax.raw) : colorFromTitle(title)) // "브라운38-39" → 브라운
+    else if (isSize(a)) v = ax.size || sizeFromTitle(title) || 'FREE'
     else if (a.dataType === 'NUMBER' && a.usableUnits?.length) {
-      const unitAlt = [...a.usableUnits].sort((x, y) => y.length - x.length).map((u) => u.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')
-      const m = title.match(new RegExp(`(\\d+(?:\\.\\d+)?)\\s*(${unitAlt})(?![a-z가-힣])`, 'i'))
-      if (!m) return { error: `필수 수치 속성 '${nm}'(${a.usableUnits.join('/')}) 값을 상품명에서 못 읽음` }
-      v = `${m[1]}${a.usableUnits.find((u) => u.toLowerCase() === m[2].toLowerCase()) || m[2]}`
-    } else if (a.dataType === 'STRING') v = /모델|품번/.test(nm) && row.model_name ? row.model_name : '상세설명 참조'
-    else return { error: `필수 속성 '${nm}'(${a.dataType}) 처리 규칙 없음` }
+      v = numberAttrFrom(title, a.usableUnits)
+      if (!v) return { error: `필수 수치 속성 '${nm}'(${a.usableUnits.join('/')}) 값을 상품명에서 못 읽음` }
+    } else if (a.dataType === 'STRING') {
+      const titleModel = String(title).match(/(?<![A-Za-z0-9])([A-Z]{1,5}-?\d{2,}[A-Z0-9-]*)(?![A-Za-z0-9])/)?.[1] // "엑토 노트북잠금장치 NBL-04" → NBL-04
+      if (/모델|품번/.test(nm) && (row.model_name || titleModel)) v = row.model_name || titleModel
+      // 노출 속성(구매옵션)에 '상세설명 참조'를 넣으면 쿠팡이 "허용되지 않는 구매옵션 값"으로 거절(2026-11-06 차종·적용모델 2건) — 지어내지 않고 제외
+      else if (exposed === 'EXPOSED') return { error: `노출 속성 '${nm}' 값을 정할 수 없음` }
+      else v = '상세설명 참조'
+    } else return { error: `필수 속성 '${nm}'(${a.dataType}) 처리 규칙 없음` }
+    // 선택형(SELECT) 속성은 쿠팡 허용값만 — 신발사이즈(218개 값)에 'FREE'·"38-39"를 넣으면 거절된다(2026-11-06 dry)
+    if (a.inputType === 'SELECT' && a.inputValues?.length && !a.inputValues.includes(String(v))) return { error: `선택형 속성 '${nm}'에 '${String(v).slice(0, 20)}' 값 없음(쿠팡 허용값 ${a.inputValues.length}개)` }
     out.push({ attributeTypeName: nm, attributeValueName: String(v).slice(0, 30), exposed })
   }
   return { attributes: out }
