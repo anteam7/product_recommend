@@ -1236,9 +1236,25 @@ const RUN_FLOWS = {
   campingmoon: (r, full) => runFlowCafe24Cash(CAMPINGMOON_SITE, r.goodsNo, buyQty(r), r.recipient, r.detailUrl, full, { itemCode: r.itemCode, optionValue: r.optionValue, expectTotals: r.expectTotals }), // 옵션 select + 35% 할인 기대금액 가드 + 적립금 먼저
   domeatoz: (r, full) => runFlowDomeatoz(r, full), // 적립금 결제 — 외부주문코드(쿠팡 주문번호)로 중복 방지·완료 확인
 }
+// 쿠팡 출고중지요청·출고 전 취소 완료 주문은 매입처 발주 금지(2026-11-08 사장님 요청) — 직전 정지 모드도 막는다(열린 창에서 그대로 결제할 수 있으므로).
+// 판정은 coupang-orders-sync.mjs purchaseBlock(쿠팡 실시간 조회 + DB 접수). 예외가 나면 막는다(원격 잡이 running 에 고착되지 않게 메시지로 반환).
+async function coupangPurchaseGate(r) {
+  if (r.kind !== 'coupang') return { block: null, warn: null }
+  try {
+    return await coupangOrdersSyncOps.purchaseBlock(r.order)
+  } catch (e) {
+    return { block: `쿠팡 출고중지·취소 여부 확인 중 오류(${e instanceof Error ? e.message : e}) — 결제진행을 막았습니다. 잠시 후 다시 시도하세요.`, warn: null }
+  }
+}
+
 async function execPurchase(orderKey, fullMode) {
   const r = await resolveOrder(orderKey)
   if (r.error) return { ok: false, msg: r.error }
+  const gate = await coupangPurchaseGate(r)
+  if (gate.block) {
+    console.log(`[order-server] 결제진행 차단 — 주문 ${orderKey}: ${gate.block}`)
+    return { ok: false, msg: gate.block }
+  }
   // 흐름이 없는 매입처는 거부 — 예전엔 기본값이 ggsan이라 분기 누락 시 ggsan 주문서로 오발주될 수 있었다
   const runFlow = RUN_FLOWS[r.source]
   if (!runFlow) return { ok: false, msg: `자동주문 흐름 미구현 매입처(${r.source})` }
@@ -1260,6 +1276,7 @@ async function execPurchase(orderKey, fullMode) {
     full = { maxPay }
   }
   const out = await runFlow(r, full)
+  if (gate.warn) out.msg = `${out.msg ?? ''} (⚠ ${gate.warn})`
   out.sourceLabel = r.sourceLabel
   out.sourceKey = r.source
   out.ctxRef = full?.ctxRef ?? null   // 원격 잡이 완료 후 브라우저를 닫을 수 있게 노출
@@ -1425,7 +1442,9 @@ http.createServer(async (req, res) => {
     if (u.pathname === '/order') {
       const r = await resolveOrder(u.searchParams.get('id'))
       if (r.error) { htmlPage(res, `<h2>⚠ ${esc(r.error)}</h2><p>이 주문은 자동 진행할 수 없습니다. 매입처에서 직접 주문해 주세요.</p>`); return }
-      htmlPage(res, `<h2>🛒 ${esc(r.sourceLabel)} 자동 주문 확인</h2>
+      const gate = await coupangPurchaseGate(r)
+      if (gate.block) { htmlPage(res, `<h2>⛔ ${esc(gate.block)}</h2><p>이 주문은 결제진행할 수 없습니다.</p>`); return }
+      htmlPage(res, `${gate.warn ? `<p style="background:#fef3c7;color:#92400e;padding:8px 12px;border-radius:8px">⚠ ${esc(gate.warn)}</p>` : ''}<h2>🛒 ${esc(r.sourceLabel)} 자동 주문 확인</h2>
         <table style="border-collapse:collapse;width:100%"><tbody>
         <tr><td style="padding:6px 8px;color:#666">상품</td><td style="padding:6px 8px"><b>${esc(r.order.product_name)}</b>${r.order.option_name ? '<br><span style="color:#888;font-size:13px">' + esc(r.order.option_name) + '</span>' : ''}</td></tr>
         <tr><td style="padding:6px 8px;color:#666">매입 수량</td><td style="padding:6px 8px"><b>${buyQty(r)}개</b>${(r.bundle ?? 1) > 1 ? ` <span style="color:#888;font-size:13px">(${r.bundle}개 묶음 옵션 × 주문 ${r.order.shipping_count})</span>` : ''}</td></tr>

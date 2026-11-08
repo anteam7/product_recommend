@@ -225,53 +225,40 @@ export function createCoupangOrdersSyncOps({ sb, env, log = () => {} }) {
    * 반품·취소 요청 수집 → 접수 테이블(바뀐 것만) + 새/상태 바뀐 접수만 주문 행 반영.
    * 31일 창 밖으로 밀린 미처리 접수는 orderId + 접수일부터 30일 범위로 다시 읽는다(최대 maxStale건).
    */
-  async function syncReturnRequests({ windowDays = 30, maxStale = 20 } = {}) {
+  /** returnRequests 목록 한 종류를 끝까지(nextToken) 읽어 byId 에 모은다. 실패는 errors 에 넣고 false. */
+  async function fetchReturnList(label, base, byId, errors) {
     const path = `/v2/providers/openapi/apis/api/v6/vendors/${VENDOR_ID}/returnRequests`
-    const now = new Date()
-    const from = fmtKstYmd(new Date(now.getTime() - windowDays * 86400000))
-    const to = fmtKstYmd(now)
-    const errors = []
-    const byId = new Map()
-    const fetchList = async (label, base) => {
-      let nextToken = ''
-      do {
-        const q = `${base}&maxPerPage=50${nextToken ? `&nextToken=${encodeURIComponent(nextToken)}` : ''}`
-        let r = await api('GET', path, q)
-        if (r.status === 429) { await sleep(3000); r = await api('GET', path, q) }
-        if (r.status !== 200) { errors.push(`반품요청 ${label}: HTTP ${r.status} ${JSON.stringify(r.body).slice(0, 100)}`); return }
-        for (const rc of r.body?.data ?? []) if (rc?.receiptId) byId.set(String(rc.receiptId), rc)
-        nextToken = r.body?.nextToken || ''
-        await sleep(200)
-      } while (nextToken)
-    }
-    for (const [label, q] of RETURN_QUERIES) await fetchList(label, `createdAtFrom=${from}&createdAtTo=${to}&${q}`)
+    let nextToken = ''
+    do {
+      const q = `${base}&maxPerPage=50${nextToken ? `&nextToken=${encodeURIComponent(nextToken)}` : ''}`
+      let r = await api('GET', path, q)
+      if (r.status === 429) { await sleep(3000); r = await api('GET', path, q) }
+      if (r.status !== 200) { errors.push(`반품요청 ${label}: HTTP ${r.status} ${JSON.stringify(r.body).slice(0, 100)}`); return false }
+      for (const rc of r.body?.data ?? []) if (rc?.receiptId) byId.set(String(rc.receiptId), rc)
+      nextToken = r.body?.nextToken || ''
+      await sleep(200)
+    } while (nextToken)
+    return true
+  }
 
-    // 창 밖 미처리 접수 재조회
-    const { data: staleOpen, error: staleErr } = await sb.from('jimscanner_coupang_return_requests')
-      .select('receipt_id, order_id, requested_at').in('receipt_status', [...OPEN_RECEIPT]).limit(200)
-    if (staleErr) errors.push(`반품요청 미처리분 조회: ${staleErr.message}`)
-    const stale = (staleOpen ?? []).filter((s) => !byId.has(String(s.receipt_id))).slice(0, maxStale)
-    for (const s of stale) {
-      const d0 = s.requested_at ? new Date(s.requested_at) : new Date(now.getTime() - 60 * 86400000)
-      await fetchList(`order#${s.order_id}`, `createdAtFrom=${fmtKstYmd(d0)}&createdAtTo=${fmtKstYmd(new Date(d0.getTime() + 30 * 86400000))}&orderId=${s.order_id}`)
-    }
-
-    const receipts = [...byId.values()]
+  /**
+   * 받은 접수 → 테이블(바뀐 것만) + 새/상태 바뀐 접수만 주문 행 반영.
+   * 새 접수·상태 변경은 주문 행 반영이 성공한 뒤에만 기록 — 실패하면 다음 회차에 다시 '바뀐 접수'로 잡혀 재시도된다
+   * (반영은 같은 사유가 이미 있으면 건너뛰므로 재시도해도 중복 표시 없음).
+   */
+  async function recordReceipts(receipts, errors) {
     const stored = new Map()
     const ids = receipts.map((rc) => rc.receiptId)
     for (let i = 0; i < ids.length; i += 200) {
       const { data, error } = await sb.from('jimscanner_coupang_return_requests').select('receipt_id, receipt_status, raw_payload').in('receipt_id', ids.slice(i, i + 200))
-      if (error) throw new Error(`반품요청 저장분 조회: ${error.message}`) // 비교 못 하면 매시 전부 '새 접수'로 오인 → 이번 회차 중단
+      if (error) throw new Error(`반품요청 저장분 조회: ${error.message}`) // 비교 못 하면 전부 '새 접수'로 오인 → 중단
       for (const s of data ?? []) stored.set(String(s.receipt_id), s)
     }
-
     let changed = 0, flagged = 0, cancelled = 0
     for (const rc of receipts) {
       const prev = stored.get(String(rc.receiptId))
       const row = receiptRow(rc)
       if (prev && canon(prev.raw_payload) === canon(row.raw_payload)) continue
-      // 새 접수·상태 변경은 주문 행 반영이 성공한 뒤에만 기록 — 실패하면 다음 회차에 다시 '바뀐 접수'로 잡혀 재시도된다
-      // (반영은 같은 사유가 이미 있으면 건너뛰므로 재시도해도 중복 표시 없음)
       if (!prev || prev.receipt_status !== rc.receiptStatus) {
         try {
           const a = await applyReceiptToOrders(rc)
@@ -282,10 +269,91 @@ export function createCoupangOrdersSyncOps({ sb, env, log = () => {} }) {
       if (error) { errors.push(`반품요청 기록: ${error.message}`); continue }
       changed++
     }
+    return { changed, flagged, cancelled }
+  }
+
+  async function syncReturnRequests({ windowDays = 30, maxStale = 20 } = {}) {
+    const now = new Date()
+    const from = fmtKstYmd(new Date(now.getTime() - windowDays * 86400000))
+    const to = fmtKstYmd(now)
+    const errors = []
+    const byId = new Map()
+    const fetchList = (label, base) => fetchReturnList(label, base, byId, errors)
+    for (const [label, q] of RETURN_QUERIES) await fetchList(label, `createdAtFrom=${from}&createdAtTo=${to}&${q}`)
+
+    // 창 밖 미처리 접수 재조회
+    const { data: staleOpen, error: staleErr } = await sb.from('jimscanner_coupang_return_requests')
+      .select('receipt_id, order_id, requested_at').in('receipt_status', [...OPEN_RECEIPT]).limit(200)
+    if (staleErr) errors.push(`반품요청 미처리분 조회: ${staleErr.message}`)
+    const stale = (staleOpen ?? []).filter((s) => !byId.has(String(s.receipt_id))).slice(0, maxStale)
+    for (const s of stale) {
+      const d0 = s.requested_at ? new Date(s.requested_at) : new Date(now.getTime() - 60 * 86400000)
+      await fetchList(`order#${s.order_id}`, `createdAtFrom=${fmtKstYmd(d0)}&createdAtTo=${fmtKstYmd(new Date(d0.getTime() + 30 * 86400000))}&orderId=${encodeURIComponent(String(s.order_id))}`)
+    }
+
+    const receipts = [...byId.values()]
+    const { changed, flagged, cancelled } = await recordReceipts(receipts, errors)
     const open = receipts.filter((rc) => OPEN_RECEIPT.has(rc.receiptStatus))
     const stopReq = open.filter((rc) => rc.receiptStatus === 'RELEASE_STOP_UNCHECKED').length
     log(`  반품·취소 요청 ${receipts.length}건(출고중지요청 ${stopReq} · 반품 진행 ${open.length - stopReq}) · 기록 ${changed} · 확인필요 ${flagged} · 매입 취소 ${cancelled}${errors.length ? ` · 오류 ${errors.length}` : ''}`)
     return { fetched: receipts.length, open: open.length, stopRequests: stopReq, changed, flagged, cancelled, errors }
+  }
+
+  /**
+   * 결제진행 게이트(2026-11-08 사장님 "출고중지요청 걸린 주문은 결제진행 막아줘").
+   * 쿠팡 주문 행 o(order_id·vendor_item_id·ordered_at)에 대해 막을 사유를 돌려준다:
+   *  - 출고중지요청(RELEASE_STOP_UNCHECKED) 미처리 → 고객이 발주확인 뒤 취소 요청
+   *  - 출고 전 취소·출고중지가 이미 완료(RETURNS_COMPLETED + CANCEL 이거나 품목 출고중지) → 취소된 주문
+   * DB 는 매시 갱신이라 그 사이 들어온 요청을 놓치지 않게 쿠팡에서 이 주문만 바로 읽고(orderId 조회는 상태 없이 RETURN 전부 + CANCEL 따로),
+   * 새로 보인 접수는 테이블·주문 행에도 반영한다. 쿠팡 조회가 실패하면 DB 접수로만 판정하고 warn 을 돌려준다(쿠팡 장애로 매입 전체가 멈추지 않게).
+   * @returns {Promise<{ block: string|null, warn: string|null }>}
+   */
+  async function purchaseBlock(o) {
+    const byId = new Map()
+    const errors = []
+    let warn = null
+    if (envOk()) {
+      const now = new Date()
+      const ordered = o.ordered_at ? new Date(o.ordered_at) : now
+      const from = new Date(Math.max((Number.isNaN(ordered.getTime()) ? now : ordered).getTime() - 86400000, now.getTime() - 30 * 86400000))
+      const base = `createdAtFrom=${fmtKstYmd(from)}&createdAtTo=${fmtKstYmd(now)}&orderId=${encodeURIComponent(String(o.order_id))}`
+      let okReturn = false, okCancel = false
+      try {
+        okReturn = await fetchReturnList(`order#${o.order_id}`, base, byId, errors)
+        okCancel = await fetchReturnList(`order#${o.order_id} 취소`, `${base}&cancelType=CANCEL`, byId, errors)
+      } catch (e) { errors.push(e instanceof Error ? e.message : String(e)) } // 네트워크 예외(ECONNRESET 등)도 '조회 실패'로
+      if (!okReturn || !okCancel) warn = `쿠팡 출고중지·취소 실시간 확인 실패(${errors[0] ?? ''}) — 매시 수집분(DB)으로만 확인`
+      else if (byId.size) {
+        try { await recordReceipts([...byId.values()], errors) } catch (e) { log(`  [purchase-gate] 접수 기록 실패: ${e instanceof Error ? e.message : e}`) }
+      }
+    } else warn = '쿠팡 키 누락 — 출고중지 실시간 확인 못 함, DB로만 확인'
+    // DB 접수도 합친다(실시간 조회 실패·31일 밖 대비). 실시간 결과가 있으면 그쪽 우선
+    const { data: stored, error } = await sb.from('jimscanner_coupang_return_requests').select('receipt_id, raw_payload').eq('order_id', o.order_id)
+    if (error) {
+      // 쿠팡·DB 둘 다 확인 못 하면 막는다(취소된 주문을 살 위험) — 하나라도 되면 그걸로 판정
+      if (warn) return { block: `쿠팡 출고중지·취소 여부를 확인할 수 없어 결제진행을 막았습니다(쿠팡: ${warn} / DB: ${error.message}). 잠시 후 다시 시도하세요.`, warn }
+      warn = `DB 접수 조회 실패: ${error.message} — 쿠팡 실시간 조회로만 확인`
+    }
+    for (const s of stored ?? []) if (!byId.has(String(s.receipt_id)) && s.raw_payload) byId.set(String(s.receipt_id), s.raw_payload)
+
+    const vid = o.vendor_item_id == null ? null : String(o.vendor_item_id)
+    for (const rc of byId.values()) {
+      const items = rc.returnItems ?? []
+      const item = vid ? items.find((i) => String(i.vendorItemId) === vid) : undefined
+      if (vid && items.length > 0 && !item) continue // 같은 주문의 다른 상품 접수
+      const why = [rc.cancelReasonCategory1, rc.cancelReasonCategory2].filter(Boolean).join('/') || rc.cancelReason || '사유 없음'
+      const partial = item && Number(item.cancelCount ?? 0) < Number(o.shipping_count ?? 1) ? ` (주문 ${o.shipping_count}개 중 ${item.cancelCount}개)` : ''
+      if (rc.receiptStatus === 'RELEASE_STOP_UNCHECKED') {
+        return { block: `🛑 쿠팡 출고중지요청(${why})${partial} — 고객이 취소를 요청한 주문이라 결제진행을 막았습니다. 매입처에 발주하지 말고 Wing에서 출고중지 처리하세요. 접수번호 ${rc.receiptId}`, warn }
+      }
+      // 출고 전 여부는 이 라인 품목 기준(한 접수에 출고 전·후 품목이 섞일 수 있음), 품목을 모르면 접수 전체 기준
+      const preShip = rc.receiptType === 'CANCEL' || (item ? ['S', 'N'].includes(String(item.releaseStatus ?? '')) : isPreShip(rc))
+      if (rc.receiptStatus === 'RETURNS_COMPLETED' && preShip) {
+        const kind = rc.receiptType === 'CANCEL' ? '취소' : '출고중지'
+        return { block: `쿠팡에서 ${kind} 완료된 주문(${why})${partial} — 결제진행을 막았습니다.${partial ? ' 남은 수량만 사야 하면 매입처에서 직접 주문하세요.' : ''} 접수번호 ${rc.receiptId}`, warn }
+      }
+    }
+    return { block: null, warn }
   }
 
   /**
@@ -448,5 +516,5 @@ export function createCoupangOrdersSyncOps({ sb, env, log = () => {} }) {
     }
   }
 
-  return { syncRecentOrders }
+  return { syncRecentOrders, purchaseBlock }
 }
