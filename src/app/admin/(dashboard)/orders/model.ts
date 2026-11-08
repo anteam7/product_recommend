@@ -81,6 +81,99 @@ export function marketStatusBadge(o: UnifiedOrder): Badge {
   return (code && table[code]) || UNKNOWN_BADGE(code)
 }
 
+// ─── 쿠팡 반품·취소 요청(출고중지요청 포함, 2026-11-08) ───
+// 수집: scripts/lib/coupang-orders-sync.mjs syncReturnRequests → jimscanner_coupang_return_requests (주문 수집과 같은 회차)
+/** 진행 중(사람 처리 필요) 접수 상태 — 동기화 지점: coupang-orders-sync.mjs OPEN_RECEIPT */
+export const COUPANG_OPEN_CLAIM_STATUSES: readonly string[] = ['RELEASE_STOP_UNCHECKED', 'RETURNS_UNCHECKED', 'VENDOR_WAREHOUSE_CONFIRM', 'REQUEST_COUPANG_CHECK']
+export const COUPANG_STOP_REQUEST = 'RELEASE_STOP_UNCHECKED'
+
+export interface CoupangClaimRow {
+  receipt_id: number
+  order_id: number
+  receipt_type: string | null
+  receipt_status: string | null
+  release_stop_status: string | null
+  reason_category1: string | null
+  reason_category2: string | null
+  reason: string | null
+  cancel_count: number | null
+  fault_by_type: string | null
+  items: Array<{ vendorItemId?: number | string; cancelCount?: number; releaseStatus?: string | null }> | null
+  requested_at: string | null
+  completed_at: string | null
+}
+export interface CoupangClaim {
+  receiptId: number
+  status: string
+  /** 진행 중(출고중지요청·반품접수 등) — 처리 대기 배너·필터 대상 */
+  open: boolean
+  /** 완료된 취소·반품이 이 라인 수량 전부를 덮음 → 매출 집계 제외 */
+  coversLine: boolean
+  label: string
+  cls: string
+  title: string
+}
+
+/** 출고 전 취소·출고중지인지(반품 회수가 아닌지) — 품목 releaseStatus S(출고중지)·N(미출고) */
+function claimPreShip(c: Pick<CoupangClaimRow, 'receipt_type' | 'items'>): boolean {
+  if (c.receipt_type === 'CANCEL') return true
+  const items = c.items ?? []
+  return items.length > 0 && items.every((i) => ['S', 'N'].includes(String(i.releaseStatus ?? '')))
+}
+export function coupangClaimBadge(c: Pick<CoupangClaimRow, 'receipt_type' | 'receipt_status' | 'items'>): Badge {
+  switch (c.receipt_status) {
+    case 'RELEASE_STOP_UNCHECKED': return { label: '🛑 출고중지요청', cls: 'bg-rose-600 text-white font-semibold' }
+    case 'RETURNS_UNCHECKED': return { label: '↩ 반품접수', cls: 'bg-rose-100 text-rose-700 font-semibold' }
+    case 'VENDOR_WAREHOUSE_CONFIRM': return { label: '↩ 반품 입고완료', cls: 'bg-orange-100 text-orange-700 font-semibold' }
+    case 'REQUEST_COUPANG_CHECK': return { label: '↩ 쿠팡확인요청', cls: 'bg-orange-100 text-orange-700 font-semibold' }
+    case 'RETURNS_COMPLETED':
+      return { label: c.receipt_type === 'CANCEL' ? '취소완료' : claimPreShip(c) ? '출고중지완료' : '반품완료', cls: 'bg-zinc-200 text-zinc-600' }
+    default: return UNKNOWN_BADGE(c.receipt_status)
+  }
+}
+/** DB timestamptz(UTC 표기 포함) → KST 'MM-DD HH:mm' */
+export function fmtKst(s: string | null | undefined): string {
+  if (!s) return '—'
+  const t = new Date(s).getTime()
+  if (Number.isNaN(t)) return s
+  return new Date(t + 9 * 3600 * 1000).toISOString().slice(5, 16).replace('T', ' ')
+}
+
+/** 취소 수량이 라인 수량 전부인지. 라인 품목을 모르면 품목이 하나뿐인 접수의 수량, 그것도 아니면 접수 합계 수량으로 — 수량 정보가 없으면 false(매출 유지) */
+function lineCovered(item: { cancelCount?: number } | undefined, items: ReadonlyArray<{ cancelCount?: number }>, sum: number | null, shippingCount: number | null | undefined): boolean {
+  const n = item ? item.cancelCount : items.length === 1 ? items[0].cancelCount : sum
+  return n != null && Number(n) >= Number(shippingCount ?? 1)
+}
+/** 주문 라인에 해당하는 접수만 → 배지·매출 제외 판정. 품목(vendorItemId)으로 맞추고, 라인 품목을 모르면 주문 전체 접수를 붙인다. */
+export function coupangLineClaims(r: Pick<CoupangOrderRow, 'vendor_item_id' | 'shipping_count'>, claims: readonly CoupangClaimRow[] | null | undefined): CoupangClaim[] {
+  const vid = r.vendor_item_id == null ? null : String(r.vendor_item_id)
+  const out: CoupangClaim[] = []
+  for (const c of claims ?? []) {
+    const items = c.items ?? []
+    const item = vid ? items.find((i) => String(i.vendorItemId) === vid) : undefined
+    if (vid && items.length > 0 && !item) continue // 같은 주문의 다른 상품 접수
+    const status = c.receipt_status ?? ''
+    const b = coupangClaimBadge(c)
+    const why = [c.reason_category1, c.reason_category2].filter(Boolean).join('/')
+    out.push({
+      receiptId: c.receipt_id,
+      status,
+      open: COUPANG_OPEN_CLAIM_STATUSES.includes(status),
+      coversLine: status === 'RETURNS_COMPLETED' && lineCovered(item, items, c.cancel_count, r.shipping_count),
+      label: b.label,
+      cls: b.cls,
+      title: [
+        `${why || '사유 없음'}${c.reason ? ` — ${c.reason}` : ''}`,
+        `접수 ${fmtKst(c.requested_at)}${c.completed_at ? ` · 완료 ${fmtKst(c.completed_at)}` : ''}`,
+        c.release_stop_status ? `출고중지 ${c.release_stop_status}` : null,
+        c.fault_by_type ? `귀책 ${c.fault_by_type}` : null,
+        `접수번호 ${c.receipt_id}`,
+      ].filter(Boolean).join(' · '),
+    })
+  }
+  return out
+}
+
 // ─── 매입처 ───
 export const SUPPLIER_LABELS: Record<string, string> = {
   ggsan: '건강산',
@@ -136,6 +229,8 @@ export interface CoupangExtra {
   invoiceNumber: string | null
   deliveryCompany: string | null
   shippedAt: string | null
+  /** 이 라인의 반품·취소 요청(출고중지요청 포함) */
+  claims: CoupangClaim[]
 }
 /** 네이버 전용 셀 입력 */
 export interface NaverExtra {
@@ -331,8 +426,11 @@ export function coupangBundleSize(r: Pick<CoupangOrderRow, 'raw_payload' | 'vend
 /**
  * 쿠팡 주문 → 통합. 매입처는 주문별 오버라이드(supplier_source+goods_no 둘 다) 우선, 없으면 리스팅 조인 폴백.
  * 수수료는 매입처별 요율(fee.ts feeRateFor) — 리스팅 카테고리 컬럼이 없어 매입처로 근사.
+ * 반품·취소 요청(claims, order_id 조인)은 배지로 붙이고, 완료된 접수가 라인 수량 전부를 덮으면 매출 집계에서 뺀다
+ * (반품 완료 주문은 쿠팡 주문 목록에서 배송완료로 남아 매출에 잡히던 문제, 2026-11-08).
  */
-export function normalizeCoupang(r: CoupangOrderRow, listing?: CoupangListingRef | null): UnifiedOrder {
+export function normalizeCoupang(r: CoupangOrderRow, listing?: CoupangListingRef | null, claims?: readonly CoupangClaimRow[] | null): UnifiedOrder {
+  const lineClaims = coupangLineClaims(r, claims)
   const overridden = !!(r.supplier_source && r.supplier_goods_no)
   const source = overridden ? r.supplier_source! : (listing?.source ?? null)
   const goodsNo = overridden ? r.supplier_goods_no! : (listing?.source_goods_no ?? null)
@@ -358,7 +456,7 @@ export function normalizeCoupang(r: CoupangOrderRow, listing?: CoupangListingRef
     purchaseTotalCost: r.purchase_total_cost,
     purchaseNote: r.purchase_note,
     marketStatus: r.shipping_status ?? null,
-    marketCancelled: COUPANG_CANCELLED.has(r.shipping_status ?? ''),
+    marketCancelled: COUPANG_CANCELLED.has(r.shipping_status ?? '') || lineClaims.some((c) => c.coversLine),
     orderedAt: r.ordered_at,
     supplierSource: source,
     supplierGoodsNo: goodsNo,
@@ -380,6 +478,7 @@ export function normalizeCoupang(r: CoupangOrderRow, listing?: CoupangListingRef
       invoiceNumber: r.invoice_number,
       deliveryCompany: r.delivery_company,
       shippedAt: r.shipped_at,
+      claims: lineClaims,
     },
   }
 }
@@ -578,6 +677,8 @@ export function periodCutoff(days: number, now = Date.now()): string | null {
 export interface ListParams {
   market: Market | ''
   purchase: PurchaseStatus | ''
+  /** 'open' = 진행 중인 쿠팡 반품·출고중지 요청이 있는 주문만 */
+  claim: 'open' | ''
   q: string
   sort: SortKey
   page: number
@@ -594,6 +695,7 @@ export function parseParams(sp: RawSearchParams): ListParams {
   return {
     market: isMarket(market) ? market : '',
     purchase: isPurchaseStatus(purchase) ? purchase : '',
+    claim: first(sp.claim) === 'open' ? 'open' : '',
     q: first(sp.q).trim(),
     sort: SORT_OPTIONS.some((s) => s.v === sort) ? (sort as SortKey) : 'recent',
     page: Math.max(1, parseInt(first(sp.page) || '1', 10) || 1),
@@ -601,10 +703,17 @@ export function parseParams(sp: RawSearchParams): ListParams {
   }
 }
 
-/** 목록 필터(매입 상태·상품명 검색). 마켓·기간은 로더에서 DB 측 적용. */
-export function filterOrders(orders: UnifiedOrder[], p: Pick<ListParams, 'purchase' | 'q'>): UnifiedOrder[] {
+/** 진행 중인 쿠팡 반품·출고중지 요청이 있는 주문 */
+export function hasOpenClaim(o: Pick<UnifiedOrder, 'coupang'>): boolean {
+  return !!o.coupang?.claims.some((c) => c.open)
+}
+
+/** 목록 필터(매입 상태·반품 진행·상품명 검색). 마켓·기간은 로더에서 DB 측 적용. */
+export function filterOrders(orders: UnifiedOrder[], p: Pick<ListParams, 'purchase' | 'q'> & { claim?: ListParams['claim'] }): UnifiedOrder[] {
   const q = p.q.toLowerCase()
-  return orders.filter((o) => (!p.purchase || o.purchaseStatus === p.purchase) && (!q || o.productName.toLowerCase().includes(q)))
+  return orders.filter((o) => (!p.purchase || o.purchaseStatus === p.purchase)
+    && (p.claim !== 'open' || hasOpenClaim(o))
+    && (!q || o.productName.toLowerCase().includes(q)))
 }
 
 export function sortOrders(orders: UnifiedOrder[], sort: SortKey): UnifiedOrder[] {
@@ -627,7 +736,7 @@ export function paginate<T>(items: T[], page: number, size = PAGE_SIZE): { rows:
 export function buildHref(current: ListParams, override: Partial<Record<keyof ListParams, string | number | null>> = {}): string {
   const merged: Record<string, string | number | null> = { ...current, ...override }
   const params = new URLSearchParams()
-  for (const k of ['market', 'purchase', 'q', 'sort', 'days', 'page'] as const) {
+  for (const k of ['market', 'purchase', 'claim', 'q', 'sort', 'days', 'page'] as const) {
     const v = merged[k]
     if (v == null || v === '') continue
     if (k === 'sort' && v === 'recent') continue

@@ -1367,7 +1367,7 @@ setInterval(async () => {
       } else if (job.mode === 'coupang_orders_sync') {
         const s = await coupangOrdersSyncOps.syncRecentOrders({ triggeredBy: 'remote-queue' })
         ok = s.errors === 0
-        msg = `조회 ${s.total}건 · 갱신 ${s.inserted}건${s.cancelled ? ` · 취소·반품 반영 ${s.cancelled}건` : ''}${s.refreshed ? ` · 상태 보정 ${s.refreshed}건` : ''}${s.errors ? ` · 오류 ${s.errors}건(${s.errorSamples[0] ?? ''})` : ''}`
+        msg = `조회 ${s.total}건 · 갱신 ${s.inserted}건${s.cancelled ? ` · 취소·반품 반영 ${s.cancelled}건` : ''}${s.refreshed ? ` · 상태 보정 ${s.refreshed}건` : ''}${s.claimsStop ? ` · 🛑 출고중지요청 ${s.claimsStop}건` : ''}${s.claimsOpen - s.claimsStop > 0 ? ` · ↩ 반품 진행 ${s.claimsOpen - s.claimsStop}건` : ''}${s.claimsFlagged ? ` · 새 확인필요 ${s.claimsFlagged}건` : ''}${s.errors ? ` · 오류 ${s.errors}건(${s.errorSamples[0] ?? ''})` : ''}`
       } else {
         const r = job.mode === 'coupang_ack'
           ? await coupangAckByOrderId(job.order_key)

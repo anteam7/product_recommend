@@ -3,8 +3,8 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
   normalizeCoupang, normalizeNaver, normalizeToss, summarize, filterOrders, sortOrders, paginate,
-  parseParams, buildHref, legacyRedirectHref, countByPurchase, marketStatusBadge,
-  type CoupangOrderRow, type NaverOrderRow, type TossOrderRow,
+  parseParams, buildHref, legacyRedirectHref, countByPurchase, marketStatusBadge, coupangClaimBadge, hasOpenClaim,
+  type CoupangClaimRow, type CoupangOrderRow, type NaverOrderRow, type TossOrderRow,
 } from './model'
 
 const coupangRow = (over: Partial<CoupangOrderRow> = {}): CoupangOrderRow => ({
@@ -129,7 +129,7 @@ test('필터·정렬·페이지: 매입 상태/검색은 메모리, 정렬은 �
 
 test('파라미터 파싱: 잘못된 값은 기본값, 링크는 기본값 생략', () => {
   const p = parseParams({ market: 'naver', purchase: 'BOGUS', sort: 'price_desc', days: '15', page: '0', q: ' 크림 ' })
-  assert.deepEqual(p, { market: 'naver', purchase: '', q: '크림', sort: 'price_desc', page: 1, days: 30 })
+  assert.deepEqual(p, { market: 'naver', purchase: '', claim: '', q: '크림', sort: 'price_desc', page: 1, days: 30 })
   assert.equal(buildHref(p), '/admin/orders?market=naver&q=%ED%81%AC%EB%A6%BC&sort=price_desc')
   assert.equal(buildHref(p, { market: null, q: null, sort: 'recent', days: 0, page: 3 }), '/admin/orders?days=0&page=3')
   assert.equal(buildHref(parseParams({})), '/admin/orders')
@@ -139,4 +139,57 @@ test('옛 마켓별 페이지 → 통합 페이지 리다이렉트는 필터를 
   assert.equal(legacyRedirectHref('coupang', { purchase: 'PENDING', days: '90' }), '/admin/orders?market=coupang&purchase=PENDING&days=90')
   assert.equal(legacyRedirectHref('toss', {}), '/admin/orders?market=toss')
   assert.equal(legacyRedirectHref('naver', { market: 'coupang' }), '/admin/orders?market=naver')
+})
+
+// ─── 쿠팡 반품·취소 요청(출고중지요청 포함) ───
+const claimRow = (over: Partial<CoupangClaimRow> = {}): CoupangClaimRow => ({
+  receipt_id: 1948340844, order_id: 1001, receipt_type: 'RETURN', receipt_status: 'RETURNS_COMPLETED', release_stop_status: '비대상',
+  reason_category1: '고객변심', reason_category2: '단순변심(사유없음)', reason: null, cancel_count: 1, fault_by_type: 'CUSTOMER',
+  items: [{ vendorItemId: 555, cancelCount: 1, releaseStatus: 'Y' }], requested_at: '2026-11-08T09:15:12+00:00', completed_at: null,
+  ...over,
+})
+
+test('쿠팡 반품 완료: 배송완료로 남은 라인도 매출 집계에서 빠지고 반품완료 배지', () => {
+  const o = normalizeCoupang(coupangRow({ vendor_item_id: 555 }), null, [claimRow()])
+  assert.equal(o.marketStatus, 'FINAL_DELIVERY')
+  assert.equal(o.marketCancelled, true)
+  assert.deepEqual(o.coupang?.claims.map((c) => [c.label, c.open, c.coversLine]), [['반품완료', false, true]])
+  assert.match(o.coupang!.claims[0].title, /접수 11-08 18:15/) // KST 표기
+  assert.equal(summarize([o]).total.count, 0)
+})
+
+test('쿠팡 출고중지요청: 진행 중 배지·필터 대상, 매출은 유지', () => {
+  const o = normalizeCoupang(
+    coupangRow({ vendor_item_id: 555, shipping_status: 'INSTRUCT', purchase_status: 'PENDING' }), null,
+    [claimRow({ receipt_status: 'RELEASE_STOP_UNCHECKED', release_stop_status: '미처리', items: [{ vendorItemId: 555, cancelCount: 1, releaseStatus: 'N' }] })],
+  )
+  assert.equal(o.marketCancelled, false)
+  assert.equal(o.coupang?.claims[0].label, '🛑 출고중지요청')
+  assert.equal(hasOpenClaim(o), true)
+  const other = normalizeCoupang(coupangRow({ id: 'c2', order_id: 1002 }))
+  assert.deepEqual(filterOrders([o, other], { purchase: '', q: '', claim: 'open' }).map((x) => x.id), ['c1'])
+  assert.equal(filterOrders([o, other], { purchase: '', q: '' }).length, 2)
+})
+
+test('쿠팡 접수: 같은 주문의 다른 품목엔 안 붙고, 일부 수량만 반품이면 매출 유지', () => {
+  const otherItem = normalizeCoupang(coupangRow({ vendor_item_id: 777 }), null, [claimRow()])
+  assert.deepEqual(otherItem.coupang?.claims, [])
+  assert.equal(otherItem.marketCancelled, false)
+  const partial = normalizeCoupang(coupangRow({ vendor_item_id: 555, shipping_count: 3 }), null, [claimRow({ items: [{ vendorItemId: 555, cancelCount: 1, releaseStatus: 'Y' }] })])
+  assert.equal(partial.coupang?.claims[0].coversLine, false)
+  assert.equal(partial.marketCancelled, false)
+})
+
+test('쿠팡 접수 배지: 취소완료·출고중지완료·반품접수 구분', () => {
+  assert.equal(coupangClaimBadge({ receipt_type: 'CANCEL', receipt_status: 'RETURNS_COMPLETED', items: [] }).label, '취소완료')
+  assert.equal(coupangClaimBadge({ receipt_type: 'RETURN', receipt_status: 'RETURNS_COMPLETED', items: [{ releaseStatus: 'S' }] }).label, '출고중지완료')
+  assert.equal(coupangClaimBadge({ receipt_type: 'RETURN', receipt_status: 'RETURNS_COMPLETED', items: [] }).label, '반품완료')
+  assert.equal(coupangClaimBadge({ receipt_type: 'RETURN', receipt_status: 'RETURNS_UNCHECKED', items: [{ releaseStatus: 'A' }] }).label, '↩ 반품접수')
+})
+
+test('반품 진행 필터는 링크에서 유지된다', () => {
+  const p = parseParams({ market: 'coupang', claim: 'open', days: '0' })
+  assert.equal(p.claim, 'open')
+  assert.equal(buildHref(p, { page: 2 }), '/admin/orders?market=coupang&claim=open&days=0&page=2')
+  assert.equal(parseParams({ claim: 'weird' }).claim, '')
 })

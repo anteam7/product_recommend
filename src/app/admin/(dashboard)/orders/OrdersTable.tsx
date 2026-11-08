@@ -146,6 +146,10 @@ export function OrdersTable({ rows, emptyText }: { rows: UnifiedOrder[]; emptyTe
                 <td className="px-3 py-2 text-center">
                   <div className="flex flex-col items-center gap-1">
                     <span className={`inline-block px-2 py-0.5 rounded text-xs ${ms.cls}`}>{ms.label}</span>
+                    {/* 쿠팡 반품·취소 요청(출고중지요청 포함) — 주문 수집 때 같이 갱신, 마우스를 올리면 사유·접수일 */}
+                    {o.market === 'coupang' && o.coupang?.claims.map((c) => (
+                      <span key={c.receiptId} className={`text-[10px] px-1.5 py-0.5 rounded ${c.cls}`} title={c.title}>{c.label}</span>
+                    ))}
                     {o.market === 'naver' && o.naver && (
                       <>
                         {o.marketStatus === 'PAYED' && o.naver.placeOrderStatus !== 'OK' ? (

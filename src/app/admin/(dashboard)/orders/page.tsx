@@ -28,6 +28,8 @@ export default async function OrdersPage({ searchParams }: { searchParams: Promi
   const periodCount = Object.fromEntries(MARKETS.map((m) => [m, allOrders.filter((o) => o.market === m).length])) as Record<Market, number>
   const allTimeTotal = MARKETS.reduce((s, m) => s + todo[m].total, 0)
   const todoTotal = MARKETS.reduce((s, m) => s + todo[m].pending + todo[m].awaiting + todo[m].attention, 0)
+  // 진행 중 반품·출고중지 접수 — 대개 주문 행 확인필요와 겹쳐 처리 대기 합계엔 더하지 않고 따로 보여준다
+  const claimTotal = todo.coupang.claimStop + todo.coupang.claimReturn
   const periodLabel = PERIOD_OPTIONS.find((o) => o.v === p.days)?.label ?? ''
   const failedMarkets = MARKETS.filter((m) => errors[m])
 
@@ -65,19 +67,21 @@ export default async function OrdersPage({ searchParams }: { searchParams: Promi
       )}
 
       {/* 처리 대기(기간 무관) — 기간 필터 밖의 미발주·입금대기·확인필요를 놓치지 않게 항상 전체 기간 기준 */}
-      {todoTotal > 0 && (
+      {(todoTotal > 0 || claimTotal > 0) && (
         <div className="rounded border border-rose-300 bg-rose-50 px-4 py-3 text-sm text-rose-700 flex flex-wrap items-center gap-x-4 gap-y-1">
-          <strong>⚠ 처리 대기 {todoTotal}건</strong>
+          <strong>⚠ 처리 대기 {todoTotal}건{claimTotal > 0 ? ` · 쿠팡 반품·출고중지 ${claimTotal}건` : ''}</strong>
           {MARKETS.map((m) => {
             const t = todo[m]
-            const n = t.pending + t.awaiting + t.attention
+            const n = t.pending + t.awaiting + t.attention + t.claimStop + t.claimReturn
             if (n === 0) return <span key={m} className="text-rose-400">{MARKET_META[m].icon} {MARKET_META[m].label} 0</span>
             return (
               <span key={m} className="flex items-center gap-1.5">
                 <span className="font-semibold">{MARKET_META[m].icon} {MARKET_META[m].label}</span>
                 {t.pending > 0 && <Link href={buildHref(p, { market: m, purchase: 'PENDING', days: 0, q: null, page: null })} className="underline hover:text-rose-900">미발주 {t.pending}</Link>}
                 {t.awaiting > 0 && <Link href={buildHref(p, { market: m, purchase: 'AWAITING_DEPOSIT', days: 0, q: null, page: null })} className="underline hover:text-rose-900">💰 입금대기 {t.awaiting}</Link>}
-                {t.attention > 0 && <Link href={buildHref(p, { market: m, purchase: null, days: 0, q: null, page: null })} className="underline hover:text-rose-900" title="매입처 취소/반품·택배사 미매핑·송장등록 실패 등 — 행의 ⚠ 표시">확인필요 {t.attention}</Link>}
+                {t.attention > 0 && <Link href={buildHref(p, { market: m, purchase: null, claim: null, days: 0, q: null, page: null })} className="underline hover:text-rose-900" title="매입처 취소/반품·택배사 미매핑·송장등록 실패 등 — 행의 ⚠ 표시">확인필요 {t.attention}</Link>}
+                {t.claimStop > 0 && <Link href={buildHref(p, { market: m, purchase: null, claim: 'open', days: 0, q: null, page: null })} className="underline font-bold hover:text-rose-900" title="고객이 발주확인 뒤 취소 — 매입처 발주 전이면 발주하지 말고, 발주했으면 매입처 취소 후 Wing에서 출고중지 처리">🛑 출고중지요청 {t.claimStop}</Link>}
+                {t.claimReturn > 0 && <Link href={buildHref(p, { market: m, purchase: null, claim: 'open', days: 0, q: null, page: null })} className="underline hover:text-rose-900" title="반품접수·반품 입고완료·쿠팡확인요청 — 회수 확인 후 Wing에서 반품 승인, 매입처 반품·환불 확인">↩ 반품 진행 {t.claimReturn}</Link>}
               </span>
             )
           })}
@@ -189,6 +193,7 @@ export default async function OrdersPage({ searchParams }: { searchParams: Promi
         <form className="flex-1 max-w-sm" action={ORDERS_PATH}>
           {p.market && <input type="hidden" name="market" value={p.market} />}
           {p.purchase && <input type="hidden" name="purchase" value={p.purchase} />}
+          {p.claim && <input type="hidden" name="claim" value={p.claim} />}
           {p.sort !== 'recent' && <input type="hidden" name="sort" value={p.sort} />}
           {p.days !== DEFAULT_DAYS && <input type="hidden" name="days" value={String(p.days)} />}
           <input
@@ -199,6 +204,11 @@ export default async function OrdersPage({ searchParams }: { searchParams: Promi
             className="w-full px-3 py-1 text-sm border border-gray-300 rounded"
           />
         </form>
+        {p.claim === 'open' && (
+          <Link href={buildHref(p, { claim: null, page: null })} className="text-xs px-2 py-1 rounded bg-rose-100 text-rose-700 font-semibold hover:bg-rose-200" title="필터 해제">
+            🛑↩ 진행 중 반품·출고중지만 보는 중 ✕
+          </Link>
+        )}
         <div className="ml-auto flex items-center gap-2">
           <span className="text-xs text-gray-500">정렬</span>
           {SORT_OPTIONS.map((s) => (
@@ -216,7 +226,7 @@ export default async function OrdersPage({ searchParams }: { searchParams: Promi
       <OrdersTable
         rows={list.rows}
         emptyText={
-          p.q || p.purchase
+          p.q || p.purchase || p.claim
             ? '조건에 맞는 주문이 없습니다.'
             : `${periodLabel === '전체' ? '' : `최근 ${periodLabel} `}주문이 없습니다. 마켓에서 주문이 들어오면 매시간 자동으로 추가됩니다.`
         }
@@ -244,6 +254,7 @@ export default async function OrdersPage({ searchParams }: { searchParams: Promi
         <br />※ <strong>쿠팡</strong>: 송장은 쿠팡에 자동 등록(반자동 모드는 매입처 추적 칸의 [확인·등록]). <strong>네이버</strong>: 매입 상태를 발주완료로 바꾸면 발주확인 자동 호출, 발송처리는 집 PC 큐가 수행. <strong>토스</strong>: 발주확인·송장 등록 모두 크론 자동, 발송기한 ⚠는 페널티라 우선 처리.
         <br />※ 실수익 = 결제금액 − 매입원가 − 수수료 − 납부부가세(<strong>(결제금액−매입원가)÷11</strong>, 매입세액 공제 반영). 수수료는 쿠팡 매입처별 요율(기본 {(FEE_RATE * 100).toFixed(1)}%·화장품 {(FEE_RATE_BY_SOURCE.cmtstory * 100).toFixed(1)}%), 네이버 주문 API 실값, 토스 {(TOSS_FEE_RATE * 100).toFixed(0)}% 추정.
         <br />※ <strong>⚠ 처리 대기</strong> 배너는 기간 필터와 무관하게 전체 기간의 미발주·입금대기·확인필요를 셉니다 — 다른 마켓 주문을 놓치지 않기 위한 장치.
+        <br />※ <strong>쿠팡 반품·취소 요청</strong>(🛑 출고중지요청·↩ 반품접수 등)은 주문 수집 때 같이 읽어 마켓 상태 칸에 배지로 붙입니다(배지에 마우스를 올리면 사유·접수일). 새 접수는 확인필요로 올라오고, 반품·취소가 완료된 라인은 매출 집계에서 빠집니다. 출고중지·반품 승인 처리는 Wing에서.
       </div>
     </div>
   )

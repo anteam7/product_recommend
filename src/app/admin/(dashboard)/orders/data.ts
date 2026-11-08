@@ -5,9 +5,12 @@
  */
 import { createAdminClient } from '@/lib/auth/admin-supabase'
 import {
-  MARKETS, normalizeCoupang, normalizeNaver, normalizeToss, periodCutoff,
-  type CoupangListingRef, type CoupangOrderRow, type Market, type NaverListingRef, type NaverOrderRow, type TossOrderRow, type UnifiedOrder,
+  COUPANG_OPEN_CLAIM_STATUSES, COUPANG_STOP_REQUEST, MARKETS, normalizeCoupang, normalizeNaver, normalizeToss, periodCutoff,
+  type CoupangClaimRow, type CoupangListingRef, type CoupangOrderRow, type Market, type NaverListingRef, type NaverOrderRow, type TossOrderRow, type UnifiedOrder,
 } from './model'
+
+/** 쿠팡 반품·취소 요청 — scripts/lib/coupang-orders-sync.mjs syncReturnRequests 가 주문 수집과 같은 회차에 갱신 */
+const CLAIMS_TABLE = 'jimscanner_coupang_return_requests'
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Sb = { from: (t: string) => any }
@@ -48,7 +51,21 @@ async function loadCoupang(cutoff: string | null): Promise<UnifiedOrder[]> {
     if (error) console.error('[orders] 쿠팡 listings 조인 실패 — 매입처 바로가기 생략:', error.message)
     for (const l of (data ?? []) as Array<CoupangListingRef & { seller_product_id: number }>) lmap.set(l.seller_product_id, l)
   }
-  return rows.map((r) => normalizeCoupang(r, r.seller_product_id ? lmap.get(r.seller_product_id) : null))
+  // 반품·취소 요청(출고중지요청 포함) — order_id 로 붙인다. 실패해도 주문 목록은 보여준다(배지·매출 제외만 빠짐)
+  const claimsByOrder = new Map<string, CoupangClaimRow[]>()
+  const orderIds = [...new Set(rows.map((r) => r.order_id).filter((v) => v != null))]
+  for (let i = 0; i < orderIds.length; i += 200) {
+    const { data, error } = await db.from(CLAIMS_TABLE)
+      .select('receipt_id, order_id, receipt_type, receipt_status, release_stop_status, reason_category1, reason_category2, reason, cancel_count, fault_by_type, items, requested_at, completed_at')
+      .in('order_id', orderIds.slice(i, i + 200))
+    if (error) { console.error('[orders] 쿠팡 반품·취소 요청 조인 실패 — 배지 생략:', error.message); break }
+    for (const c of (data ?? []) as CoupangClaimRow[]) {
+      const k = String(c.order_id)
+      if (!claimsByOrder.has(k)) claimsByOrder.set(k, [])
+      claimsByOrder.get(k)!.push(c)
+    }
+  }
+  return rows.map((r) => normalizeCoupang(r, r.seller_product_id ? lmap.get(r.seller_product_id) : null, claimsByOrder.get(String(r.order_id))))
 }
 
 async function loadNaver(cutoff: string | null): Promise<UnifiedOrder[]> {
@@ -96,7 +113,11 @@ export async function loadOrders(markets: readonly Market[], days: number): Prom
   return { orders, errors }
 }
 
-export interface MarketTodo { total: number; pending: number; awaiting: number; attention: number }
+export interface MarketTodo {
+  total: number; pending: number; awaiting: number; attention: number
+  /** 쿠팡만: 진행 중 출고중지요청 / 그 밖의 반품 진행(반품접수·입고완료·쿠팡확인요청) 접수 수 */
+  claimStop: number; claimReturn: number
+}
 /**
  * 마켓별 "처리 대기"(기간 무관, 전체 기간) — 미발주·입금대기·확인필요 건수. 기간 필터 밖의 미처리 주문을 놓치지 않기 위한 배너용.
  * head-count 쿼리라 1,000행 상한과 무관.
@@ -124,8 +145,25 @@ export async function loadTodo(): Promise<Record<Market, MarketTodo>> {
       count(m, (q) => q.eq('purchase_status', 'AWAITING_DEPOSIT')),
       count(m, (q) => q.eq('needs_attention', true)),
     ])
-    out[m] = { total, pending, awaiting, attention }
+    out[m] = { total, pending, awaiting, attention, claimStop: 0, claimReturn: 0 }
   }))
+  // 쿠팡 진행 중 반품·출고중지 접수(주문 기간과 무관)
+  const claimCount = async (statuses: readonly string[]): Promise<number> => {
+    try {
+      const { count: c, error } = await db.from(CLAIMS_TABLE).select('*', { count: 'exact', head: true }).in('receipt_status', statuses as string[])
+      if (error) { console.error('[orders] 쿠팡 반품·취소 요청 건수 조회 실패:', error.message); return 0 }
+      return c ?? 0
+    } catch (e) {
+      console.error('[orders] 쿠팡 반품·취소 요청 건수 조회 예외:', e instanceof Error ? e.message : e)
+      return 0
+    }
+  }
+  const [stop, returning] = await Promise.all([
+    claimCount([COUPANG_STOP_REQUEST]),
+    claimCount(COUPANG_OPEN_CLAIM_STATUSES.filter((s) => s !== COUPANG_STOP_REQUEST)),
+  ])
+  out.coupang.claimStop = stop
+  out.coupang.claimReturn = returning
   return out
 }
 

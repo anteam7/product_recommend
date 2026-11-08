@@ -5,8 +5,10 @@
  *
  * 주의: purchase_status / invoice_number / shipped_at / ggsan_(...) / coupang_invoice_(...) 컬럼은 절대 추가 금지 —
  * ggsan-sync 크론 소유(F-1). upsert row에 송장 미러 컬럼을 추가하면 ggsan-sync가 쓴 값을 매시간 덮어써 회귀한다.
- * (예외 1곳: reconcileUnseen 이 쿠팡 '취소/반품' 확인된 **미발주(PENDING)** 주문만 purchase_status=CANCELLED 로 바꾼다 —
- *  ggsan-sync 는 PENDING 행을 건드리지 않으므로 충돌 없음. 매입이 진행된 주문은 needs_attention 만 올린다.)
+ * (예외 2곳: reconcileUnseen 과 syncReturnRequests(반품·취소 요청, 2026-11-08)가 쿠팡 취소·출고중지 완료가 확인된
+ *  **미발주(PENDING)** 주문만 purchase_status=CANCELLED 로 바꾼다 — ggsan-sync 는 PENDING 행을 건드리지 않으므로 충돌 없음.
+ *  매입이 진행된 주문은 needs_attention 만 올린다. shipping_status 는 반품 접수로 바꾸지 않는다 — 목록 upsert 가 매시 되돌려
+ *  쓰기만 늘어나므로, 화면은 jimscanner_coupang_return_requests 를 order_id 로 붙여 배지·매출 제외를 정한다.)
  */
 import crypto from 'node:crypto'
 
@@ -109,6 +111,181 @@ export function createCoupangOrdersSyncOps({ sb, env, log = () => {} }) {
       await sleep(150)
     }
     return { cancelled, refreshed, checked, pending: Math.max(0, byBox.size - checked) }
+  }
+
+  // ─── 반품·취소 요청(출고중지요청 포함) — 2026-11-08 ───
+  // 주문 목록(ordersheets)만 읽어서는 진행 중인 반품접수·출고중지요청이 안 보였고, 반품 완료된 주문도 배송완료·매입완료로
+  // 남아 매출에 잡혔다. returnRequests(v6)를 같은 회차에 읽어 jimscanner_coupang_return_requests 에 바뀐 것만 기록하고,
+  // 새로 보이거나 상태가 바뀐 접수만 그 주문 행에 확인필요를 올린다(사람이 해제한 걸 매시 되살리지 않게).
+  // 상태 없이 부르면 400 → 상태별로 따로 읽는다. 검색 기간 최대 31일.
+  const RETURN_QUERIES = [
+    ['출고중지요청', 'status=RU'], ['반품접수', 'status=UC'], ['쿠팡확인요청', 'status=PR'], ['반품완료', 'status=CC'], ['취소', 'cancelType=CANCEL'],
+  ]
+  const OPEN_RECEIPT = new Set(['RELEASE_STOP_UNCHECKED', 'RETURNS_UNCHECKED', 'VENDOR_WAREHOUSE_CONFIRM', 'REQUEST_COUPANG_CHECK'])
+  const RECEIPT_LABEL = {
+    RELEASE_STOP_UNCHECKED: '출고중지요청', RETURNS_UNCHECKED: '반품접수', VENDOR_WAREHOUSE_CONFIRM: '반품 입고완료',
+    REQUEST_COUPANG_CHECK: '반품 쿠팡확인요청', RETURNS_COMPLETED: '완료',
+  }
+  // 고객 개인정보(requester* 이름·전화·주소)와 고객 첨부 사진은 저장하지 않는다
+  const PII_KEY = /^requester|^reasonPhotoUrls$/
+  const stripPii = (v) => Array.isArray(v) ? v.map(stripPii)
+    : v && typeof v === 'object' ? Object.fromEntries(Object.entries(v).filter(([k]) => !PII_KEY.test(k)).map(([k, x]) => [k, stripPii(x)]))
+    : v
+  const money = (m) => (m && typeof m === 'object' ? Number(m.units ?? 0) : Number(m ?? 0)) || 0
+  const tsOrNull = (s) => (s ? String(s) : null)
+  const isPreShip = (rc) => rc.receiptType === 'CANCEL' || (rc.returnItems ?? []).every((i) => ['S', 'N'].includes(String(i.releaseStatus ?? '')))
+
+  function receiptRow(rc) {
+    const raw = stripPii(rc)
+    return {
+      receipt_id: rc.receiptId,
+      order_id: rc.orderId,
+      receipt_type: rc.receiptType ?? null,
+      receipt_status: rc.receiptStatus ?? null,
+      release_stop_status: rc.releaseStopStatus ?? null,
+      reason_category1: rc.cancelReasonCategory1 || null,
+      reason_category2: rc.cancelReasonCategory2 || null,
+      reason: rc.cancelReason || rc.reasonCodeText || null,
+      cancel_count: rc.cancelCountSum ?? null,
+      fault_by_type: rc.faultByType ?? null,
+      return_shipping_charge: money(rc.returnShippingCharge),
+      items: raw.returnItems ?? [],
+      return_delivery: raw.returnDeliveryDtos ?? [],
+      requested_at: tsOrNull(rc.createdAt),
+      modified_at: tsOrNull(rc.modifiedAt),
+      completed_at: tsOrNull(rc.completeConfirmDate),
+      raw_payload: raw,
+      last_synced_at: new Date().toISOString(),
+    }
+  }
+
+  /** 접수 하나 → 해당 주문 행에 확인필요(·미발주면 매입 취소). 바뀐 행 수를 돌려준다. */
+  async function applyReceiptToOrders(rc) {
+    const { data: rows, error } = await sb.from('jimscanner_coupang_orders')
+      .select('id, order_id, vendor_item_id, shipping_count, purchase_status, needs_attention, attention_reason, product_name')
+      .eq('order_id', rc.orderId)
+    if (error) throw new Error(`claim 주문 조회: ${error.message}`)
+    if (!rows?.length) return { flagged: 0, cancelled: 0 } // 수집 전에 취소된 주문 — 행이 없음
+    const items = rc.returnItems ?? []
+    const itemOf = (row) => items.find((i) => String(i.vendorItemId) === String(row.vendor_item_id))
+    // 품목이 안 맞으면 주문 행이 하나일 때만 그 행으로(같은 주문의 다른 상품에 잘못 붙이지 않게)
+    const targets = rows.some(itemOf) ? rows.filter(itemOf) : rows.length === 1 ? rows : []
+    if (!targets.length) log(`  [claim] order#${rc.orderId} 접수#${rc.receiptId}: 품목(${items.map((i) => i.vendorItemId).join(',')})이 주문 행과 안 맞아 건너뜀`)
+    const why = [rc.cancelReasonCategory1, rc.cancelReasonCategory2].filter(Boolean).join('/') || rc.cancelReason || '사유 없음'
+    const preShip = isPreShip(rc)
+    let flagged = 0, cancelled = 0
+    for (const row of targets) {
+      const ps = row.purchase_status
+      const it = itemOf(row)
+      const fullLine = !it || Number(it.cancelCount ?? 0) >= Number(row.shipping_count ?? 1)
+      let reason = null
+      const upd = {}
+      if (rc.receiptStatus === 'RELEASE_STOP_UNCHECKED') {
+        const todo = ps === 'PENDING' ? '매입처에 발주하지 말고 Wing에서 출고중지 처리'
+          : ['SHIPPED', 'RECEIVED'].includes(ps) ? '매입처가 이미 발송 — Wing에서 이미출고 처리(송장 입력)'
+          : ps === 'CANCELLED' ? 'Wing에서 출고중지 처리'
+          : '매입처 주문 취소 후 Wing에서 출고중지 처리'
+        reason = `쿠팡 출고중지요청(${why}) — ${todo}`
+      } else if (OPEN_RECEIPT.has(rc.receiptStatus)) {
+        reason = `쿠팡 ${RECEIPT_LABEL[rc.receiptStatus]}(${why}) — 회수 확인 후 Wing에서 반품 승인, 매입처 반품·환불 확인`
+      } else if (rc.receiptStatus === 'RETURNS_COMPLETED') {
+        const kind = rc.receiptType === 'CANCEL' ? '취소' : preShip ? '출고중지' : '반품'
+        if (ps === 'PENDING' && preShip && fullLine) {
+          upd.purchase_status = 'CANCELLED' // reconcileUnseen 과 같은 규칙: 미발주 + 출고 전 전량 취소만 자동
+        } else if (ps !== 'PENDING' && ps !== 'CANCELLED') {
+          reason = `쿠팡 ${kind} 완료(${why}) — 매입처 ${preShip ? '주문 취소·환불' : '반품·환불'} 확인 필요`
+        }
+      }
+      if (reason) {
+        const prev = row.needs_attention ? (row.attention_reason ?? '') : ''
+        if (!prev.includes(reason)) {
+          // 같은 건의 이전 반품·취소 사유(접수→완료 등) 조각만 빼고, 다른 사유(송장 실패 등)는 뒤에 보존
+          const sameEvent = /^쿠팡 (출고중지|반품|취소|주문 (취소|반품))/
+          const others = prev.split(' | ').map((s) => s.trim()).filter((s) => s && !sameEvent.test(s))
+          upd.needs_attention = true
+          upd.attention_reason = [reason, ...others].join(' | ').slice(0, 500)
+        }
+      }
+      if (!Object.keys(upd).length) continue
+      const { error: ue } = await sb.from('jimscanner_coupang_orders').update(upd).eq('id', row.id)
+      if (ue) throw new Error(`claim 주문 갱신: ${ue.message}`)
+      if (upd.needs_attention) flagged++
+      if (upd.purchase_status) cancelled++
+      await sb.from('jimscanner_admin_actions').insert({
+        actor: 'local', action: 'coupang_return_request_sync', target_type: 'coupang_order', target_id: row.id,
+        summary: `주문#${row.order_id} 쿠팡 ${RECEIPT_LABEL[rc.receiptStatus] ?? rc.receiptStatus}(${rc.receiptType}) 접수#${rc.receiptId} — ${upd.purchase_status ? '매입 취소' : '확인 필요'} (${(row.product_name ?? '').slice(0, 24)})`,
+        metadata: { receipt_id: rc.receiptId, receipt_status: rc.receiptStatus, release_stop_status: rc.releaseStopStatus, ...upd },
+      }).then(() => {}, () => {})
+      log(`  [claim] order#${row.order_id} ${RECEIPT_LABEL[rc.receiptStatus] ?? rc.receiptStatus}(${rc.receiptType}) → ${upd.purchase_status ? '매입 취소' : '확인 필요'}`)
+    }
+    return { flagged, cancelled }
+  }
+
+  /**
+   * 반품·취소 요청 수집 → 접수 테이블(바뀐 것만) + 새/상태 바뀐 접수만 주문 행 반영.
+   * 31일 창 밖으로 밀린 미처리 접수는 orderId + 접수일부터 30일 범위로 다시 읽는다(최대 maxStale건).
+   */
+  async function syncReturnRequests({ windowDays = 30, maxStale = 20 } = {}) {
+    const path = `/v2/providers/openapi/apis/api/v6/vendors/${VENDOR_ID}/returnRequests`
+    const now = new Date()
+    const from = fmtKstYmd(new Date(now.getTime() - windowDays * 86400000))
+    const to = fmtKstYmd(now)
+    const errors = []
+    const byId = new Map()
+    const fetchList = async (label, base) => {
+      let nextToken = ''
+      do {
+        const q = `${base}&maxPerPage=50${nextToken ? `&nextToken=${encodeURIComponent(nextToken)}` : ''}`
+        let r = await api('GET', path, q)
+        if (r.status === 429) { await sleep(3000); r = await api('GET', path, q) }
+        if (r.status !== 200) { errors.push(`반품요청 ${label}: HTTP ${r.status} ${JSON.stringify(r.body).slice(0, 100)}`); return }
+        for (const rc of r.body?.data ?? []) if (rc?.receiptId) byId.set(String(rc.receiptId), rc)
+        nextToken = r.body?.nextToken || ''
+        await sleep(200)
+      } while (nextToken)
+    }
+    for (const [label, q] of RETURN_QUERIES) await fetchList(label, `createdAtFrom=${from}&createdAtTo=${to}&${q}`)
+
+    // 창 밖 미처리 접수 재조회
+    const { data: staleOpen, error: staleErr } = await sb.from('jimscanner_coupang_return_requests')
+      .select('receipt_id, order_id, requested_at').in('receipt_status', [...OPEN_RECEIPT]).limit(200)
+    if (staleErr) errors.push(`반품요청 미처리분 조회: ${staleErr.message}`)
+    const stale = (staleOpen ?? []).filter((s) => !byId.has(String(s.receipt_id))).slice(0, maxStale)
+    for (const s of stale) {
+      const d0 = s.requested_at ? new Date(s.requested_at) : new Date(now.getTime() - 60 * 86400000)
+      await fetchList(`order#${s.order_id}`, `createdAtFrom=${fmtKstYmd(d0)}&createdAtTo=${fmtKstYmd(new Date(d0.getTime() + 30 * 86400000))}&orderId=${s.order_id}`)
+    }
+
+    const receipts = [...byId.values()]
+    const stored = new Map()
+    const ids = receipts.map((rc) => rc.receiptId)
+    for (let i = 0; i < ids.length; i += 200) {
+      const { data, error } = await sb.from('jimscanner_coupang_return_requests').select('receipt_id, receipt_status, raw_payload').in('receipt_id', ids.slice(i, i + 200))
+      if (error) throw new Error(`반품요청 저장분 조회: ${error.message}`) // 비교 못 하면 매시 전부 '새 접수'로 오인 → 이번 회차 중단
+      for (const s of data ?? []) stored.set(String(s.receipt_id), s)
+    }
+
+    let changed = 0, flagged = 0, cancelled = 0
+    for (const rc of receipts) {
+      const prev = stored.get(String(rc.receiptId))
+      const row = receiptRow(rc)
+      if (prev && canon(prev.raw_payload) === canon(row.raw_payload)) continue
+      // 새 접수·상태 변경은 주문 행 반영이 성공한 뒤에만 기록 — 실패하면 다음 회차에 다시 '바뀐 접수'로 잡혀 재시도된다
+      // (반영은 같은 사유가 이미 있으면 건너뛰므로 재시도해도 중복 표시 없음)
+      if (!prev || prev.receipt_status !== rc.receiptStatus) {
+        try {
+          const a = await applyReceiptToOrders(rc)
+          flagged += a.flagged; cancelled += a.cancelled
+        } catch (e) { errors.push(e instanceof Error ? e.message : String(e)); continue }
+      }
+      const { error } = await sb.from('jimscanner_coupang_return_requests').upsert(row, { onConflict: 'receipt_id' })
+      if (error) { errors.push(`반품요청 기록: ${error.message}`); continue }
+      changed++
+    }
+    const open = receipts.filter((rc) => OPEN_RECEIPT.has(rc.receiptStatus))
+    const stopReq = open.filter((rc) => rc.receiptStatus === 'RELEASE_STOP_UNCHECKED').length
+    log(`  반품·취소 요청 ${receipts.length}건(출고중지요청 ${stopReq} · 반품 진행 ${open.length - stopReq}) · 기록 ${changed} · 확인필요 ${flagged} · 매입 취소 ${cancelled}${errors.length ? ` · 오류 ${errors.length}` : ''}`)
+    return { fetched: receipts.length, open: open.length, stopRequests: stopReq, changed, flagged, cancelled, errors }
   }
 
   /**
@@ -236,8 +413,19 @@ export function createCoupangOrdersSyncOps({ sb, env, log = () => {} }) {
       }
     } else log('  목록 조회 일부 실패 — 취소·반품 반영(reconcile)은 이번 회차 생략')
 
+    // 반품·취소 요청(출고중지요청 포함) — 주문 목록과 별개 API라 목록 실패와 무관하게 매 회차 읽는다
+    let claims = { fetched: 0, open: 0, stopRequests: 0, changed: 0, flagged: 0, cancelled: 0, errors: [] }
+    try {
+      claims = await syncReturnRequests()
+    } catch (e) {
+      claims.errors = [e instanceof Error ? e.message : String(e)]
+      log(`  반품·취소 요청 수집 실패: ${claims.errors[0]}`)
+    }
+    errors += claims.errors.length
+    for (const m of claims.errors) if (errorSamples.length < 5) errorSamples.push(m)
+
     const durationMs = Date.now() - t0
-    log(`[coupang-orders-sync/${triggeredBy}] total=${total} inserted=${inserted} unchanged=${unchanged} errors=${errors} reconcile(checked=${reconciled.checked} cancelled=${reconciled.cancelled} refreshed=${reconciled.refreshed}${reconciled.pending ? ` pending=${reconciled.pending}` : ''}) (${(durationMs / 1000).toFixed(1)}s)`)
+    log(`[coupang-orders-sync/${triggeredBy}] total=${total} inserted=${inserted} unchanged=${unchanged} errors=${errors} reconcile(checked=${reconciled.checked} cancelled=${reconciled.cancelled} refreshed=${reconciled.refreshed}${reconciled.pending ? ` pending=${reconciled.pending}` : ''}) claims(fetched=${claims.fetched} open=${claims.open} stop=${claims.stopRequests} changed=${claims.changed} flagged=${claims.flagged}) (${(durationMs / 1000).toFixed(1)}s)`)
 
     if (runId) {
       try {
@@ -253,7 +441,11 @@ export function createCoupangOrdersSyncOps({ sb, env, log = () => {} }) {
       } catch { /* noop */ }
     }
 
-    return { total, inserted, unchanged, errors, errorSamples, durationMs, cancelled: reconciled.cancelled, refreshed: reconciled.refreshed }
+    return {
+      total, inserted, unchanged, errors, errorSamples, durationMs,
+      cancelled: reconciled.cancelled + claims.cancelled, refreshed: reconciled.refreshed,
+      claimsOpen: claims.open, claimsStop: claims.stopRequests, claimsFlagged: claims.flagged,
+    }
   }
 
   return { syncRecentOrders }
