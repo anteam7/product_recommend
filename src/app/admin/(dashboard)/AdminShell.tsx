@@ -4,8 +4,55 @@ import Link from 'next/link'
 import { usePathname } from 'next/navigation'
 import { useEffect, useState } from 'react'
 import LogoutButton from '../LogoutButton'
+import { OPEN_CLAIMS_HREF } from './orders/model'
 
-type BadgeKey = 'gov_new_24h' | 'work_escalated'
+type BadgeKey = 'gov_new_24h' | 'work_escalated' | 'coupang_claims'
+
+/** 진행 중 쿠팡 반품·출고중지 — /api/admin/coupang-claims 응답 */
+type ClaimAlert = {
+  stop: number
+  returning: number
+  items: Array<{ receiptId: number; stop: boolean; label: string; productName: string | null; todo: string }>
+}
+
+/** 1분마다 + 화면 이동 때 다시 읽는다(주문 수집은 매시라 이 정도면 충분). 실패는 조용히 무시(알림만 안 뜸). */
+function useCoupangClaims(pathname: string): ClaimAlert | null {
+  const [v, setV] = useState<ClaimAlert | null>(null)
+  useEffect(() => {
+    let cancelled = false
+    const load = () =>
+      fetch('/api/admin/coupang-claims', { cache: 'no-store' })
+        .then((r) => (r.ok ? r.json() : null))
+        .then((d) => {
+          if (cancelled || !d || typeof d.stop !== 'number' || typeof d.returning !== 'number' || !Array.isArray(d.items)) return
+          setV(d as ClaimAlert)
+        })
+        .catch(() => {})
+    load()
+    const t = setInterval(load, 60000)
+    return () => { cancelled = true; clearInterval(t) }
+  }, [pathname])
+  return v
+}
+
+/** 관리자 모든 화면 맨 위 — 출고중지요청이 있으면 진한 빨강(가장 급함), 반품만 있으면 연한 빨강 */
+function ClaimAlertBar({ a }: { a: ClaimAlert }) {
+  const urgent = a.stop > 0
+  const names = a.items.map((i) => i.productName ?? '(상품명 없음)')
+  return (
+    <Link
+      href={OPEN_CLAIMS_HREF}
+      className={`block px-4 sm:px-6 lg:px-8 py-2.5 text-sm border-b ${urgent ? 'bg-rose-600 text-white border-rose-700 hover:bg-rose-700' : 'bg-rose-50 text-rose-800 border-rose-200 hover:bg-rose-100'}`}
+    >
+      <span className="font-bold">{urgent ? `🛑 쿠팡 출고중지요청 ${a.stop}건` : `↩ 쿠팡 반품 진행 ${a.returning}건`}</span>
+      {urgent && a.returning > 0 && <span className="ml-2 font-semibold">· ↩ 반품 진행 {a.returning}건</span>}
+      <span className={`ml-2 ${urgent ? 'text-rose-100' : 'text-rose-600'}`}>
+        — {urgent ? '매입처 발주 멈추고 Wing에서 출고중지 처리' : '회수 확인 후 Wing에서 반품 승인'} · {names.slice(0, 3).join(', ')}{names.length > 3 ? ' 외' : ''}
+      </span>
+      <span className="ml-2 underline font-semibold whitespace-nowrap">확인하기 →</span>
+    </Link>
+  )
+}
 
 type NavItem = {
   href: string
@@ -194,6 +241,7 @@ const NAV_GROUPS: NavGroup[] = [
         href: '/admin/orders',
         label: '주문 ↔ 매입 (전 마켓)',
         icon: '📦',
+        badgeKey: 'coupang_claims',
         match: (p) => p.startsWith('/admin/orders') || p.startsWith('/admin/coupang-orders') || p.startsWith('/admin/naver-orders') || p.startsWith('/admin/toss-orders'),
       },
     ],
@@ -237,6 +285,8 @@ export default function AdminShell({
   const [mobileOpen, setMobileOpen] = useState(false)
 
   const currentItem = NAV_FLAT.find((i) => isItemActive(i, pathname))
+  const claims = useCoupangClaims(pathname)
+  const claimCount = claims ? claims.stop + claims.returning : null
 
   return (
     <div className="min-h-screen bg-gray-50 flex">
@@ -246,6 +296,7 @@ export default function AdminShell({
           pathname={pathname}
           userEmail={userEmail}
           onNavigate={() => setMobileOpen(false)}
+          claimCount={claimCount}
         />
       </aside>
 
@@ -261,6 +312,7 @@ export default function AdminShell({
               pathname={pathname}
               userEmail={userEmail}
               onNavigate={() => setMobileOpen(false)}
+              claimCount={claimCount}
             />
           </aside>
         </>
@@ -287,6 +339,9 @@ export default function AdminShell({
           )}
         </header>
 
+        {/* 진행 중 쿠팡 반품·출고중지 — 모든 화면 맨 위(주문 화면은 본문에 건별 패널이 있어 생략) */}
+        {claims && claims.stop + claims.returning > 0 && !pathname.startsWith('/admin/orders') && <ClaimAlertBar a={claims} />}
+
         <main className="flex-1 px-4 sm:px-6 lg:px-8 py-6 lg:py-8 max-w-6xl w-full">{children}</main>
       </div>
     </div>
@@ -297,10 +352,13 @@ function SidebarContent({
   pathname,
   userEmail,
   onNavigate,
+  claimCount,
 }: {
   pathname: string
   userEmail: string
   onNavigate: () => void
+  /** 진행 중 쿠팡 반품·출고중지 건수(AdminShell 이 읽어 내려줌) */
+  claimCount: number | null
 }) {
   // 시장 시그널 메뉴 — 24h 신규 정부 공지 카운트 배지
   const [govBadge, setGovBadge] = useState<number | null>(null)
@@ -337,6 +395,7 @@ function SidebarContent({
   const badgeValues: Record<BadgeKey, number | null> = {
     gov_new_24h: govBadge,
     work_escalated: workBadge,
+    coupang_claims: claimCount,
   }
 
   // 그룹별 접힘 상태. 활성 메뉴가 있는 그룹은 항상 펼쳐진 상태로 시작.
@@ -422,7 +481,9 @@ function SidebarContent({
                                 ? `24시간 내 새 정부 공지 ${badgeValue}건`
                                 : item.badgeKey === 'work_escalated'
                                   ? `확인 필요한 작업 ${badgeValue}건`
-                                  : undefined
+                                  : item.badgeKey === 'coupang_claims'
+                                    ? `진행 중 쿠팡 출고중지·반품 ${badgeValue}건`
+                                    : undefined
                             }
                             className="text-[10px] font-semibold px-1.5 py-0.5 rounded-full bg-rose-500 text-white"
                           >

@@ -245,8 +245,10 @@ export function createCoupangOrdersSyncOps({ sb, env, log = () => {} }) {
    * 받은 접수 → 테이블(바뀐 것만) + 새/상태 바뀐 접수만 주문 행 반영.
    * 새 접수·상태 변경은 주문 행 반영이 성공한 뒤에만 기록 — 실패하면 다음 회차에 다시 '바뀐 접수'로 잡혀 재시도된다
    * (반영은 같은 사유가 이미 있으면 건너뛰므로 재시도해도 중복 표시 없음).
+   * apply=false(과거분 백필 전용): 주문 행 반영 없이 기록만 — 기록된 상태로는 이후 반영이 다시 일어나지 않으므로
+   * 이미 끝난 옛 접수를 건수 집계용으로 채울 때만 쓴다. 이후 상태가 바뀌면 그때는 정상 반영된다.
    */
-  async function recordReceipts(receipts, errors) {
+  async function recordReceipts(receipts, errors, { apply = true } = {}) {
     const stored = new Map()
     const ids = receipts.map((rc) => rc.receiptId)
     for (let i = 0; i < ids.length; i += 200) {
@@ -259,7 +261,7 @@ export function createCoupangOrdersSyncOps({ sb, env, log = () => {} }) {
       const prev = stored.get(String(rc.receiptId))
       const row = receiptRow(rc)
       if (prev && canon(prev.raw_payload) === canon(row.raw_payload)) continue
-      if (!prev || prev.receipt_status !== rc.receiptStatus) {
+      if (apply && (!prev || prev.receipt_status !== rc.receiptStatus)) {
         try {
           const a = await applyReceiptToOrders(rc)
           flagged += a.flagged; cancelled += a.cancelled
@@ -272,7 +274,11 @@ export function createCoupangOrdersSyncOps({ sb, env, log = () => {} }) {
     return { changed, flagged, cancelled }
   }
 
-  async function syncReturnRequests({ windowDays = 30, maxStale = 20 } = {}) {
+  /**
+   * backfillDays > 30 이면 그 이전 기간도 30일 창으로 더 읽어 기록만 한다(기간 카드 반품·취소 건수용, 한 번만 돌리면 됨).
+   * 백필분은 주문 행에 확인필요를 올리지 않는다 — 이미 처리된 옛 반품이 한꺼번에 뜨지 않게.
+   */
+  async function syncReturnRequests({ windowDays = 30, maxStale = 20, backfillDays = 0 } = {}) {
     const now = new Date()
     const from = fmtKstYmd(new Date(now.getTime() - windowDays * 86400000))
     const to = fmtKstYmd(now)
@@ -280,6 +286,17 @@ export function createCoupangOrdersSyncOps({ sb, env, log = () => {} }) {
     const byId = new Map()
     const fetchList = (label, base) => fetchReturnList(label, base, byId, errors)
     for (const [label, q] of RETURN_QUERIES) await fetchList(label, `createdAtFrom=${from}&createdAtTo=${to}&${q}`)
+    if (backfillDays > windowDays) {
+      const old = new Map()
+      for (let off = windowDays + 1; off < backfillDays; off += 31) {
+        const wTo = new Date(now.getTime() - off * 86400000)
+        const wFrom = new Date(wTo.getTime() - 30 * 86400000)
+        for (const [label, q] of RETURN_QUERIES) await fetchReturnList(`${label} 백필`, `createdAtFrom=${fmtKstYmd(wFrom)}&createdAtTo=${fmtKstYmd(wTo)}&${q}`, old, errors)
+      }
+      for (const k of byId.keys()) old.delete(k)
+      const b = await recordReceipts([...old.values()], errors, { apply: false })
+      log(`  반품·취소 요청 백필 ${old.size}건(기록 ${b.changed}, 확인필요 안 올림)`)
+    }
 
     // 창 밖 미처리 접수 재조회
     const { data: staleOpen, error: staleErr } = await sb.from('jimscanner_coupang_return_requests')
@@ -297,6 +314,122 @@ export function createCoupangOrdersSyncOps({ sb, env, log = () => {} }) {
     const stopReq = open.filter((rc) => rc.receiptStatus === 'RELEASE_STOP_UNCHECKED').length
     log(`  반품·취소 요청 ${receipts.length}건(출고중지요청 ${stopReq} · 반품 진행 ${open.length - stopReq}) · 기록 ${changed} · 확인필요 ${flagged} · 매입 취소 ${cancelled}${errors.length ? ` · 오류 ${errors.length}` : ''}`)
     return { fetched: receipts.length, open: open.length, stopRequests: stopReq, changed, flagged, cancelled, errors }
+  }
+
+  // ─── 고객문의(상품 문의·콜센터 이관 문의) — 2026-11-08 ───
+  // 주문 화면 기간 카드 "문의 N(미답변 M)"용. 본문·구매자 정보(buyerEmail·buyerPhone)는 저장하지 않는다.
+  // 검색 기간 최대 7일 → 7일 창으로 나눠 읽는다. 콜센터는 NONE(전체) + NO_ANSWER·TRANSFER(판매자 답변 필요) 조회로 미답변 판정.
+  const INQ_TS = ['inquired_at', 'answered_at']
+  const INQ_COLS = ['order_id', 'seller_product_id', 'vendor_item_id', 'item_name', 'status', 'needs_answer', ...INQ_TS]
+  async function fetchInquiryPages(kind, query, errors) {
+    const path = `/v2/providers/openapi/apis/api/v5/vendors/${VENDOR_ID}/${kind === 'online' ? 'onlineInquiries' : 'callCenterInquiries'}`
+    const out = []
+    const pageSize = kind === 'online' ? 50 : 30
+    const MAX_PAGES = 20
+    for (let page = 1; page <= MAX_PAGES; page++) {
+      const q = `vendorId=${VENDOR_ID}&${query}&pageNum=${page}&pageSize=${pageSize}`
+      let r = await api('GET', path, q)
+      if (r.status === 429) { await sleep(3000); r = await api('GET', path, q) }
+      if (r.status !== 200) { errors.push(`문의 ${kind} ${query.slice(0, 60)}: HTTP ${r.status} ${JSON.stringify(r.body).slice(0, 100)}`); return null }
+      if (!Array.isArray(r.body?.data?.content)) { errors.push(`문의 ${kind} ${query.slice(0, 60)}: 응답 형식 다름(data.content 없음)`); return null }
+      const content = r.body.data.content
+      out.push(...content)
+      await sleep(200)
+      // pagination 이 없으면 꽉 찬 페이지일 때만 다음 페이지를 더 읽는다
+      const totalPages = Number(r.body.data.pagination?.totalPages)
+      if (content.length === 0 || (Number.isFinite(totalPages) ? page >= totalPages : content.length < pageSize)) break
+      if (page === MAX_PAGES) errors.push(`문의 ${kind} ${query.slice(0, 60)}: ${MAX_PAGES}쪽 넘음 — 일부 미수집`)
+    }
+    return out
+  }
+  /** 7일 창 하나 → 문의 행들. 하나라도 실패하면 null(그 창은 이번 회차 건너뜀) */
+  async function fetchInquiryWindow(fromYmd, toYmd, errors) {
+    const span = `inquiryStartAt=${fromYmd}&inquiryEndAt=${toYmd}`
+    const online = await fetchInquiryPages('online', `${span}&answeredType=ALL`, errors)
+    if (!online) return null
+    const rows = online.map((x) => {
+      const comments = Array.isArray(x.commentDtoList) ? x.commentDtoList : []
+      return {
+        kind: 'online', inquiry_id: x.inquiryId, order_id: Array.isArray(x.orderIds) ? (x.orderIds[0] ?? null) : null,
+        seller_product_id: x.sellerProductId ?? null, vendor_item_id: x.vendorItemId ?? null, item_name: null,
+        status: comments.length ? 'answered' : 'unanswered', needs_answer: comments.length === 0,
+        inquired_at: x.inquiryAt || null, answered_at: comments.length ? (comments[comments.length - 1].inquiryCommentAt || null) : null,
+      }
+    })
+    const all = await fetchInquiryPages('callcenter', `${span}&partnerCounselingStatus=NONE`, errors)
+    if (!all) return null
+    const need = new Map()
+    for (const st of ['NO_ANSWER', 'TRANSFER']) {
+      const l = await fetchInquiryPages('callcenter', `${span}&partnerCounselingStatus=${st}`, errors)
+      if (!l) return null
+      for (const x of l) need.set(String(x.inquiryId), x)
+    }
+    const callRows = new Map()
+    for (const x of [...all, ...need.values()]) {
+      callRows.set(String(x.inquiryId), {
+        kind: 'callcenter', inquiry_id: x.inquiryId, order_id: x.orderId ?? null, seller_product_id: null,
+        vendor_item_id: Array.isArray(x.vendorItemId) ? (x.vendorItemId[0] ?? null) : (x.vendorItemId ?? null),
+        item_name: x.itemName ?? null, status: x.csPartnerCounselingStatus ?? null, needs_answer: need.has(String(x.inquiryId)),
+        inquired_at: x.inquiryAt || null, answered_at: x.answeredAt || null,
+      })
+    }
+    return [...rows, ...callRows.values()]
+  }
+  // 쿠팡 시각은 '+09:00' 포함 ISO, DB 는 timestamptz — 시각은 ms 로 비교(해석 불가 값은 원문 비교)
+  const tsKey = (v) => { if (!v) return ''; const t = new Date(v).getTime(); return Number.isNaN(t) ? String(v) : String(t) }
+  const sameInquiry = (prev, row) => INQ_COLS.every((k) => INQ_TS.includes(k)
+    ? tsKey(prev[k]) === tsKey(row[k])
+    : String(prev[k] ?? '') === String(row[k] ?? ''))
+
+  /**
+   * 최근 days일(7일 창) 문의 + 7일 창 밖에 남은 미답변 문의의 창을 다시 읽어 바뀐 것만 기록.
+   * days 를 크게 주면(예: 180) 과거분 백필 — 한 번만 돌리면 된다.
+   */
+  async function syncInquiries({ days = 7, maxStaleWindows = 8 } = {}) {
+    const errors = []
+    const now = new Date()
+    const windows = new Map()
+    for (let off = 0; off < days; off += 7) {
+      const to = new Date(now.getTime() - off * 86400000)
+      windows.set(fmtKstYmd(new Date(to.getTime() - 6 * 86400000)), fmtKstYmd(to))
+    }
+    const { data: staleOpen, error: se } = await sb.from('jimscanner_coupang_inquiries')
+      .select('inquired_at').eq('needs_answer', true).lt('inquired_at', new Date(now.getTime() - 6 * 86400000).toISOString())
+      .order('inquired_at', { ascending: false }).limit(200)
+    if (se) errors.push(`문의 미답변분 조회: ${se.message}`)
+    let extra = 0
+    for (const s of staleOpen ?? []) {
+      if (extra >= maxStaleWindows || !s.inquired_at) break
+      const d = new Date(s.inquired_at)
+      const fromYmd = fmtKstYmd(d)
+      if ([...windows].some(([f, t]) => f <= fromYmd && fromYmd <= t)) continue // 이미 읽는 창 안
+      windows.set(fromYmd, fmtKstYmd(new Date(Math.min(d.getTime() + 6 * 86400000, now.getTime()))))
+      extra++
+    }
+    const byKey = new Map()
+    for (const [from, to] of windows) {
+      const rows = await fetchInquiryWindow(from, to, errors)
+      for (const r of rows ?? []) byKey.set(`${r.kind}:${r.inquiry_id}`, r)
+    }
+    const rows = [...byKey.values()]
+    const stored = new Map()
+    for (const kind of ['online', 'callcenter']) {
+      const ids = rows.filter((r) => r.kind === kind).map((r) => r.inquiry_id)
+      for (let i = 0; i < ids.length; i += 200) {
+        const { data, error } = await sb.from('jimscanner_coupang_inquiries').select(`kind, inquiry_id, ${INQ_COLS.join(', ')}`).eq('kind', kind).in('inquiry_id', ids.slice(i, i + 200))
+        if (error) throw new Error(`문의 저장분 조회: ${error.message}`)
+        for (const s of data ?? []) stored.set(`${s.kind}:${s.inquiry_id}`, s)
+      }
+    }
+    const changedRows = rows.filter((r) => { const p = stored.get(`${r.kind}:${r.inquiry_id}`); return !p || !sameInquiry(p, r) })
+      .map((r) => ({ ...r, last_synced_at: new Date().toISOString() }))
+    for (let i = 0; i < changedRows.length; i += 200) {
+      const { error } = await sb.from('jimscanner_coupang_inquiries').upsert(changedRows.slice(i, i + 200), { onConflict: 'kind,inquiry_id' })
+      if (error) { errors.push(`문의 기록: ${error.message}`); break }
+    }
+    const open = rows.filter((r) => r.needs_answer).length
+    log(`  고객문의 ${rows.length}건(미답변 ${open}) · 기록 ${changedRows.length}${errors.length ? ` · 오류 ${errors.length}` : ''}`)
+    return { fetched: rows.length, open, changed: changedRows.length, errors }
   }
 
   /**
@@ -492,8 +625,19 @@ export function createCoupangOrdersSyncOps({ sb, env, log = () => {} }) {
     errors += claims.errors.length
     for (const m of claims.errors) if (errorSamples.length < 5) errorSamples.push(m)
 
+    // 고객문의 건수·답변 상태(주문 화면 기간 카드용)
+    let inquiries = { fetched: 0, open: 0, changed: 0, errors: [] }
+    try {
+      inquiries = await syncInquiries()
+    } catch (e) {
+      inquiries.errors = [e instanceof Error ? e.message : String(e)]
+      log(`  고객문의 수집 실패: ${inquiries.errors[0]}`)
+    }
+    errors += inquiries.errors.length
+    for (const m of inquiries.errors) if (errorSamples.length < 5) errorSamples.push(m)
+
     const durationMs = Date.now() - t0
-    log(`[coupang-orders-sync/${triggeredBy}] total=${total} inserted=${inserted} unchanged=${unchanged} errors=${errors} reconcile(checked=${reconciled.checked} cancelled=${reconciled.cancelled} refreshed=${reconciled.refreshed}${reconciled.pending ? ` pending=${reconciled.pending}` : ''}) claims(fetched=${claims.fetched} open=${claims.open} stop=${claims.stopRequests} changed=${claims.changed} flagged=${claims.flagged}) (${(durationMs / 1000).toFixed(1)}s)`)
+    log(`[coupang-orders-sync/${triggeredBy}] total=${total} inserted=${inserted} unchanged=${unchanged} errors=${errors} reconcile(checked=${reconciled.checked} cancelled=${reconciled.cancelled} refreshed=${reconciled.refreshed}${reconciled.pending ? ` pending=${reconciled.pending}` : ''}) claims(fetched=${claims.fetched} open=${claims.open} stop=${claims.stopRequests} changed=${claims.changed} flagged=${claims.flagged}) inquiries(fetched=${inquiries.fetched} open=${inquiries.open} changed=${inquiries.changed}) (${(durationMs / 1000).toFixed(1)}s)`)
 
     if (runId) {
       try {
@@ -513,8 +657,10 @@ export function createCoupangOrdersSyncOps({ sb, env, log = () => {} }) {
       total, inserted, unchanged, errors, errorSamples, durationMs,
       cancelled: reconciled.cancelled + claims.cancelled, refreshed: reconciled.refreshed,
       claimsOpen: claims.open, claimsStop: claims.stopRequests, claimsFlagged: claims.flagged,
+      inquiriesOpen: inquiries.open,
     }
   }
 
-  return { syncRecentOrders, purchaseBlock }
+  // syncReturnRequests·syncInquiries 는 과거분 백필(backfillDays·days)용으로도 노출
+  return { syncRecentOrders, purchaseBlock, syncReturnRequests, syncInquiries }
 }

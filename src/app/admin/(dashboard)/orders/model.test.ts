@@ -3,7 +3,8 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
   normalizeCoupang, normalizeNaver, normalizeToss, summarize, filterOrders, sortOrders, paginate,
-  parseParams, buildHref, legacyRedirectHref, countByPurchase, marketStatusBadge, coupangClaimBadge, hasOpenClaim,
+  parseParams, buildHref, legacyRedirectHref, countByPurchase, marketStatusBadge, coupangClaimBadge, hasOpenClaim, coupangClaimTodo, OPEN_CLAIMS_HREF,
+  coupangClaimKind, periodActivity,
   type CoupangClaimRow, type CoupangOrderRow, type NaverOrderRow, type TossOrderRow,
 } from './model'
 
@@ -187,9 +188,59 @@ test('쿠팡 접수 배지: 취소완료·출고중지완료·반품접수 구�
   assert.equal(coupangClaimBadge({ receipt_type: 'RETURN', receipt_status: 'RETURNS_UNCHECKED', items: [{ releaseStatus: 'A' }] }).label, '↩ 반품접수')
 })
 
+test('상단 알림 링크 상수 = 반품 진행 필터 링크, 할 일 문구는 매입 상태별', () => {
+  assert.equal(OPEN_CLAIMS_HREF, buildHref(parseParams({}), { market: 'coupang', claim: 'open', days: 0 }))
+  assert.match(coupangClaimTodo('RELEASE_STOP_UNCHECKED', 'PENDING'), /발주하지 말고/)
+  assert.match(coupangClaimTodo('RELEASE_STOP_UNCHECKED', 'ORDERED'), /매입처 주문 취소 후/)
+  assert.match(coupangClaimTodo('RELEASE_STOP_UNCHECKED', 'RECEIVED'), /이미출고/)
+  assert.match(coupangClaimTodo('RETURNS_UNCHECKED', 'RECEIVED'), /반품 승인/)
+})
+
 test('반품 진행 필터는 링크에서 유지된다', () => {
   const p = parseParams({ market: 'coupang', claim: 'open', days: '0' })
   assert.equal(p.claim, 'open')
   assert.equal(buildHref(p, { page: 2 }), '/admin/orders?market=coupang&claim=open&days=0&page=2')
   assert.equal(parseParams({ claim: 'weird' }).claim, '')
+})
+
+test('쿠팡 접수 분류: CANCEL=취소, 출고중지요청·출고 전 완료=출고중지, 출고 뒤=반품', () => {
+  assert.equal(coupangClaimKind({ receipt_type: 'CANCEL', receipt_status: 'RETURNS_COMPLETED', items: [] }), 'cancel')
+  assert.equal(coupangClaimKind({ receipt_type: 'RETURN', receipt_status: 'RELEASE_STOP_UNCHECKED', items: [{ releaseStatus: 'N' }] }), 'stop')
+  assert.equal(coupangClaimKind({ receipt_type: 'RETURN', receipt_status: 'RETURNS_COMPLETED', items: [{ releaseStatus: 'S' }] }), 'stop')
+  assert.equal(coupangClaimKind({ receipt_type: 'RETURN', receipt_status: 'RETURNS_COMPLETED', items: [{ releaseStatus: 'Y' }] }), 'return')
+  // 출고중지요청에 '이미출고'로 답하면 반품 접수로 이어진다
+  assert.equal(coupangClaimKind({ receipt_type: 'RETURN', receipt_status: 'RETURNS_UNCHECKED', items: [{ releaseStatus: 'A' }] }), 'return')
+})
+
+test('기간 카드: 쿠팡은 접수·문의 테이블, 네이버·토스는 주문 상태로 세고 미처리를 따로 센다', () => {
+  const orders = [
+    normalizeCoupang(coupangRow({ shipping_status: 'CANCEL' }), null), // 쿠팡 주문 행 취소는 접수와 겹치므로 안 셈
+    normalizeCoupang(coupangRow({ id: 'c2' }), null),
+    normalizeNaver(naverRow({ product_order_status: 'RETURNED' })),
+    normalizeNaver(naverRow({ id: 'n2', product_order_status: 'DELIVERED', claim_status: 'RETURN_REQUEST' })),
+    normalizeNaver(naverRow({ id: 'n3', product_order_status: 'CANCELED', claim_status: 'CANCEL_DONE' })),
+    normalizeToss(tossRow({ order_status: 'CANCELED_PAYMENT' })),
+  ]
+  const coupang = {
+    claims: [
+      { receipt_id: 1, receipt_type: 'RETURN', receipt_status: 'RELEASE_STOP_UNCHECKED', items: [{ releaseStatus: 'N' }] },
+      { receipt_id: 2, receipt_type: 'RETURN', receipt_status: 'RETURNS_COMPLETED', items: [{ releaseStatus: 'S' }] },
+      { receipt_id: 3, receipt_type: 'RETURN', receipt_status: 'RETURNS_UNCHECKED', items: [{ releaseStatus: 'Y' }] },
+      { receipt_id: 4, receipt_type: 'CANCEL', receipt_status: 'RETURNS_COMPLETED', items: [] },
+    ],
+    inquiries: [{ kind: 'online', needs_answer: true }, { kind: 'callcenter', needs_answer: false }, { kind: 'online', needs_answer: null }],
+  }
+  const a = periodActivity(orders, coupang)
+  assert.equal(a.coupang, 'ok')
+  assert.equal(a.orders, 6)
+  assert.deepEqual(a.stop, { total: 2, open: 1 })
+  assert.deepEqual(a.returns, { total: 3, open: 2 }) // 쿠팡 반품접수 1 + 네이버 반품완료 1 + 네이버 반품요청 1(진행)
+  assert.deepEqual(a.cancels, { total: 3, open: 0 }) // 쿠팡 취소 1 + 네이버 취소 1 + 토스 결제취소 1
+  assert.deepEqual(a.inquiries, { total: 3, open: 1 })
+
+  const naverOnly = periodActivity(orders.filter((o) => o.market === 'naver'), undefined)
+  assert.equal(naverOnly.coupang, 'na')
+  assert.deepEqual(naverOnly.stop, { total: 0, open: 0 })
+  assert.deepEqual(naverOnly.returns, { total: 2, open: 1 })
+  assert.equal(periodActivity([], null).coupang, 'error')
 })

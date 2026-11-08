@@ -139,6 +139,37 @@ export function fmtKst(s: string | null | undefined): string {
   return new Date(t + 9 * 3600 * 1000).toISOString().slice(5, 16).replace('T', ' ')
 }
 
+/** 진행 중 반품·출고중지만 보는 주문 목록(전체 기간) — 관리자 상단 알림·배너 링크 공용. buildHref 결과와 같아야 한다(model.test) */
+export const OPEN_CLAIMS_HREF = '/admin/orders?market=coupang&claim=open&days=0'
+
+/** 진행 중 접수의 할 일 — 동기화 지점: scripts/lib/coupang-orders-sync.mjs applyReceiptToOrders 사유 문구 */
+export function coupangClaimTodo(status: string, purchase: string | null): string {
+  if (status === COUPANG_STOP_REQUEST) {
+    if (purchase === 'SHIPPED' || purchase === 'RECEIVED') return '매입처가 이미 발송 — Wing에서 이미출고 처리(송장 입력)'
+    if (purchase === 'CANCELLED') return 'Wing에서 출고중지 처리'
+    if (purchase === 'ORDERED' || purchase === 'AWAITING_DEPOSIT') return '매입처 주문 취소 후 Wing에서 출고중지 처리'
+    return '매입처에 발주하지 말고 Wing에서 출고중지 처리'
+  }
+  return '회수 확인 후 Wing에서 반품 승인, 매입처 반품·환불 확인'
+}
+
+/** 상단 알림·주문 화면 패널용 진행 중 접수 한 건(주문 정보 붙임) */
+export interface OpenClaim {
+  receiptId: number
+  orderId: number
+  status: string
+  /** 출고중지요청(가장 급함) */
+  stop: boolean
+  label: string
+  cls: string
+  productName: string | null
+  optionName: string | null
+  purchaseStatus: string | null
+  reason: string
+  requestedAt: string | null
+  todo: string
+}
+
 /** 취소 수량이 라인 수량 전부인지. 라인 품목을 모르면 품목이 하나뿐인 접수의 수량, 그것도 아니면 접수 합계 수량으로 — 수량 정보가 없으면 false(매출 유지) */
 function lineCovered(item: { cancelCount?: number } | undefined, items: ReadonlyArray<{ cancelCount?: number }>, sum: number | null, shippingCount: number | null | undefined): boolean {
   const n = item ? item.cancelCount : items.length === 1 ? items[0].cancelCount : sum
@@ -650,6 +681,59 @@ export function countByPurchase(orders: UnifiedOrder[]): Map<PurchaseStatus, num
   const m = new Map<PurchaseStatus, number>()
   for (const o of orders) m.set(o.purchaseStatus, (m.get(o.purchaseStatus) ?? 0) + 1)
   return m
+}
+
+// ─── 기간 활동 카드: 주문·출고중지·반품·취소·문의 건수(2026-11-08 사장님 요청) ───
+export type ClaimKind = 'stop' | 'return' | 'cancel'
+/** 쿠팡 접수 분류 — CANCEL 유형=취소, 출고중지요청·출고 전 중지=출고중지, 그 밖(이미 출고된 뒤)=반품 */
+export function coupangClaimKind(c: Pick<CoupangClaimRow, 'receipt_type' | 'receipt_status' | 'items'>): ClaimKind {
+  if (c.receipt_type === 'CANCEL') return 'cancel'
+  if (c.receipt_status === COUPANG_STOP_REQUEST || claimPreShip(c)) return 'stop'
+  return 'return'
+}
+/** 쿠팡 고객문의 한 건(건수·답변 여부만) — jimscanner_coupang_inquiries */
+export interface InquiryRow { kind: string; needs_answer: boolean | null }
+export type PeriodClaimRow = Pick<CoupangClaimRow, 'receipt_id' | 'receipt_type' | 'receipt_status' | 'items'>
+/** 기간 내 쿠팡 접수·문의(접수일·문의일 기준) — 로드 실패는 null */
+export interface PeriodCoupangActivity { claims: PeriodClaimRow[]; inquiries: InquiryRow[] }
+export interface Tally { total: number; open: number }
+export interface PeriodActivity {
+  /** 기간 내 주문 라인 수(주문일 기준, 취소·반품 포함) */
+  orders: number
+  stop: Tally
+  returns: Tally
+  cancels: Tally
+  inquiries: Tally
+  /** 쿠팡 접수·문의: ok=셌음 · na=네이버·토스만 보는 중 · error=조회 실패 */
+  coupang: 'ok' | 'na' | 'error'
+}
+const NAVER_RETURN_OPEN = new Set(['RETURN_REQUEST', 'COLLECTING', 'COLLECT_DONE'])
+const NAVER_CANCEL_OPEN = new Set(['CANCEL_REQUEST', 'CANCELING'])
+/**
+ * 기간 카드 집계. 쿠팡 출고중지·반품·취소·문의는 접수 테이블(접수일·문의일 기준)에서,
+ * 네이버·토스 반품·취소는 주문 상태에서(접수일이 없어 주문일 기준) 센다. 쿠팡 주문 행의 취소 상태는 접수와 겹치므로 세지 않는다.
+ * coupang: undefined = 해당 없음(네이버·토스만 보기), null = 조회 실패.
+ */
+export function periodActivity(orders: readonly UnifiedOrder[], coupang: PeriodCoupangActivity | null | undefined): PeriodActivity {
+  const t = (): Tally => ({ total: 0, open: 0 })
+  const out: PeriodActivity = { orders: orders.length, stop: t(), returns: t(), cancels: t(), inquiries: t(), coupang: coupang === undefined ? 'na' : coupang === null ? 'error' : 'ok' }
+  const bump = (x: Tally, open: boolean) => { x.total++; if (open) x.open++ }
+  for (const o of orders) {
+    if (o.market === 'naver') {
+      const claim = o.naver?.claimStatus ?? ''
+      if (o.marketStatus === 'RETURNED' || NAVER_RETURN_OPEN.has(claim)) bump(out.returns, o.marketStatus !== 'RETURNED')
+      else if (NAVER_CANCELLED.has(o.marketStatus ?? '') || NAVER_CANCEL_OPEN.has(claim)) bump(out.cancels, !NAVER_CANCELLED.has(o.marketStatus ?? ''))
+    } else if (o.market === 'toss') {
+      if (TOSS_CANCELLED.has(o.marketStatus ?? '')) bump(out.cancels, false)
+    }
+  }
+  for (const c of coupang?.claims ?? []) {
+    const open = COUPANG_OPEN_CLAIM_STATUSES.includes(c.receipt_status ?? '')
+    const kind = coupangClaimKind(c)
+    bump(kind === 'stop' ? out.stop : kind === 'return' ? out.returns : out.cancels, open)
+  }
+  for (const q of coupang?.inquiries ?? []) bump(out.inquiries, !!q.needs_answer)
+  return out
 }
 
 // ─── 목록 파라미터·필터·정렬·페이지 ───

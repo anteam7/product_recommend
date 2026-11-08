@@ -5,8 +5,9 @@
  */
 import { createAdminClient } from '@/lib/auth/admin-supabase'
 import {
-  COUPANG_OPEN_CLAIM_STATUSES, COUPANG_STOP_REQUEST, MARKETS, normalizeCoupang, normalizeNaver, normalizeToss, periodCutoff,
-  type CoupangClaimRow, type CoupangListingRef, type CoupangOrderRow, type Market, type NaverListingRef, type NaverOrderRow, type TossOrderRow, type UnifiedOrder,
+  COUPANG_OPEN_CLAIM_STATUSES, COUPANG_STOP_REQUEST, MARKETS, coupangClaimBadge, coupangClaimTodo, normalizeCoupang, normalizeNaver, normalizeToss, periodCutoff,
+  type CoupangClaimRow, type CoupangListingRef, type CoupangOrderRow, type InquiryRow, type Market, type NaverListingRef, type NaverOrderRow, type OpenClaim,
+  type PeriodClaimRow, type PeriodCoupangActivity, type TossOrderRow, type UnifiedOrder,
 } from './model'
 
 /** 쿠팡 반품·취소 요청 — scripts/lib/coupang-orders-sync.mjs syncReturnRequests 가 주문 수집과 같은 회차에 갱신 */
@@ -165,6 +166,87 @@ export async function loadTodo(): Promise<Record<Market, MarketTodo>> {
   out.coupang.claimStop = stop
   out.coupang.claimReturn = returning
   return out
+}
+
+/**
+ * 진행 중 쿠팡 반품·출고중지 접수 + 주문 정보(상품명·매입 상태) — 관리자 상단 알림(/api/admin/coupang-claims)·주문 화면 패널.
+ * 출고중지요청을 먼저, 그 안에서 최근 접수 순. 실패는 throw(호출부가 화면을 죽이지 않게 처리).
+ */
+export async function loadOpenClaims(limit = 50): Promise<{ stop: number; returning: number; items: OpenClaim[] }> {
+  const db = sb()
+  const { data, error } = await db.from(CLAIMS_TABLE)
+    .select('receipt_id, order_id, receipt_type, receipt_status, reason_category1, reason_category2, reason, items, requested_at')
+    .in('receipt_status', COUPANG_OPEN_CLAIM_STATUSES as string[])
+    .order('requested_at', { ascending: false })
+    .limit(limit)
+  if (error) throw new Error(error.message)
+  const claims = (data ?? []) as Array<Pick<CoupangClaimRow, 'receipt_id' | 'order_id' | 'receipt_type' | 'receipt_status' | 'reason_category1' | 'reason_category2' | 'reason' | 'items' | 'requested_at'>>
+  const orderIds = [...new Set(claims.map((c) => c.order_id))]
+  type O = { order_id: number; vendor_item_id: number | string | null; product_name: string | null; option_name: string | null; purchase_status: string | null }
+  const byOrder = new Map<string, O[]>()
+  if (orderIds.length > 0) {
+    const { data: rows, error: oe } = await db.from('jimscanner_coupang_orders')
+      .select('order_id, vendor_item_id, product_name, option_name, purchase_status').in('order_id', orderIds)
+    if (oe) console.error('[orders] 반품·출고중지 주문 조인 실패 — 상품명 생략:', oe.message)
+    for (const r of (rows ?? []) as O[]) {
+      const k = String(r.order_id)
+      if (!byOrder.has(k)) byOrder.set(k, [])
+      byOrder.get(k)!.push(r)
+    }
+  }
+  const items: OpenClaim[] = claims.map((c) => {
+    const rows = byOrder.get(String(c.order_id)) ?? []
+    const vids = new Set((c.items ?? []).map((i) => String(i.vendorItemId)))
+    const o = rows.find((r) => vids.has(String(r.vendor_item_id))) ?? rows[0] ?? null
+    const status = c.receipt_status ?? ''
+    const b = coupangClaimBadge(c)
+    return {
+      receiptId: c.receipt_id,
+      orderId: c.order_id,
+      status,
+      stop: status === COUPANG_STOP_REQUEST,
+      label: b.label,
+      cls: b.cls,
+      productName: o?.product_name ?? null,
+      optionName: o?.option_name ?? null,
+      purchaseStatus: o?.purchase_status ?? null,
+      reason: [c.reason_category1, c.reason_category2].filter(Boolean).join('/') || c.reason || '사유 없음',
+      requestedAt: c.requested_at,
+      todo: coupangClaimTodo(status, o?.purchase_status ?? null),
+    }
+  })
+  items.sort((a, b) => Number(b.stop) - Number(a.stop) || String(b.requestedAt ?? '').localeCompare(String(a.requestedAt ?? '')))
+  const stop = items.filter((i) => i.stop).length
+  return { stop, returning: items.length - stop, items }
+}
+
+/**
+ * 기간 카드용 쿠팡 반품·취소 접수(접수일 기준) + 고객문의(문의일 기준). 실패는 throw(호출부가 카드에 '조회 실패' 표시).
+ * 문의는 scripts/lib/coupang-orders-sync.mjs syncInquiries 가 주문 수집과 같은 회차에 갱신.
+ */
+export async function loadPeriodCoupangActivity(days: number): Promise<PeriodCoupangActivity> {
+  const db = sb()
+  const cutoff = periodCutoff(days)
+  const readAll = async <T,>(table: string, cols: string, dateCol: string, keyCols: string[]): Promise<T[]> => {
+    const out: T[] = []
+    for (let from = 0; ; from += PG_PAGE) {
+      let q = db.from(table).select(cols)
+      if (cutoff) q = q.gte(dateCol, cutoff)
+      q = q.order(dateCol, { ascending: false })
+      for (const k of keyCols) q = q.order(k, { ascending: true })
+      const { data, error } = await q.range(from, from + PG_PAGE - 1)
+      if (error) throw new Error(`${table}: ${error.message}`)
+      const rows = (data ?? []) as T[]
+      out.push(...rows)
+      if (rows.length < PG_PAGE) break
+    }
+    return out
+  }
+  const [claims, inquiries] = await Promise.all([
+    readAll<PeriodClaimRow>(CLAIMS_TABLE, 'receipt_id, receipt_type, receipt_status, items', 'requested_at', ['receipt_id']),
+    readAll<InquiryRow>('jimscanner_coupang_inquiries', 'kind, inquiry_id, needs_answer', 'inquired_at', ['kind', 'inquiry_id']),
+  ])
+  return { claims, inquiries }
 }
 
 export interface SyncRun { started_at: string; status: string }

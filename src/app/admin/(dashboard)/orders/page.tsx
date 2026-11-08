@@ -1,13 +1,13 @@
 import Link from 'next/link'
 import { FEE_RATE, FEE_RATE_BY_SOURCE } from '@/lib/coupang/fee'
 import { TOSS_FEE_RATE } from '@/lib/toss/fee'
-import { loadLastSync, loadOrders, loadTodo } from './data'
+import { loadLastSync, loadOpenClaims, loadOrders, loadPeriodCoupangActivity, loadTodo } from './data'
 import { OrdersTable } from './OrdersTable'
 import SyncOrdersButton from './coupang/SyncOrdersButton'
 import {
-  MARKETS, MARKET_META, ORDERS_PATH, PERIOD_OPTIONS, PURCHASE_STATUSES, PURCHASE_STATUS_LABELS, SORT_OPTIONS, DEFAULT_DAYS,
-  buildHref, countByPurchase, filterOrders, fmtDate, paginate, parseParams, sortOrders, summarize,
-  type Agg, type Market, type RawSearchParams,
+  MARKETS, MARKET_META, OPEN_CLAIMS_HREF, ORDERS_PATH, PERIOD_OPTIONS, PURCHASE_STATUSES, PURCHASE_STATUS_LABELS, SORT_OPTIONS, DEFAULT_DAYS,
+  buildHref, countByPurchase, filterOrders, fmtDate, fmtKst, isPurchaseStatus, paginate, parseParams, periodActivity, sortOrders, summarize,
+  type Agg, type Market, type OpenClaim, type PeriodActivity, type RawSearchParams, type Tally,
 } from './model'
 
 export const dynamic = 'force-dynamic'
@@ -18,11 +18,18 @@ export const dynamic = 'force-dynamic'
  */
 export default async function OrdersPage({ searchParams }: { searchParams: Promise<RawSearchParams> }) {
   const p = parseParams(await searchParams)
-  const [{ orders: allOrders, errors }, todo, lastSync] = await Promise.all([loadOrders(MARKETS, p.days), loadTodo(), loadLastSync()])
+  const [{ orders: allOrders, errors }, todo, lastSync, openClaims, periodCoupang] = await Promise.all([
+    loadOrders(MARKETS, p.days), loadTodo(), loadLastSync(),
+    // 실패해도 주문 화면은 보여준다(패널 자리에 실패 문구)
+    loadOpenClaims().catch((e: unknown) => { console.error('[orders] 진행 중 반품·출고중지 조회 실패:', e instanceof Error ? e.message : e); return null }),
+    loadPeriodCoupangActivity(p.days).catch((e: unknown) => { console.error('[orders] 기간 반품·문의 조회 실패:', e instanceof Error ? e.message : e); return null }),
+  ])
 
   // 마켓 필터는 메모리 — 전 마켓을 항상 읽어야 마켓 칩에 기간 내 건수를 함께 보여줄 수 있다(규모 작음)
   const scoped = p.market ? allOrders.filter((o) => o.market === p.market) : allOrders
   const summary = summarize(scoped)
+  // 쿠팡 접수·문의는 전 마켓·쿠팡 보기에서만 더한다
+  const activity = periodActivity(scoped, p.market === '' || p.market === 'coupang' ? periodCoupang : undefined)
   const byPurchase = countByPurchase(scoped)
   const list = paginate(sortOrders(filterOrders(scoped, p), p.sort), p.page)
   const periodCount = Object.fromEntries(MARKETS.map((m) => [m, allOrders.filter((o) => o.market === m).length])) as Record<Market, number>
@@ -59,6 +66,11 @@ export default async function OrdersPage({ searchParams }: { searchParams: Promi
         </div>
         <SyncOrdersButton />
       </header>
+
+      {/* 진행 중 쿠팡 반품·출고중지 — 맨 위 건별 목록(기간 무관). 출고중지요청은 결제진행도 막혀 있다 */}
+      {openClaims === null ? (
+        <div className="rounded border border-rose-300 bg-rose-50 px-4 py-2 text-xs text-rose-700">쿠팡 반품·출고중지 요청을 못 읽었습니다(DB 오류) — Wing에서 직접 확인하세요.</div>
+      ) : openClaims.items.length > 0 && <ClaimPanel stop={openClaims.stop} returning={openClaims.returning} items={openClaims.items} />}
 
       {failedMarkets.length > 0 && (
         <div className="rounded border border-rose-300 bg-rose-50 px-4 py-3 text-sm text-rose-700">
@@ -128,6 +140,7 @@ export default async function OrdersPage({ searchParams }: { searchParams: Promi
         <div className="text-xs text-gray-500">
           {periodLabel === '전체' ? '전체 기간' : `최근 ${periodLabel}`} · {p.market ? MARKET_META[p.market].label : '전 마켓'} · 주문 {summary.total.count.toLocaleString()}건 (취소·반품 제외)
         </div>
+        <ActivityCards a={activity} keptOrders={summary.total.count} />
         <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
           <Kpi label="총 매출" value={`${summary.total.revenue.toLocaleString()}원`} />
           <Kpi label="총 매입원가" value={`${summary.total.cost.toLocaleString()}원`} />
@@ -260,6 +273,36 @@ export default async function OrdersPage({ searchParams }: { searchParams: Promi
   )
 }
 
+function ClaimPanel({ stop, returning, items }: { stop: number; returning: number; items: OpenClaim[] }) {
+  const urgent = stop > 0
+  return (
+    <section className={`rounded-lg border-2 px-4 py-3 ${urgent ? 'border-rose-500 bg-rose-50' : 'border-rose-200 bg-rose-50/60'}`}>
+      <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1 mb-2">
+        <h2 className="font-bold text-rose-800">
+          {stop > 0 && <span>🛑 쿠팡 출고중지요청 {stop}건</span>}
+          {stop > 0 && returning > 0 && <span className="mx-1.5 text-rose-300">·</span>}
+          {returning > 0 && <span>↩ 반품 진행 {returning}건</span>}
+        </h2>
+        <span className="text-xs text-rose-600">처리는 Wing에서 · 출고중지요청 주문은 결제진행이 막혀 있습니다</span>
+        <Link href={OPEN_CLAIMS_HREF} className="ml-auto text-xs font-semibold text-rose-700 underline hover:text-rose-900">아래 목록에서 보기 →</Link>
+      </div>
+      <ul className="divide-y divide-rose-100">
+        {items.map((c) => (
+          <li key={c.receiptId} className="py-1.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-sm">
+            <span className={`text-[11px] px-1.5 py-0.5 rounded ${c.cls}`}>{c.label}</span>
+            <span className="font-semibold text-gray-900 break-all">{c.productName ?? `주문#${c.orderId}`}</span>
+            {c.optionName && c.optionName !== c.productName && <span className="text-xs text-gray-500 break-all">{c.optionName}</span>}
+            <span className="text-xs text-gray-500">
+              · {c.reason} · 접수 {fmtKst(c.requestedAt)} · 매입 {isPurchaseStatus(c.purchaseStatus) ? PURCHASE_STATUS_LABELS[c.purchaseStatus].label : '—'}
+            </span>
+            <span className={`text-xs font-semibold basis-full ${c.stop ? 'text-rose-700' : 'text-rose-600'}`}>→ {c.todo}</span>
+          </li>
+        ))}
+      </ul>
+    </section>
+  )
+}
+
 /** 현재 페이지 주변 최대 9개 페이지 번호 — 10페이지 넘어도 이전/다음과 함께 모두 도달 가능 */
 function pageWindow(page: number, totalPages: number, span = 4): number[] {
   const start = Math.max(1, Math.min(page - span, totalPages - span * 2))
@@ -275,6 +318,40 @@ function Kpi({ label, value, sub, highlight = false, positive = true }: { label:
       {sub && <div className="text-[10px] text-gray-400 mt-0.5 tabular-nums">{sub}</div>}
     </div>
   )
+}
+
+/** 기간 건수 카드 — 주문·출고중지·반품·취소·문의. 미처리가 있으면 빨갛게(출고중지·반품은 진행 중 목록으로 링크) */
+function ActivityCards({ a, keptOrders }: { a: PeriodActivity; keptOrders: number }) {
+  const coupangNote = a.coupang === 'error' ? '⚠ 쿠팡 접수·문의 조회 실패' : null
+  const coupangOnly = (t: Tally, openLabel: string, basis: string, href?: string) =>
+    a.coupang === 'na' ? <CountCard label={basis} value="—" sub="쿠팡만 해당" muted />
+      : a.coupang === 'error' ? <CountCard label={basis} value="?" sub="조회 실패" alert />
+      : <CountCard label={basis} value={`${t.total.toLocaleString()}건`} sub={t.open > 0 ? `${openLabel} ${t.open}` : `${openLabel} 없음`} alert={t.open > 0} href={t.open > 0 ? href : undefined} />
+  return (
+    <div className="space-y-1">
+      <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+        <CountCard label="주문" value={`${a.orders.toLocaleString()}건`} sub={`매출 집계 ${keptOrders.toLocaleString()} · 취소·반품 ${(a.orders - keptOrders).toLocaleString()}`} />
+        {coupangOnly(a.stop, '미처리', '출고중지 (쿠팡)', OPEN_CLAIMS_HREF)}
+        <CountCard label="반품" value={`${a.returns.total.toLocaleString()}건`} sub={a.returns.open > 0 ? `진행 중 ${a.returns.open}` : (coupangNote ?? '진행 중 없음')} alert={a.returns.open > 0 || !!coupangNote} href={a.returns.open > 0 ? OPEN_CLAIMS_HREF : undefined} />
+        <CountCard label="취소" value={`${a.cancels.total.toLocaleString()}건`} sub={a.cancels.open > 0 ? `요청 중 ${a.cancels.open}` : (coupangNote ?? '출고 전 고객 취소')} alert={a.cancels.open > 0 || !!coupangNote} />
+        {coupangOnly(a.inquiries, '미답변', '고객문의 (쿠팡)')}
+      </div>
+      <p className="text-[10px] text-gray-400">
+        주문은 주문일 기준 · 쿠팡 출고중지·반품·취소는 접수일, 문의는 문의일 기준(네이버·토스 반품·취소는 주문 상태로 셈) · 출고중지 = 발주확인 뒤 고객 취소 · 문의 답변은 Wing에서
+      </p>
+    </div>
+  )
+}
+
+function CountCard({ label, value, sub, alert = false, muted = false, href }: { label: string; value: string; sub?: string; alert?: boolean; muted?: boolean; href?: string }) {
+  const body = (
+    <div className={`h-full rounded border p-3 ${alert ? 'border-rose-300 bg-rose-50' : 'border-gray-200 bg-white'} ${href ? 'hover:border-rose-400' : ''}`}>
+      <div className="text-xs text-gray-500">{label}</div>
+      <div className={`text-lg font-bold mt-1 tabular-nums ${muted ? 'text-gray-300' : alert ? 'text-rose-700' : 'text-gray-900'}`}>{value}</div>
+      {sub && <div className={`text-[10px] mt-0.5 tabular-nums ${alert ? 'text-rose-600 font-semibold' : 'text-gray-400'}`}>{sub}{href ? ' →' : ''}</div>}
+    </div>
+  )
+  return href ? <Link href={href} className="block">{body}</Link> : body
 }
 
 function BreakdownRow({ market, agg, href }: { market: Market; agg: Agg; href: string }) {
