@@ -83,3 +83,10 @@ alter table public.jimscanner_domeatoz_products add column if not exists detail_
 alter table public.jimscanner_domeatoz_products add column if not exists images jsonb;              -- 대표·추가 이미지 URL[] (이미지1~10)
 alter table public.jimscanner_domeatoz_products add column if not exists return_price integer;       -- 반품배송비
 alter table public.jimscanner_domeatoz_products add column if not exists export_seen_at timestamptz; -- 상품DB 다운로드에 마지막으로 잡힌 시각
+
+-- 2026-11-20 사람 입력 규격(관리자 /admin/domeatoz-spec) — 이름·상세 이미지로 못 읽은 1개당 중량·개수·필수 구매옵션 값.
+--   { unit: 'g'|'ml'|null, per: number|null, pieces: integer|null, attrs: { "<쿠팡 구매옵션 이름>": "<값>" }, note: text }
+--   등록기(domeatoz-register.mjs)가 상품명·이미지 규격보다 먼저 쓴다(lib/domeatoz-spec.mjs manualSpecOf).
+alter table public.jimscanner_domeatoz_products add column if not exists manual_spec jsonb;
+alter table public.jimscanner_domeatoz_products add column if not exists manual_spec_by text;
+alter table public.jimscanner_domeatoz_products add column if not exists manual_spec_at timestamptz;

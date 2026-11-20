@@ -183,6 +183,12 @@ const NAV_GROUPS: NavGroup[] = [
         match: (p) => p.startsWith('/admin/wellroot-msp'),
       },
       {
+        href: '/admin/domeatoz-spec',
+        label: '도매아토즈 규격 입력',
+        icon: '⚖️',
+        match: (p) => p.startsWith('/admin/domeatoz-spec'),
+      },
+      {
         href: '/admin/trend-radar/tv-ggsan-match',
         label: 'TV ↔ ggsan 매칭',
         icon: '📺',

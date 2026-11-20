@@ -26,7 +26,7 @@ import { fileURLToPath } from 'node:url'
 import path from 'node:path'
 import { createClient } from '@supabase/supabase-js'
 import { decide, decideNoMarket, COUPANG_FEE } from './lib/domeatoz-price.mjs'
-import { purchaseSpecOf, specOf, ambiguousPack } from './lib/domeatoz-spec.mjs'
+import { purchaseSpecOf, specOf, ambiguousPack, manualSpecOf } from './lib/domeatoz-spec.mjs'
 const SAMIL_CODE = '00002137' // 삼일유통 — 수집기(상품DB 다운로드) 표기는 괄호가 내역("63g(3개입)")
 import { buildPurchaseOptions } from './lib/coupang-purchase-options.mjs'
 import { fillSearchTags } from './lib/search-tags.mjs'
@@ -368,10 +368,13 @@ async function buildPayload(row, meta, cat, d) {
   const img = imageSpecOf(row.idx)
   // 세트 이름("딸기 192g + 사과 192g 각2개") 등 이름으로 규격을 못 만들면 상세 이미지 표시사항의 낱개 규격(2026-11-01)
   // 삼일유통 밖 공급사의 "340ml (24개입)"은 개당 340ml 인지 전체 340ml 인지 이름만으론 모른다(specOf 는 1개로 읽음) — 이미지 규격 없으면 보류
-  if (!img && row.supplier_code && row.supplier_code !== SAMIL_CODE && ambiguousPack(title)) throw new Error('구매옵션 — 용량 뒤 (N개입)이 개당인지 전체인지 모름')
-  let spec = purchaseSpecOf(title) ?? img
+  // 사람 입력 규격(관리자 /admin/domeatoz-spec, 2026-11-20)이 있으면 이름·이미지보다 먼저 — 1개당 중량·개수·필수 구매옵션 값(가공식품맛 등)
+  const manual = manualSpecOf(row.manual_spec)
+  const extra = row.manual_spec?.attrs ?? null
+  if (!manual && !img && row.supplier_code && row.supplier_code !== SAMIL_CODE && ambiguousPack(title)) throw new Error('구매옵션 — 용량 뒤 (N개입)이 개당인지 전체인지 모름')
+  let spec = manual ?? purchaseSpecOf(title) ?? img
   if (!spec) throw new Error('구매옵션 — 상품명에 용량(g·ml)·개수 없음')
-  let opt = buildPurchaseOptions(meta.attributes ?? [], spec, 1)
+  let opt = buildPurchaseOptions(meta.attributes ?? [], spec, 1, { extra })
   // 개수만 있는 이름("카페믹스 50T")인데 중량·용량 필수 카테고리 → 상세 이미지 표시사항의 낱개 중량(같은 개수일 때),
   // 없으면 쿠팡 같은 상품 표기의 낱개 중량을 따른다(사장님 2026-10-28)
   if (opt.error && spec.mode === 'count') {
@@ -381,7 +384,7 @@ async function buildPayload(row, meta, cat, d) {
       if (!u) throw new Error(`구매옵션 — ${opt.error} · 상세 이미지·같은 브랜드 쿠팡 표기 중량 없음`)
       spec = { mode: 'piece', weightG: u.u === 'g' ? u.v : null, volumeMl: u.u === 'ml' ? u.v : null, pieces: spec.pieces, perPack: spec.pieces, packs: 1 }
     }
-    opt = buildPurchaseOptions(meta.attributes ?? [], spec, 1)
+    opt = buildPurchaseOptions(meta.attributes ?? [], spec, 1, { extra })
   }
   if (opt.error) throw new Error(`구매옵션 — ${opt.error}`)
   const notices = buildNotices(nc, title, row, spec)

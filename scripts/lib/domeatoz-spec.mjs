@@ -70,3 +70,18 @@ export function purchaseSpecOf(name) {
     ? { mode: 'piece', weightG, volumeMl, pieces: s.count, perPack: s.count, packs: 1 }
     : { mode: 'single', weightG, volumeMl, packs: 1 }
 }
+
+/**
+ * 사람 입력 규격(관리자 /admin/domeatoz-spec → jimscanner_domeatoz_products.manual_spec, 2026-11-20) → purchaseSpecOf 와 같은 형식.
+ *   { unit: 'g'|'ml', per: 1개당 중량·용량, pieces: 총 개수, attrs: { 구매옵션 이름: 값 } }
+ *   per 있음 → 개당 중량·용량 × 개수 · per 없이 개수만 → count(카페믹스 50T 꼴) · 둘 다 없음 → null(이름·이미지 규격을 씀)
+ */
+export function manualSpecOf(m) {
+  if (!m || typeof m !== 'object') return null
+  const per = Number(m.per), pieces = Math.round(Number(m.pieces) || 1)
+  if (per > 0 && (m.unit === 'g' || m.unit === 'ml') && pieces >= 1) {
+    const weightG = m.unit === 'g' ? per : null, volumeMl = m.unit === 'ml' ? per : null
+    return pieces > 1 ? { mode: 'piece', weightG, volumeMl, pieces, perPack: pieces, packs: 1 } : { mode: 'single', weightG, volumeMl, packs: 1 }
+  }
+  return pieces > 1 ? { mode: 'count', weightG: null, volumeMl: null, pieces } : null
+}

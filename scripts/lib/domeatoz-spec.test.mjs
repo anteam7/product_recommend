@@ -53,3 +53,27 @@ test('purchaseSpecOf · titleMatches — 수량이 다르면 다른 상품', () 
   assert.equal(titleMatches(can, specOf(can), '해태 갈아만든배 포도봉봉 340ml 2종  세트'), false)
   assert.equal(titleMatches(can, specOf(can), '해태 갈아만든배 340ml, 24개'), true)
 })
+
+test('manualSpecOf — 사람 입력 규격(관리자 화면)', async () => {
+  const { manualSpecOf } = await import('./domeatoz-spec.mjs')
+  assert.deepEqual(manualSpecOf({ unit: 'g', per: 1.2, pieces: 400 }), { mode: 'piece', weightG: 1.2, volumeMl: null, pieces: 400, perPack: 400, packs: 1 })
+  assert.deepEqual(manualSpecOf({ unit: 'ml', per: 500, pieces: 1 }), { mode: 'single', weightG: null, volumeMl: 500, packs: 1 })
+  assert.deepEqual(manualSpecOf({ pieces: 50 }), { mode: 'count', weightG: null, volumeMl: null, pieces: 50 })
+  assert.equal(manualSpecOf({ attrs: { 가공식품맛: '오리지널' } }), null) // 옵션 값만 → 규격은 이름에서
+  assert.equal(manualSpecOf(null), null)
+  assert.equal(manualSpecOf({ unit: 'kg', per: 1, pieces: 2 }).mode, 'count') // 단위 이상 → 개수만
+})
+
+test('buildPurchaseOptions extra — 사람이 넣은 필수 구매옵션 값', async () => {
+  const { buildPurchaseOptions } = await import('./coupang-purchase-options.mjs')
+  const attrs = [
+    { attributeTypeName: '개당 중량', required: 'MANDATORY', groupNumber: '1', usableUnits: ['g', 'kg'] },
+    { attributeTypeName: '수량', required: 'MANDATORY', groupNumber: 'NONE', usableUnits: ['개'] },
+    { attributeTypeName: '가공식품맛', required: 'MANDATORY', groupNumber: 'NONE' },
+  ]
+  const spec = { mode: 'piece', weightG: 45, volumeMl: null, pieces: 15, perPack: 15, packs: 1 }
+  assert.match(buildPurchaseOptions(attrs, spec, 1).error, /가공식품맛/)
+  const ok = buildPurchaseOptions(attrs, spec, 1, { extra: { 가공식품맛: '오리지널' } })
+  assert.equal(ok.error, undefined)
+  assert.deepEqual(ok.attributes.find((a) => a.attributeTypeName === '가공식품맛'), { attributeTypeName: '가공식품맛', attributeValueName: '오리지널', exposed: 'EXPOSED' })
+})

@@ -71,8 +71,10 @@ const TAB_NAMES = ['개당 캡슐/정']
  * qty = 묶음 수(1·2·3개 변형). 수량 = (한 묶음의 통·박스 수 또는 낱개 수) × qty.
  * sendEmpty=true 면 값 없는 선택 속성도 exposed NONE·빈 값으로 보낸다(신규 등록 POST 공식). PUT 은 false(빈 값 미전송).
  * alsoTotalQty=true 면 '총 수량'도 수량과 같은 값으로 노출한다 — 옛 등록분 PUT 에서 요구된다(coupang_put_attribute_formula).
+ * extra = { 구매옵션 이름: 값 } — 규격으로 못 채우는 필수 구매옵션(가공식품맛 등)을 사람이 입력한 값(도매아토즈 manual_spec.attrs, 2026-11-20).
  */
-export function buildPurchaseOptions(categoryAttrs, spec, qty = 1, { sendEmpty = true, alsoTotalQty = false } = {}) {
+export function buildPurchaseOptions(categoryAttrs, spec, qty = 1, { sendEmpty = true, alsoTotalQty = false, extra = null } = {}) {
+  const extraOf = (name) => { const v = extra && typeof extra === 'object' ? String(extra[name] ?? '').trim() : ''; return v || null }
   const attrs = (categoryAttrs ?? []).filter(a => typeof a?.attributeTypeName === 'string')
   if (!spec) return { error: '규격(중량·용량·정 수)을 읽지 못함' }
   const pick = names => {
@@ -104,6 +106,7 @@ export function buildPurchaseOptions(categoryAttrs, spec, qty = 1, { sendEmpty =
       if (a === perPackAttr) { out.push({ attributeTypeName: name, attributeValueName: perPackValue, exposed: 'EXPOSED' }); continue }
       if (name === qtyName || (name === '총 수량' && alsoTotalQty)) { out.push({ attributeTypeName: name, attributeValueName: qtyValue, exposed: 'EXPOSED' }); continue }
       if (name === '수량' || name === '총 수량') continue
+      if (extraOf(name)) { out.push({ attributeTypeName: name, attributeValueName: extraOf(name), exposed: 'EXPOSED' }); continue }
       if (a.required === 'MANDATORY') return { error: `처리 못 하는 필수 구매옵션: ${name}` }
       if (sendEmpty) out.push({ attributeTypeName: name, attributeValueName: '', exposed: 'NONE' })
     }
@@ -164,6 +167,7 @@ export function buildPurchaseOptions(categoryAttrs, spec, qty = 1, { sendEmpty =
     if (name === qtyName) { out.push({ attributeTypeName: name, attributeValueName: qtyValue, exposed: 'EXPOSED' }); continue }
     if (name === '총 수량' && alsoTotalQty) { out.push({ attributeTypeName: name, attributeValueName: qtyValue, exposed: 'EXPOSED' }); continue }
     if (name === '수량' || name === '총 수량') continue
+    if (extraOf(name)) { out.push({ attributeTypeName: name, attributeValueName: extraOf(name), exposed: 'EXPOSED' }); continue }
     if (a.required === 'MANDATORY') return { error: `처리 못 하는 필수 구매옵션: ${name}` }
     if (sendEmpty) out.push({ attributeTypeName: name, attributeValueName: '', exposed: 'NONE' })
   }
