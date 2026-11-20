@@ -3,22 +3,27 @@
  *
  *   매입원가 cost = 도매가 W + 배송비 S(주문 1건당). 묶음배송 가능 수량 1개라 n개 = n×(W+S) → 1개 단위만 등록.
  *   순이익·목표·하한 공식은 campingmoon-price 공용 함수(net = P − cost − fee×P − (P − cost)/11, src/lib/margin.ts 와 동일).
- *   기준 시세 ref = 쿠팡 규격 일치가의 하위 25%(일치 3건 이상), 2건 이하면 최저가. 식품 최저가는 로켓·특가라 그 아래로는 못 판다.
- *   price = clamp(target, floor, ref × (1 − UNDERCUT)) ; ref 없음 = NO_MATCH(보류) ; ref×0.99 < floor = STRUCTURAL(보류)
+ *   2026-11-20 사장님 "10%는 최소마진 — 더 높일 수 있으면 높여도 돼, 시세를 모를 때는 15%":
+ *   floor = max(순마진 10%, 순이익 2,000원) — 최소. 시세(같은 규격 쿠팡 최저가 low)가 있으면 price = low − 1,000원(11/04 인상 규칙과 같음),
+ *   그러면 하한 밑이면 기준 시세 ref(일치 3건↑ P25, 아니면 최저가) −1%, 그래도 하한 밑 = STRUCTURAL. 시세 없음 = NO_MATCH → decideNoMarket 이 15%.
+ *   (전엔 price = clamp(목표 10%, 하한 7%, ref −1%) — 10%가 상한이라 시세가 높아도 10%로 팔았다)
  *   ⚠ 수수료는 쿠팡 식품 기본 10.6%(src/lib/coupang/fee.ts 기본값) — 별도 항목 없음.
  */
 import { netProfit, priceAtMargin, priceAtAbs, ceil10 } from './campingmoon-price.mjs'
 
 export const COUPANG_FEE = 0.106
-export const TARGET_MARGIN = 0.10
-export const MIN_MARGIN = 0.07
+export const MIN_MARGIN = 0.10 // 최소 순마진(사장님 2026-11-20, 전엔 7%)
+export const NO_MARKET_MARGIN = 0.15 // 시세를 모를 때(사장님 2026-11-20, 전엔 10%)
+export const TARGET_MARGIN = NO_MARKET_MARGIN // 옛 이름(domeatoz-market.mjs 표시용)
 export const MIN_ABS = 2000
-export const UNDERCUT = 0.01
+export const UNDERCUT_KRW = 1000 // 같은 상품 최저가보다 1,000원 싸게
+export const UNDERCUT = 0.01 // 1,000원을 못 깎으면 1%
 export const MIN_P25_MATCHES = 3
 
 export const costOf = (wholesale, ship) => (wholesale > 0 ? wholesale + (ship || 0) : null)
 export const floorPrice = (cost, fee = COUPANG_FEE) => Math.max(priceAtMargin(cost, MIN_MARGIN, fee), priceAtAbs(cost, MIN_ABS, fee))
-export const targetPrice = (cost, fee = COUPANG_FEE) => priceAtMargin(cost, TARGET_MARGIN, fee)
+/** 시세를 모를 때 가격(순마진 15%) */
+export const targetPrice = (cost, fee = COUPANG_FEE) => priceAtMargin(cost, NO_MARKET_MARGIN, fee)
 
 /** 정렬된 가격들의 하위 q 분위(최근접 순위) */
 export function quantile(prices, q) {
@@ -38,23 +43,28 @@ export function decide(wholesale, ship, prices, { fee = COUPANG_FEE } = {}) {
   const cost = costOf(wholesale, ship)
   if (!cost) return { cost: null, floor: null, target: null, ref: null, ceiling: null, price: null, net: null, margin: null, verdict: 'NO_COST' }
   const floor = floorPrice(cost, fee), target = Math.max(floor, targetPrice(cost, fee))
-  const ref = refPrice(prices || [])
-  const ceiling = ref ? ceil10(ref * (1 - UNDERCUT)) : null
+  const ps = (prices || []).filter((n) => n > 0)
+  const ref = refPrice(ps), low = ps.length ? Math.min(...ps) : null
+  let ceiling = low ? Math.floor((low - UNDERCUT_KRW) / 10) * 10 : null
+  // 1,000원을 못 깎으면 최저가 −1%, 그것도 하한 밑이면 기준 시세(P25) −1% — 로켓·특가 최저가 아래로는 못 팔아도 대부분보다는 싸게(옛 규칙)
+  if (ceiling != null && ceiling < floor) ceiling = ceil10(low * (1 - UNDERCUT))
+  if (ceiling != null && ceiling < floor) ceiling = ceil10(ref * (1 - UNDERCUT))
   let price = null, verdict
   if (ceiling == null) verdict = 'NO_MATCH'
   else if (ceiling < floor) verdict = 'STRUCTURAL'
-  else { price = Math.max(floor, Math.min(target, ceiling)); verdict = 'OK' }
+  else { price = ceiling; verdict = 'OK' }
   const net = price ? Math.round(netProfit(price, cost, fee)) : null
   return { cost, floor, target, ref, ceiling, price, net, margin: price ? +(net / price).toFixed(3) : null, verdict }
 }
 
 /**
  * 시세 판정 없이 등록할 가격 — 사장님 2026-10-30 "시세조회하지말고 등록해, 시세조회 때문에 등록이 안 되는 게 더 안 좋다".
- * 시세가 OK 면 decide 그대로(목표 이하로 이미 깎인 값), 그 밖(미조회·NO_MATCH·STRUCTURAL)은 목표가(순마진 10%, 하한 이상) · verdict 'TARGET'.
+ * 시세가 OK 면 decide 그대로(최저가 −1,000원), 시세 없음(미조회·NO_MATCH)은 순마진 15%, STRUCTURAL(시세가 하한보다 낮음)은 하한(10%) · verdict 'TARGET'.
  */
 export function decideNoMarket(wholesale, ship, prices, { fee = COUPANG_FEE } = {}) {
   const d = decide(wholesale, ship, prices, { fee })
   if (d.verdict === 'OK' || d.verdict === 'NO_COST') return d
-  const net = Math.round(netProfit(d.target, d.cost, fee))
-  return { ...d, price: d.target, net, margin: +(net / d.target).toFixed(3), verdict: 'TARGET' }
+  const price = d.verdict === 'STRUCTURAL' ? d.floor : d.target
+  const net = Math.round(netProfit(price, d.cost, fee))
+  return { ...d, price, net, margin: +(net / price).toFixed(3), verdict: 'TARGET', basis: d.verdict === 'STRUCTURAL' ? 'floor' : 'no-market' }
 }

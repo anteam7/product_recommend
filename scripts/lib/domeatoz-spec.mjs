@@ -7,14 +7,24 @@
 // 단위 뒤 영문자는 단위가 아님(…"gold" 등) — 단, 곱하기 x 는 붙여 쓴다("355mlx48캔"·"30gx30스틱", 2026-11-01 이걸로 7건 등록 실패)
 const VOL = /(\d+(?:\.\d+)?)\s*(ml|mL|ML|g|G|kg|KG|Kg|l|L)(?![a-wyzA-WYZ])/
 const VOL_G = new RegExp(VOL.source, 'g')
-const CNT_G = /[x×*]\s*(\d+)|(\d+)\s*(?:개입|개|입|캔|병|매|팩|PET|pet|번들|롤|포|봉지|봉|박스|BOX|box|EA|ea|스틱|컵|통|T|P|p)(?![a-zA-Z가-힣])/g
+const CNT_G = /[x×*]\s*(\d+)|(\d+)\s*(?:개입|개|입|캔|병|매|팩|페트|PET|pet|번들|롤|포|봉지|봉|박스|BOX|box|EA|ea|스틱|컵|통|T|P|p)(?![a-zA-Z가-힣])/g
 function normVol(n, u) {
   let v = parseFloat(n); u = u.toLowerCase()
   if (u === 'l') { v *= 1000; u = 'ml' } else if (u === 'kg') { v *= 1000; u = 'g' }
   return { v, u }
 }
+// 삼일유통 밖 공급사 표기(2026-11-20, 00000684): 괄호가 내역이 아니라 실제 수량인 두 꼴을 괄호 밖으로 꺼낸다
+//   "48g 1BOX (50개입)" → "48g 50개입"   ·   "340ml (24캔)"·"1000ml (6페트)" → "340ml 24캔"
+//   용기 단위(캔·페트·병·팩)만 — "보노 스프 63g(3개입)"은 63g 안의 내역이라 그대로 둔다(삼일유통 표기)
+// 대문자 X 곱하기는 규격 바로 뒤에서만 소문자 x 로 바꾼다("15스틱 X2"·"424g X 5개"·"(… 1kg)X15")
+//   모델명("BMW X5")·치수("170X70mm")·단위 없는 숫자("12 X 3")·뒤에 영문 단위("100mm X 10m")는 그대로
+const UPPER_X = /(\d\s*[가-힣A-Za-z]{1,3}\)?|\))\s*X(?=\s*\d+(?![\d.]*\s*[a-zA-Z]))/g
+const BOX_OF = /1\s*(?:BOX|Box|box|박스)\s*\(\s*(\d+)\s*개입\s*\)/g
+const VOL_PAREN_CNT = new RegExp(`(${VOL.source})\\s*\\(\\s*(\\d+)\\s*(캔|페트|PET|병|팩)\\s*\\)`, 'g')
+// 용량 바로 뒤 "(N개입)"은 개당 용량인지 전체 용량인지 이름만으로 모른다 — 삼일유통 밖 공급사 등록 때 보류 판단용
+export const ambiguousPack = (name) => new RegExp(`${VOL.source}\\s*\\(\\s*\\d+\\s*(?:개입|입|개)\\s*\\)`).test(String(name))
 export function specOf(name) {
-  const s = String(name || '')
+  const s = String(name || '').replace(UPPER_X, '$1 x').replace(BOX_OF, ' $1개입 ').replace(VOL_PAREN_CNT, '$1 $4$5 ')
   if (/\+|각\s*\d/.test(s)) return { set: true }
   const m = s.match(VOL)
   const vol = m ? normVol(m[1], m[2]) : null

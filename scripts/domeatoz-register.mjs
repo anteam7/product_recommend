@@ -6,11 +6,11 @@
  *  - 대상: jimscanner_domeatoz_products active · 자동제외 없음 · register_excluded=false · 시세 조회됨 · 판정 OK
  *    (판정은 저장된 시세 요약으로 재현: 기준 = market_p25 ?? market_low → lib/domeatoz-price.mjs decide). STRUCTURAL·NO_MATCH 는 등록 안 함.
  *    시세 조회(domeatoz-market.mjs)가 뒤에서 돌며 OK 가 늘어나므로 register-drip.sh 로 회차마다 새 OK 를 이어 붙인다(사장님 2026-10-26 "확인된 것 먼저, 확인될 때마다 추가").
- *  - --no-market: 시세 미조회·NO_MATCH·STRUCTURAL 도 목표가(순마진 10%)로 등록(decideNoMarket, OK 는 시세가 그대로·먼저).
+ *  - --no-market: 시세 미조회·NO_MATCH 는 순마진 15%, STRUCTURAL 은 하한(10%)으로 등록(decideNoMarket, OK 는 시세가 그대로·먼저).
  *    사장님 2026-10-30 "시세조회하지말고 등록해" — 3분 1검색 시세 대조가 느려 등록이 멈추는 게 더 나쁘다.
  *  - 묶음 수 변형(… x 2개 / x 6개)은 도매아토즈에서 각각 다른 상품이라 쿠팡도 따로 올린다 — 하나로 묶으면 나중에 확인된 변형을 붙일 때
  *    판매중 상품 수정(임시저장 강등)이 필요하고, 주문↔매입 연결(listings.source_goods_no = idx)도 깨진다.
- *  - 가격: decide().price = clamp(목표 10%, 하한 7%·2,000원, 기준 시세 −1%). 원가 = 도매가 + 배송비(주문 1건당 3,000).
+ *  - 가격(사장님 2026-11-20): decide().price = 같은 규격 쿠팡 최저가 −1,000원(못 깎으면 −1%), 하한 = 순마진 10%·2,000원 — 상한 없음. 원가 = 도매가 + 배송비(주문 1건당 3,000).
  *  - 카테고리: categorization/predict(DB 캐시) → 고시는 '가공식품' 우선(식품 아닌 카테고리면 보류). brand 는 기본 생략([[coupang_register_gotchas]] — 상품명 앞 브랜드로 충분), 브랜드 필수 카테고리 거절 때만 브랜드 사전 검색으로 채워 재시도.
  *  - 구매옵션: lib/domeatoz-spec.mjs purchaseSpecOf(상품명) → lib/coupang-purchase-options.mjs ("142g 5개" → 개당 중량 142g · 수량 5개). 용량 없는 이름은 보류.
  *  - 이미지: 대표 = thumb_url(500px 미만이면 패딩 후 site-assets), 상세 = detail_images(esmplus, 공통 배너는 수집기가 제외) — 원본 detail_html 은 쓰지 않는다.
@@ -26,7 +26,8 @@ import { fileURLToPath } from 'node:url'
 import path from 'node:path'
 import { createClient } from '@supabase/supabase-js'
 import { decide, decideNoMarket, COUPANG_FEE } from './lib/domeatoz-price.mjs'
-import { purchaseSpecOf, specOf } from './lib/domeatoz-spec.mjs'
+import { purchaseSpecOf, specOf, ambiguousPack } from './lib/domeatoz-spec.mjs'
+const SAMIL_CODE = '00002137' // 삼일유통 — 수집기(상품DB 다운로드) 표기는 괄호가 내역("63g(3개입)")
 import { buildPurchaseOptions } from './lib/coupang-purchase-options.mjs'
 import { fillSearchTags } from './lib/search-tags.mjs'
 
@@ -244,6 +245,10 @@ async function ensureImageSpec(url, key) {
 // 브랜드 필수 카테고리(프로틴바 102553 등)는 brand 생략 시 "브랜드 정보가 필요합니다. 올바른 Brand ID와 Brand Name을 입력해 주세요"(2026-10-26 실측).
 // 그 오류일 때만 상품명 첫 토큰을 브랜드 사전(POST /brands/search)에서 공백·대소문자 무시 완전일치로 찾아 brandId+이름, 없으면 이름만(coupang-reapprove-rejected.mjs resolveBrand 와 같은 규칙)
 const BRAND_REQUIRED = /브랜드 정보가 필요|Brand ID와 Brand Name/
+// 2026-11-14~ 쿠팡이 상품명에서 브랜드를 감지하면 brand 생략을 거절하고 넣을 brandId 를 알려준다:
+// "브랜드 '해태제과'이(가) 감지되었습니다. 해당 브랜드의 상품이 맞다면 brandId 필드에 'KR-115309'을(를) 입력해 주세요. 아니라면 displayProductName … 변경해서 올려주세요."
+// 삼일유통 등은 진짜 브랜드 상품을 파므로 제시된 brandId·브랜드명 그대로 1회 재시도(카프리썬·펩시·해태·프링글스 11/14~20 실패 37건)
+const BRAND_DETECTED = /브랜드\s*'([^']+)'\s*이\(가\)\s*감지되었습니다[\s\S]*?brandId\s*필드에\s*'([A-Za-z]{2}-\d+)'/
 const normBrand = (s) => (s || '').replace(/\s+/g, '').toLowerCase()
 const firstToken = (name) => (name || '').trim().split(/\s+/)[0] || ''
 /**
@@ -362,6 +367,8 @@ async function buildPayload(row, meta, cat, d) {
   if (!nc) throw new Error(`식품 고시 없는 카테고리(${(meta.noticeCategories ?? []).map((n) => n.noticeCategoryName).join(',') || '고시없음'})`)
   const img = imageSpecOf(row.idx)
   // 세트 이름("딸기 192g + 사과 192g 각2개") 등 이름으로 규격을 못 만들면 상세 이미지 표시사항의 낱개 규격(2026-11-01)
+  // 삼일유통 밖 공급사의 "340ml (24개입)"은 개당 340ml 인지 전체 340ml 인지 이름만으론 모른다(specOf 는 1개로 읽음) — 이미지 규격 없으면 보류
+  if (!img && row.supplier_code && row.supplier_code !== SAMIL_CODE && ambiguousPack(title)) throw new Error('구매옵션 — 용량 뒤 (N개입)이 개당인지 전체인지 모름')
   let spec = purchaseSpecOf(title) ?? img
   if (!spec) throw new Error('구매옵션 — 상품명에 용량(g·ml)·개수 없음')
   let opt = buildPurchaseOptions(meta.attributes ?? [], spec, 1)
@@ -408,7 +415,9 @@ if (ONLY.length) rows = rows.filter((r) => ONLY.includes(String(r.idx)))
 let existing
 try { existing = await fetchAll(() => sb.from('jimscanner_coupang_listings').select('source_goods_no, status, last_synced_at').eq('source', SOURCE).order('id')) } catch (e) { console.error('기등록 조회 실패:', e.message); process.exit(1) }
 // FAILED 는 24시간 뒤에만 재시도 — 드립 루프가 같은 실패 건으로 자리를 채우지 않게(campingmoon 과 같은 규칙)
-const existingSet = new Set(existing.filter((r) => r.status !== 'FAILED' || (r.last_synced_at && Date.now() - Date.parse(r.last_synced_at) < 24 * 3600e3)).map((r) => String(r.source_goods_no)))
+// --retry-failed: 실패 원인을 고친 직후 24시간 안 된 FAILED 도 바로 다시 시도(--only 와 함께 쓰는 용도)
+const RETRY_FAILED = args.includes('--retry-failed')
+const existingSet = new Set(existing.filter((r) => r.status !== 'FAILED' || (!RETRY_FAILED && r.last_synced_at && Date.now() - Date.parse(r.last_synced_at) < 24 * 3600e3)).map((r) => String(r.source_goods_no)))
 const skipped = []
 const candidates = rows
   .map((r) => { const ref = r.market_p25 ?? r.market_low; return { ...r, _d: (NO_MARKET ? decideNoMarket : decide)(r.wholesale_price, r.delivery_price, ref ? [ref] : []) } })
@@ -458,7 +467,13 @@ for (let i = 0; i < candidates.length; i++) {
     }
     const searchTags = await fillSearchTags(built.payload, { category: cat.name, source: SOURCE }) // 검색어 20개(키워드도구 + Claude) — 실패해도 [] 로 진행
     let r = await api('POST', '/v2/providers/seller_api/apis/api/v1/marketplace/seller-products', built.payload)
-    if (r.body?.code !== 'SUCCESS' && BRAND_REQUIRED.test(String(r.body?.message || ''))) {
+    const detected = r.body?.code !== 'SUCCESS' ? String(r.body?.message || '').match(BRAND_DETECTED) : null
+    if (detected) {
+      built.payload.brandId = detected[2]; built.payload.brand = detected[1]
+      console.log(`      ↻ 쿠팡 브랜드 감지 — ${detected[1]}(${detected[2]}) 로 재시도`)
+      await sleep(500)
+      r = await api('POST', '/v2/providers/seller_api/apis/api/v1/marketplace/seller-products', built.payload)
+    } else if (r.body?.code !== 'SUCCESS' && BRAND_REQUIRED.test(String(r.body?.message || ''))) {
       const hit = await resolveBrand(built.title)
       if (hit) { built.payload.brandId = hit.brandId; built.payload.brand = hit.brandName } else built.payload.brand = firstToken(built.title)
       console.log(`      ↻ 브랜드 필수 카테고리 — ${hit ? `사전 브랜드 ${hit.brandName}(${hit.brandId})` : `사전에 없음, 이름만 "${built.payload.brand}"`} 로 재시도`)
