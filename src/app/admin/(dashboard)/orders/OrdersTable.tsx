@@ -20,11 +20,11 @@ const UPDATE_ENDPOINT: Record<Market, string> = {
   toss: '/api/admin/toss-orders/update',
 }
 // 💳 결제진행(자동주문) 버튼을 그릴 매입처 — order-server.mjs 가 마켓별로 지원하는 범위(통합 전 각 페이지와 동일).
-// 쿠팡은 SUPPORTED_SOURCES 전부, 네이버·토스는 건강산/유픽B2B 만 검증됨.
+// 쿠팡·토스는 SUPPORTED_SOURCES 전부(토스는 order-server resolveTossOrder 가 매입처 무관하게 해석 — 화장품스토리 주문 버튼 누락 수정 2026-11-20), 네이버는 건강산/유픽B2B 만 검증됨.
 const AUTOMATED_SOURCES: Record<Market, readonly string[]> = {
   coupang: PURCHASE_AUTOMATED_SOURCES,
   naver: ['ggsan', 'upickb2b'],
-  toss: ['ggsan', 'upickb2b'],
+  toss: PURCHASE_AUTOMATED_SOURCES,
 }
 export function OrdersTable({ rows, emptyText }: { rows: UnifiedOrder[]; emptyText: string }) {
   return (
