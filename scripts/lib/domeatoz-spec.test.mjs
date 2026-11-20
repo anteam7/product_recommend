@@ -77,3 +77,22 @@ test('buildPurchaseOptions extra — 사람이 넣은 필수 구매옵션 값', 
   assert.equal(ok.error, undefined)
   assert.deepEqual(ok.attributes.find((a) => a.attributeTypeName === '가공식품맛'), { attributeTypeName: '가공식품맛', attributeValueName: '오리지널', exposed: 'EXPOSED' })
 })
+
+test('titleMatches — 브랜드가 다르면 다른 상품(2026-11-20 꽃샘↔담터 오매칭)', () => {
+  const ours = '꽃샘 생강차플러스 30T(15T x 2개)'
+  assert.equal(titleMatches(ours, specOf(ours), '담터 생강차플러스, 30g, 30개'), false)
+  assert.equal(titleMatches(ours, specOf(ours), '꽃샘 생강차플러스 30T 생강음료'), true)
+  // 회사명 ↔ 브랜드명(앞 2글자)·영문 브랜드
+  const cj = 'CJ제일제당 햇반 210g X 12개'
+  assert.equal(titleMatches(cj, specOf(cj), 'CJ 햇반 백미밥, 210g, 12개'), true)
+  assert.equal(titleMatches(cj, specOf(cj), '오뚜기 맛있는 오뚜기밥 햇반 210g, 12개'), false)
+  const gd = '광동제약 옥수수수염차 1.5L (12페트)'
+  assert.equal(titleMatches(gd, specOf(gd), '광동 옥수수수염차, 1.5L, 12개'), true)
+})
+
+test('titleMatches — 회사명이 빠진 쿠팡 제목은 단어 2개 이상이면 통과', () => {
+  const lt = '롯데 레쓰비 마일드 240ml x 60캔'
+  assert.equal(titleMatches(lt, specOf(lt), '레쓰비 마일드 커피, 240ml, 60개'), true)
+  const dy = '동일 생강차 50T'
+  assert.equal(titleMatches(dy, specOf(dy), '자연생각 대추 생강차, 18g, 50개입, 1개'), false)
+})

@@ -43,9 +43,22 @@ const brandless = (name) => {
   const toks = String(name).replace(/\([^)]*\)|\[[^\]]*\]/g, ' ').split(/[\s,/]+/).filter((w) => /[가-힣a-zA-Z]{2,}/.test(w) && !/\d/.test(w)).slice(0, 5)
   return toks.length >= 2 ? toks.slice(1) : toks
 }
+// 브랜드(이름 첫 단어)의 앞 2글자(영문은 영문 부분 전체) — 회사명·브랜드명이 달라도("해태음료"↔"해태", "광동제약"↔"광동") 통과
+const brandKey = (name) => {
+  const all = String(name).replace(/\([^)]*\)|\[[^\]]*\]/g, ' ').split(/[\s,/]+/).filter((w) => /[가-힣a-zA-Z]{2,}/.test(w) && !/\d/.test(w))
+  if (all.length < 2) return null // 단어 하나뿐이면 브랜드인지 상품명인지 모름
+  const w = all[0].replace(/[^가-힣a-zA-Z&]/g, '')
+  if (/^[a-zA-Z]/.test(w)) return w.replace(/[^a-zA-Z&].*$/, '').toLowerCase() || null
+  return w.length >= 2 ? w.slice(0, 2) : null
+}
 export function titleMatches(ourName, ourSpec, title) {
   const toks = brandless(ourName)
   const flat = String(title).replace(/\s/g, '')
+  // 이름이 "브랜드 + 일반 단어 하나"(꽃샘 생강차플러스·동일 생강차·오뚜기 유자차)면 브랜드가 쿠팡 제목에 있어야 같은 상품 —
+  // "꽃샘 생강차플러스 30T"가 "담터 생강차플러스 30g 30개"와 붙어 시세 5배로 등록됐던 문제(2026-11-20).
+  // 단어가 2개 이상("롯데 레쓰비 마일드")이면 그 단어들이 이미 상품을 가르고, 쿠팡 제목엔 회사명(롯데·동서·오리온)이 자주 빠져 요구하지 않는다.
+  const bk = toks.length === 1 ? brandKey(ourName) : null
+  if (bk && !flat.toLowerCase().includes(bk)) return false
   const hit = toks.filter((w) => flat.includes(w)).length
   if (!toks.length || hit < Math.ceil((toks.length * 2) / 3)) return false // 3개 중 2개, 2개면 둘 다
   const t = specOf(title)
