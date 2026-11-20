@@ -59,6 +59,13 @@ async function openSession() {
   return session
 }
 if (targets.some((p) => !specOf(p.name_clean).set) && !(await openSession())) { console.error('쿠팡 세션 불가 — 크롬 설치·차단 여부 확인(--backend=aside|cdp 로 바꿔 시도)'); process.exit(2) }
+// 우리 리스팅은 시세에서 뺀다 — 등록 직후 조회하면 우리 상품("담터 미숫가루 40스틱, 20g, 40개" 31,120원)이 최저가로 잡혀
+// "최저가 −1,000원"이 조회 때마다 우리 가격을 깎는다(2026-11-20). 같은 도매아토즈 상품명을 쓰는 다른 판매자가 있어
+// 이름 앞부분 + 판매가(±10원)가 둘 다 같을 때만 우리 것으로 본다.
+const ownPrice = new Map((await fetchAll(() => sb.from('jimscanner_coupang_listings').select('source_goods_no, list_price_krw').eq('source', 'domeatoz').not('status', 'in', '(FAILED,DELETED)').order('id')))
+  .filter((l) => l.list_price_krw > 0).map((l) => [String(l.source_goods_no), Number(l.list_price_krw)]))
+const squash = (s) => String(s).replace(/\s/g, '')
+const isOwn = (p, it) => { const own = ownPrice.get(String(p.idx)); return own != null && Math.abs(it.price - own) <= 10 && squash(it.title).startsWith(squash(p.name_clean).slice(0, 10)) }
 const cache = new Map() // 검색어 → 결과 items (묶음 변형 공유)
 let i = 0, failStreak = 0, failStart = -1, failTotal = 0, dbFail = 0, searches = 0, cooldowns = 0
 try {
@@ -77,7 +84,7 @@ try {
         if (!r || ((r.items || []).length === 0 && r.emptyReason !== 'confirmed-empty')) failed = true
         else { raw = r.items || []; cache.set(q, raw) }
       }
-      matched = raw.filter((it) => it.price > 0 && titleMatches(p.name_clean, spec, it.title))
+      matched = raw.filter((it) => it.price > 0 && !isOwn(p, it) && titleMatches(p.name_clean, spec, it.title))
     }
     if (failed) {
       if (failStreak++ === 0) failStart = ti // 이번 연속 실패의 첫 상품 — 휴식 뒤 여기부터 다시
