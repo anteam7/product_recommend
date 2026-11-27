@@ -63,6 +63,8 @@ const sb = createClient(env.NEXT_PUBLIC_SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_
 const DRY = process.argv.includes('--dry')
 // --only=<source>: 한 매입처만 추적(수동 점검용). 재시도·사각지대 스윕은 건너뛴다
 const ONLY = process.argv.find((a) => a.startsWith('--only='))?.slice('--only='.length) || null
+// --triggered-by=<who>: 실행 주체 기록(기본 local-cron). 어드민 [주문 상태 싱크] 버튼 → order-server 가 admin-button 으로 띄운다(2026-11-27)
+const TRIGGERED_BY = process.argv.find((a) => a.startsWith('--triggered-by='))?.slice('--triggered-by='.length) || 'local-cron'
 
 const MAX_TARGETS = 100
 const DEADLINE_MS = 5 * 60 * 1000 // 5분 가드
@@ -293,7 +295,7 @@ const deadlineAt = t0 + DEADLINE_MS
 let runId = null
 if (!DRY) {
   try {
-    const { data: rr } = await sb.from('jimscanner_coupang_ggsan_sync_runs').insert({ status: 'running', triggered_by: 'local-cron' }).select('id').single()
+    const { data: rr } = await sb.from('jimscanner_coupang_ggsan_sync_runs').insert({ status: 'running', triggered_by: TRIGGERED_BY }).select('id').single()
     runId = rr?.id
   } catch { /* 테이블 미생성 시 스킵 */ }
 }

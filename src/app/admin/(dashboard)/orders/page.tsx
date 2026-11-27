@@ -3,7 +3,7 @@ import { FEE_RATE, FEE_RATE_BY_SOURCE } from '@/lib/coupang/fee'
 import { TOSS_FEE_RATE } from '@/lib/toss/fee'
 import { loadLastSync, loadOpenClaims, loadOrders, loadPeriodCoupangActivity, loadTodo } from './data'
 import { OrdersTable } from './OrdersTable'
-import SyncOrdersButton from './coupang/SyncOrdersButton'
+import SyncOrdersButton, { SyncStatusButton } from './coupang/SyncOrdersButton'
 import {
   MARKETS, MARKET_META, OPEN_CLAIMS_HREF, ORDERS_PATH, PERIOD_OPTIONS, PURCHASE_STATUSES, PURCHASE_STATUS_LABELS, SORT_OPTIONS, DEFAULT_DAYS,
   buildHref, countByPurchase, filterOrders, fmtDate, fmtKst, isPurchaseStatus, paginate, parseParams, periodActivity, sortOrders, summarize,
@@ -64,7 +64,10 @@ export default async function OrdersPage({ searchParams }: { searchParams: Promi
             }).join(' · ')}
           </p>
         </div>
-        <SyncOrdersButton />
+        <div className="flex flex-wrap items-start gap-2">
+          <SyncOrdersButton />
+          <SyncStatusButton />
+        </div>
       </header>
 
       {/* 진행 중 쿠팡 반품·출고중지 — 맨 위 건별 목록(기간 무관). 출고중지요청은 결제진행도 막혀 있다 */}

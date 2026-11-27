@@ -6,7 +6,7 @@
  * 에 잡만 넣고, 집 PC 의 order-server 폴러(3초)가 실행한다. 헬퍼가 꺼져 있으면 잡은 큐에 남았다가 켜지면 처리된다.
  */
 // 네이버 발주확인·발송처리도 같은 큐(집 PC order-server)로 실행한다 — 네이버 API도 IP 허용목록제(2026-09-27)
-export type CoupangJobMode = 'coupang_ack' | 'coupang_invoice' | 'coupang_orders_sync' | 'naver_confirm' | 'naver_dispatch'
+export type CoupangJobMode = 'coupang_ack' | 'coupang_invoice' | 'coupang_orders_sync' | 'coupang_status_sync' | 'naver_confirm' | 'naver_dispatch'
 
 export interface JobResult {
   id: number
@@ -32,7 +32,7 @@ export async function enqueueCoupangJob(orderKey: string, mode: CoupangJobMode):
 }
 
 /** 잡이 done/error 가 될 때까지 폴링(기본 2초 × 최대 30초). 시간 초과면 마지막 상태 반환. */
-export async function waitForJob(id: number, { intervalMs = 2000, timeoutMs = 30000 } = {}): Promise<JobResult> {
+export async function waitForJob(id: number, { intervalMs = 2000, timeoutMs = 30000 }: { intervalMs?: number; timeoutMs?: number } = {}): Promise<JobResult> {
   const t0 = Date.now()
   let last: JobResult = { id, status: 'queued', result_msg: null }
   while (Date.now() - t0 < timeoutMs) {
@@ -52,13 +52,20 @@ export async function waitForJob(id: number, { intervalMs = 2000, timeoutMs = 30
   return last
 }
 
-/** 등록 + 대기 한 번에. 사용자 메시지(✓/⚠/⏳ 접두)로 정리해 반환. */
-export async function runCoupangJob(orderKey: string, mode: CoupangJobMode, labels: { doing: string; done: string }, onProgress?: (msg: string) => void): Promise<string> {
+/**
+ * 등록 + 대기 한 번에. 사용자 메시지(✓/⚠/⏳ 접두)로 정리해 반환.
+ * opts.timeoutMs: 오래 걸리는 잡(주문 상태 싱크 1~5분)은 기본 30초보다 길게 기다린다 · opts.hint: 진행 문구 뒤에 붙일 안내
+ */
+export async function runCoupangJob(
+  orderKey: string, mode: CoupangJobMode, labels: { doing: string; done: string }, onProgress?: (msg: string) => void,
+  opts: { timeoutMs?: number; intervalMs?: number; hint?: string } = {},
+): Promise<string> {
   const q = await enqueueCoupangJob(orderKey, mode)
   if ('error' in q) return `⚠ ${labels.doing} 요청 실패: ${q.error}`
-  onProgress?.(`집 PC에서 ${labels.doing} 중… (잡 #${q.id})`)
-  const r = await waitForJob(q.id)
+  onProgress?.(`집 PC에서 ${labels.doing} 중… (잡 #${q.id})${opts.hint ? ` — ${opts.hint}` : ''}`)
+  const r = await waitForJob(q.id, { timeoutMs: opts.timeoutMs, intervalMs: opts.intervalMs })
   if (r.status === 'done') return `✓ ${labels.done}${r.result_msg && r.result_msg !== 'OK' ? ` — ${r.result_msg}` : ''}`
   if (r.status === 'error') return `⚠ ${labels.doing} 실패: ${r.result_msg ?? '원인 미상'}`
+  if (r.status === 'running') return `⏳ ${labels.doing} 아직 실행 중(잡 #${q.id}) — 끝나면 반영됩니다. 잠시 후 새로고침해 확인하세요`
   return `⏳ ${labels.doing} 대기 중(잡 #${q.id}) — 집 PC 헬퍼가 켜지면 자동 처리됩니다. 잠시 후 새로고침해 확인하세요`
 }

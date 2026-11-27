@@ -9,6 +9,7 @@
  *       → [결제진행 시작] → /run?id= → Playwright(chrome) 띄워 로그인→상품→바로구매→수령인 입력→정지
  */
 import http from 'node:http'
+import { spawn } from 'node:child_process'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
@@ -1364,14 +1365,90 @@ setInterval(async () => {
 // ── 마켓 쓰기 잡 폴러(coupang_ack / coupang_invoice / coupang_orders_sync / naver_confirm / naver_dispatch) ──
 // Vercel 어드민이 등록, 이 PC(쿠팡·네이버 API 허용 IP)가 실행. 네이버도 IP 허용목록제라 Vercel 직접 호출이 막힌다(2026-09-27 이관).
 // 결제진행 폴러(Playwright, 수 분)와 분리해 대기 없이 처리. 직렬(coupangJobBusy). 멱등이라 재실행 안전.
+
+// ── 주문 상태 싱크(잡 coupang_status_sync, 관리자 [주문 상태 싱크] 버튼 — 2026-11-27) ──
+// 매시 :30 크론 local-cron-ggsan-sync.mjs(매입처 입금확인·송장 감지 → 매입상태 갱신 → 쿠팡 발주확인·송장 등록)를 지금 한 번 돌린다.
+// 크론과 같은 스크립트를 그대로 띄워 로직이 갈라지지 않게 한다. 매입처 로그인·조회로 1~5분(스크립트 자체 5분 가드) 걸리므로
+// 직렬 쿠팡 쓰기 폴러를 막지 않게 자식 프로세스로 띄우고, 끝나면 요약 줄을 읽어 잡을 닫는다.
+const GGSAN_SYNC_SCRIPT = path.join(__dirname, 'local-cron-ggsan-sync.mjs')
+const STATUS_SYNC_TIMEOUT_MS = 8 * 60 * 1000
+let statusSyncChild = null
+
+/** 스크립트 마지막 요약 줄("[local-cron-ggsan-sync] success auto_upload=… tracked=… (12.3s)") → { ok, msg } */
+function summarizeGgsanSync(out, exitCode) {
+  const lines = String(out ?? '').split(/\r?\n/)
+  const line = [...lines].reverse().find((l) => l.startsWith('[local-cron-ggsan-sync] '))
+  if (!line) {
+    const tail = lines.filter((l) => l.trim()).slice(-3).join(' / ').slice(-300)
+    return { ok: false, msg: `요약 없이 종료(exit ${exitCode})${tail ? ` — ${tail}` : ''}` }
+  }
+  const status = line.split(' ')[1]
+  const kv = Object.fromEntries([...line.matchAll(/(\w+)=([\w.]+)/g)].map((m) => [m[1], m[2]]))
+  const n = (k) => Number(kv[k] ?? 0)
+  const sec = line.match(/\(([\d.]+)s\)\s*$/)?.[1]
+  const parts = [`매입처 추적 ${n('tracked')}건`]
+  if (n('captured')) parts.push(`직접결제 주문 연결 ${n('captured')}건`)
+  if (n('paid')) parts.push(`💰 입금확인 ${n('paid')}건`)
+  if (n('shipped')) parts.push(`🚚 발송 감지 ${n('shipped')}건${kv.auto_upload === 'false' ? '(송장 자동등록 꺼짐 — 화면에서 [확인·등록])' : ''}`)
+  if (n('invoice_ok')) parts.push(`쿠팡 송장등록 ${n('invoice_ok')}건`)
+  if (n('dup')) parts.push(`이미 등록 ${n('dup')}건`)
+  if (n('invoice_err')) parts.push(`⚠ 송장등록 실패 ${n('invoice_err')}건`)
+  if (n('attention')) parts.push(`확인필요 ${n('attention')}건`)
+  if (n('errors')) {
+    // 매입처 로그인·연결 실패 줄("건강산 session: …", "도매아토즈 capture: …") — 그 매입처만 건너뛰고 나머지는 처리됨
+    const errLines = lines.map((l) => l.trim()).filter((l) => / (session|capture): /.test(l)).slice(0, 2)
+    parts.push(`오류 ${n('errors')}건${errLines.length ? `(${errLines.join(' / ').slice(0, 200)})` : ''}`)
+  }
+  return { ok: exitCode === 0 && status === 'success', msg: `${parts.join(' · ')}${sec ? ` (${Math.round(Number(sec))}초)` : ''}` }
+}
+
+async function runStatusSyncJob(job) {
+  const close = (ok, msg) => sb.from('jimscanner_purchase_jobs')
+    .update({ status: ok ? 'done' : 'error', result_msg: String(msg ?? '').slice(0, 500), finished_at: new Date().toISOString() }).eq('id', job.id)
+    .then(() => console.log(`[coupang-job ${job.id}] coupang_status_sync → ${ok ? 'done' : 'error'}: ${msg}`), (e) => console.error('[status-sync] 잡 닫기 실패:', e?.message ?? e))
+  // 크론 회차(또는 앞서 띄운 버튼 회차)가 도는 중이면 겹쳐 돌리지 않는다 — 같은 주문 이중 처리·매입처 동시 로그인 방지.
+  // 비정상 종료로 running 이 남은 행에 영영 막히지 않게 최근 10분(스크립트 5분 가드 + 여유) 안에 시작한 것만 본다.
+  const { data: busy, error: busyErr } = await sb.from('jimscanner_coupang_ggsan_sync_runs')
+    .select('started_at, triggered_by').eq('status', 'running').gte('started_at', new Date(Date.now() - 10 * 60 * 1000).toISOString())
+    .order('started_at', { ascending: false }).limit(1)
+  if (busyErr) console.log(`[status-sync] 실행 중 회차 확인 실패(무시하고 진행): ${busyErr.message}`)
+  if (statusSyncChild || busy?.length) {
+    const who = busy?.[0] ? `${busy[0].triggered_by === 'local-cron' ? '매시 크론' : busy[0].triggered_by} ${new Date(busy[0].started_at).toLocaleTimeString('ko-KR', { timeZone: 'Asia/Seoul', hour: '2-digit', minute: '2-digit' })} 시작` : '앞선 요청'
+    await close(true, `이미 실행 중(${who}) — 끝나면 화면에 반영됩니다. 1~5분 뒤 새로고침하세요`)
+    return
+  }
+  await sb.from('jimscanner_purchase_jobs').update({ status: 'running', started_at: new Date().toISOString() }).eq('id', job.id)
+  let out = ''
+  let closed = false
+  const done = (ok, msg) => { if (closed) return; closed = true; clearTimeout(timer); statusSyncChild = null; close(ok, msg) }
+  const child = spawn(process.execPath, [GGSAN_SYNC_SCRIPT, '--triggered-by=admin-button'], { cwd: path.join(__dirname, '..'), windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] })
+  statusSyncChild = child
+  const timer = setTimeout(() => { child.kill(); done(false, `시간 초과(${STATUS_SYNC_TIMEOUT_MS / 60000}분) — 중단했습니다. 다음 매시 :30 크론이 이어서 처리합니다`) }, STATUS_SYNC_TIMEOUT_MS)
+  const keep = (d) => { out += d; if (out.length > 200_000) out = out.slice(-100_000) }
+  child.stdout.setEncoding('utf8'); child.stdout.on('data', keep)
+  child.stderr.setEncoding('utf8'); child.stderr.on('data', keep)
+  child.on('error', (e) => done(false, `실행 실패: ${e?.message ?? e}`))
+  child.on('close', (code) => { const s = summarizeGgsanSync(out, code); done(s.ok, s.msg) })
+  console.log(`[coupang-job ${job.id}] coupang_status_sync → 실행(pid ${child.pid})`)
+}
+
 let coupangJobBusy = false
 setInterval(async () => {
   beat().catch(() => {}) // busy여도 살아 있음 → busy 검사 앞
   if (coupangJobBusy) return
   coupangJobBusy = true
   try {
-    const { data: jobs } = await sb.from('jimscanner_purchase_jobs').select('id, order_key, mode').eq('status', 'queued').in('mode', ['coupang_ack', 'coupang_invoice', 'coupang_orders_sync', 'naver_confirm', 'naver_dispatch']).order('id', { ascending: true }).limit(5)
+    const { data: jobs } = await sb.from('jimscanner_purchase_jobs').select('id, order_key, mode').eq('status', 'queued').in('mode', ['coupang_ack', 'coupang_invoice', 'coupang_orders_sync', 'coupang_status_sync', 'naver_confirm', 'naver_dispatch']).order('id', { ascending: true }).limit(5)
     for (const job of jobs ?? []) {
+      // 주문 상태 싱크는 1~5분짜리 자식 프로세스 — 띄우기만 하고 기다리지 않는다(아래 runStatusSyncJob 이 끝나면 잡을 닫음)
+      if (job.mode === 'coupang_status_sync') {
+        // 예외가 나도 잡이 queued 로 남아 매 틱 맨 앞에서 다시 집히지 않게(뒤 잡이 굶음) error 로 닫는다
+        try { await runStatusSyncJob(job) } catch (e) {
+          statusSyncChild = null
+          await sb.from('jimscanner_purchase_jobs').update({ status: 'error', result_msg: `실행 오류: ${e instanceof Error ? e.message : e}`.slice(0, 500), finished_at: new Date().toISOString() }).eq('id', job.id)
+        }
+        continue
+      }
       await sb.from('jimscanner_purchase_jobs').update({ status: 'running', started_at: new Date().toISOString() }).eq('id', job.id)
       let ok, msg
       if (job.mode === 'naver_confirm' || job.mode === 'naver_dispatch') {
