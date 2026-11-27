@@ -23,8 +23,9 @@ const BOX_OF = /1\s*(?:BOX|Box|box|박스)\s*\(\s*(\d+)\s*개입\s*\)/g
 const VOL_PAREN_CNT = new RegExp(`(${VOL.source})\\s*\\(\\s*(\\d+)\\s*(캔|페트|PET|병|팩)\\s*\\)`, 'g')
 // 용량 바로 뒤 "(N개입)"은 개당 용량인지 전체 용량인지 이름만으로 모른다 — 삼일유통 밖 공급사 등록 때 보류 판단용
 export const ambiguousPack = (name) => new RegExp(`${VOL.source}\\s*\\(\\s*\\d+\\s*(?:개입|입|개)\\s*\\)`).test(String(name))
+const norm = (name) => String(name || '').replace(UPPER_X, '$1 x').replace(BOX_OF, ' $1개입 ').replace(VOL_PAREN_CNT, '$1 $4$5 ')
 export function specOf(name) {
-  const s = String(name || '').replace(UPPER_X, '$1 x').replace(BOX_OF, ' $1개입 ').replace(VOL_PAREN_CNT, '$1 $4$5 ')
+  const s = norm(name)
   if (/\+|각\s*\d/.test(s)) return { set: true }
   const m = s.match(VOL)
   const vol = m ? normVol(m[1], m[2]) : null
@@ -51,6 +52,40 @@ const brandKey = (name) => {
   if (/^[a-zA-Z]/.test(w)) return w.replace(/[^a-zA-Z&].*$/, '').toLowerCase() || null
   return w.length >= 2 ? w.slice(0, 2) : null
 }
+/**
+ * 쿠팡 제목에 총량 계산에 안 들어간 수량이 있나 — 있으면 박스·묶음 판매일 수 있어 같은 상품으로 보지 않는다(2026-11-27).
+ * 박스 시세가 낱개 시세로 기록돼 "고향 생강한차 50스틱"이 127,410원(8개입 박스 최저가 −1,000원)에 올라간 사고 등 50건.
+ *   ① 괄호 안 수량이 내역(총량과 맞음)이 아님: "생강한차 (8개입) 50스틱 1BOX"(실제 50스틱×8) · "누텔라 370g (1박스-15개)"
+ *      내역·환산이면 통과: "10g x 45T (15개입x3개)" · "800g (40gx20개)" · "12.7 fl oz(375ml) x 2팩" · "15T (15개입)"
+ *   ② 첫 용량 앞의 수량(쉼표 칸으로 이미 곱한 것 제외): "…시찌미 15개 X 240g" · "6개 카페 X 토핑시럽 … 585g"
+ *   ③ 원플러스원·1+1 류
+ */
+export function hiddenPack(title) {
+  const s = norm(title)
+  if (/원\s*플러스\s*원|투\s*플러스\s*원|\d\s*\+\s*\d/.test(s)) return true
+  const t = specOf(title)
+  if (t.set) return false // 세트는 titleMatches 가 따로 거른다
+  const near = (a, b) => Math.abs(a - b) <= b * 0.02
+  for (const g of s.matchAll(/\(([^)]*)\)|\[([^\]]*)\]/g)) {
+    const gs = specOf(g[1] ?? g[2])
+    if (gs.set || (!gs.vol && gs.count <= 1)) continue // 수량 정보 없음("(무배)"·"[몰고랑]")
+    const ok = gs.vol
+      ? !!t.vol && gs.vol.u === t.vol.u && (near(gs.total, t.total) || (gs.count === 1 && near(gs.vol.v, t.vol.v)))
+      : gs.count === t.count
+    if (!ok) return true
+  }
+  const m = s.match(VOL)
+  if (m) {
+    const pre = s.slice(0, m.index).replace(/\([^)]*\)|\[[^\]]*\]/g, ' ')
+    const prod = (a) => a.reduce((x, y) => x * y, 1)
+    const all = [...pre.matchAll(CNT_G)].map((x) => +(x[1] || x[2])).filter((n) => n >= 2 && n < 2000)
+    const comma = pre.split(',').slice(1).map((seg) => seg.trim().match(/^(\d+)\s*(?:개입|개|입|팩|박스|봉|병|캔|PET|EA)$/i)).filter(Boolean).map((c) => +c[1]).filter((n) => n >= 2 && n < 2000)
+    const extra = prod(all) / prod(comma)
+    // 뒤에서 센 수량을 앞에서 한 번 더 쓴 것("[몰고랑] 사과식초5개 … 360ml x 5개")은 숨은 수량이 아니다
+    if (extra > 1 && extra !== t.count / prod(comma)) return true
+  }
+  return false
+}
 export function titleMatches(ourName, ourSpec, title) {
   const toks = brandless(ourName)
   const flat = String(title).replace(/\s/g, '')
@@ -63,6 +98,14 @@ export function titleMatches(ourName, ourSpec, title) {
   if (!toks.length || hit < Math.ceil((toks.length * 2) / 3)) return false // 3개 중 2개, 2개면 둘 다
   const t = specOf(title)
   if (t.set) return false
+  if (hiddenPack(title)) return false
+  // 농도 표기(2배·3배)가 다르면 다른 상품 — "오뚜기 사과식초 900ml X 5개"가 "오뚜기 3배 사과식초 900ml x 5개"(더 비쌈)와 붙었던 문제(2026-11-27)
+  // 붙여 쓴 "오뚜기2배현미식초"도 잡는다 · "배송·배달·배즙"은 농도가 아님
+  const strength = (n) => String(n).match(/(\d+)\s*배(?!송|달|즙)/)?.[1] ?? null
+  if (strength(ourName) !== strength(title)) return false
+  // 쿠팡 제목에 용량이 없으면 개수로 비교한다("호기마트 야채타임12개 빙그레스낵" 같은 같은 상품 최저가가 많음).
+  // 용량 없는 제목을 아예 빼 봤더니(2026-11-27) 이런 최저가가 빠져 6건이 더 비싼 판매자 가격으로 올라갈 뻔해 되돌림 —
+  // 다른 상품("오뚜기2배현미식초6개")은 위 농도 규칙이 거르고, 남는 오차는 decide 의 2배 상한이 막는다.
   if (ourSpec.vol && t.vol) return ourSpec.vol.u === t.vol.u && Math.abs(ourSpec.total - t.total) <= ourSpec.total * 0.02
   return ourSpec.count === t.count && ourSpec.count > 1
 }

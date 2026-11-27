@@ -19,6 +19,7 @@ export const MIN_ABS = 2000
 export const UNDERCUT_KRW = 1000 // 같은 상품 최저가보다 1,000원 싸게
 export const UNDERCUT = 0.01 // 1,000원을 못 깎으면 1%
 export const MIN_P25_MATCHES = 3
+export const MAX_MARKET_RATIO = 2 // 시세 최저가가 15% 가격의 이 배수를 넘으면 믿지 않는다(박스·묶음 오매칭)
 
 export const costOf = (wholesale, ship) => (wholesale > 0 ? wholesale + (ship || 0) : null)
 export const floorPrice = (cost, fee = COUPANG_FEE) => Math.max(priceAtMargin(cost, MIN_MARGIN, fee), priceAtAbs(cost, MIN_ABS, fee))
@@ -45,6 +46,10 @@ export function decide(wholesale, ship, prices, { fee = COUPANG_FEE } = {}) {
   const floor = floorPrice(cost, fee), target = Math.max(floor, targetPrice(cost, fee))
   const ps = (prices || []).filter((n) => n > 0)
   const ref = refPrice(ps), low = ps.length ? Math.min(...ps) : null
+  // 최저가가 우리 15% 가격의 2배를 넘으면 같은 상품 시세가 아니라 박스·묶음 가격일 가능성이 크다 — 시세 없음(NO_MATCH)으로 본다(2026-11-27).
+  // 제목에 수량이 안 드러난 박스("광야식품 청포도 베이스 970ml" 67,500원 · "이금기 해선장 2270g" 106,790원)가 시세로 들어와 판매가가 2~5배로 올라간 사고.
+  // NO_MATCH 라 재가격은 그대로 두고, --no-market 등록·채점은 15% 가격으로 간다. suspect 로 표시해 화면·로그에서 구분.
+  if (low && low > target * MAX_MARKET_RATIO) return { cost, floor, target, ref, ceiling: null, price: null, net: null, margin: null, verdict: 'NO_MATCH', suspect: true }
   let ceiling = low ? Math.floor((low - UNDERCUT_KRW) / 10) * 10 : null
   // 1,000원을 못 깎으면 최저가 −1%, 그것도 하한 밑이면 기준 시세(P25) −1% — 로켓·특가 최저가 아래로는 못 팔아도 대부분보다는 싸게(옛 규칙)
   if (ceiling != null && ceiling < floor) ceiling = ceil10(low * (1 - UNDERCUT))

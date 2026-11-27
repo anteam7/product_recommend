@@ -1,7 +1,7 @@
 // node --test scripts/lib/domeatoz-spec.test.mjs — 도매아토즈 규격 해석(삼일유통 표기 + 2026-11-20 다른 공급사 표기)
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { specOf, purchaseSpecOf, titleMatches, ambiguousPack } from './domeatoz-spec.mjs'
+import { specOf, purchaseSpecOf, titleMatches, ambiguousPack, hiddenPack } from './domeatoz-spec.mjs'
 
 const tot = (n) => specOf(n).total
 const cnt = (n) => specOf(n).count
@@ -95,4 +95,40 @@ test('titleMatches — 회사명이 빠진 쿠팡 제목은 단어 2개 이상�
   assert.equal(titleMatches(lt, specOf(lt), '레쓰비 마일드 커피, 240ml, 60개'), true)
   const dy = '동일 생강차 50T'
   assert.equal(titleMatches(dy, specOf(dy), '자연생각 대추 생강차, 18g, 50개입, 1개'), false)
+})
+
+test('hiddenPack · titleMatches — 박스·묶음 수량이 숨은 쿠팡 제목은 다른 상품(2026-11-27 생강한차 50스틱 127,410원 사고)', () => {
+  const m = (ours, title) => titleMatches(ours, specOf(ours), title)
+  // ① 괄호 안 수량이 내역이 아님
+  assert.equal(m('고향 생강한차 50스틱', '생강한차 (8개입) 50스틱 1BOX 고향'), false)
+  assert.equal(m('누텔라 370g 초콜릿 초코잼', '누텔라 370g (1박스-15개) 초콜릿 초코잼'), false)
+  assert.equal(m('광야식품 시리얼귀리 안동 참마차 60스틱', '60스틱 (4개입) 광야식품 시리얼귀리 안동 1BOX 참마차'), false)
+  // ② 용량 앞의 수량
+  assert.equal(m('이엔푸드 시찌미 향신료조제품 240g 시치미 후리가케', '후리가께 주먹밥재료 후리가케 일본시치미 이엔푸드 시찌미 15개 X 240g 향신료조제품'), false)
+  assert.equal(m('리고 딸기시럽 585g 과일시럽 빙수재료 카페 토핑시럽', '6개 카페 X 토핑시럽 음료시럽 딸기라떼 딸기시럽 리고 빙수재료 요거트 585g 과일시럽'), false)
+  // ③ 원플러스원
+  assert.equal(m('꽃샘 꿀사과차 1kg', '1kg 꽃샘 원플러스원) 꿀사과차 (무배 /'), false)
+  // 농도가 다른 용량 없는 제목은 다른 상품, 용량 없는 같은 상품 제목은 개수로 통과
+  assert.equal(m('오뚜기 양조식초 500ml x 6개', '호기마트 오뚜기2배현미식초6개 양조식초'), false)
+  assert.equal(m('빙그레 야채타임 70g X 12개', '호기마트 야채타임12개 빙그레스낵'), true)
+  // 내역·환산 괄호, 쉼표 칸 수량, 같은 제목은 그대로 통과
+  assert.equal(m('젖병모양 젤리빈스 800g 알록달록 젤리빈', '젖병모양  젤리빈스 800g (40gx20개) 알록달록 젤리빈'), true)
+  assert.equal(m('하인즈 핫도그 렐리쉬 375ml X 2개', 'Heinz 하인즈 핫도그 렐리쉬 소스 12.7 fl oz(375ml) x 2팩'), true)
+  assert.equal(m('움트리 프리미엄 강겨자 410g X 6개 식당 냉면겨자', '움트리 프리미엄 강겨자 410g X 6개 식당 냉면겨자'), true)
+  assert.equal(m('청솔 자판기용 쑥차 900g 1BOX (12개입)', '청솔 자판기용 쑥차 900g 12개입 1BOX 음료 분말 차 머신 재료'), true)
+  assert.equal(m('웰그린 복숭아녹차 340ml (20페트) x 2박스', '웰그린 복숭아녹차 340ml (20페트) x 2박스 shn62177Jv'), true)
+  assert.equal(m('짱구 21곡 초코바 15g x 15개', '[하루셀렉] 초코스낵바 21곡초코바 짱구 21곡 초코바 15g 15개입'), true)
+  assert.equal(hiddenPack('삼양 불닭볶음면, 2개, 140g'), false) // 용량 앞 쉼표 칸 수량은 specOf 가 이미 곱함
+  assert.equal(hiddenPack('동일 달콤우유맛 스틱 15T (15개입)'), false)
+  // 앞에서 같은 수량을 한 번 더 쓴 제목은 통과
+  assert.equal(m('오뚜기 사과식초 360ml x 5개', '[몰고랑] 사과식초5개 오뚜기사과식초 사과식초 360ml x 5개'), true)
+})
+
+test('titleMatches — 농도(2배·3배)가 다르면 다른 상품(2026-11-27)', () => {
+  const m = (ours, title) => titleMatches(ours, specOf(ours), title)
+  assert.equal(m('오뚜기 사과식초 900ml X 5개', '오뚜기 3배 사과식초 900ml x 5개'), false)
+  assert.equal(m('오뚜기 2배 현미식초 900ml x 3개', '오뚜기 2배 현미식초 900ml x 3개 식초'), true)
+  assert.equal(m('오뚜기 2배 현미식초 900ml x 3개', '오뚜기2배현미식초 900ml 3개'), true)
+  assert.equal(m('오뚜기 2배 현미식초 900ml x 3개', '오뚜기 현미식초 900ml x 3개'), false)
+  assert.equal(m('해태 갈아만든배 340ml x 24캔', '해태 갈아만든배 340ml, 24개'), true) // '배'(과일)는 농도 아님
 })

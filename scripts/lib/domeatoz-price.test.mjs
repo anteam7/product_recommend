@@ -41,3 +41,11 @@ test('decideNoMarket — 시세 없음 15% · STRUCTURAL 하한 10% · OK 그대
   assert.equal(ok.verdict, 'OK'); assert.equal(ok.price, 33800)
   assert.equal(decideNoMarket(0, 3000, []).verdict, 'NO_COST')
 })
+
+test('시세가 15% 가격의 2배 초과 = 박스·묶음 의심 → NO_MATCH(suspect), --no-market 은 15%', () => {
+  const t = decide(5913, 3000, []).target // 광야식품 청포도 베이스 970ml: 쿠팡 "최저" 67,500 은 박스 가격
+  const d = decide(5913, 3000, [67500])
+  assert.equal(d.verdict, 'NO_MATCH'); assert.equal(d.suspect, true); assert.equal(d.price, null)
+  assert.equal(decideNoMarket(5913, 3000, [67500]).price, t)
+  assert.equal(decide(5913, 3000, [t * 2]).verdict, 'OK') // 정확히 2배까지는 믿는다
+})
