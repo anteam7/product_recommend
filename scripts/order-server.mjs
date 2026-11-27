@@ -1341,14 +1341,36 @@ async function execPurchase(orderKey, fullMode) {
 }
 
 // ── 원격 결제진행 큐 폴러 — Vercel 어드민(모바일 등)에서 등록한 잡을 이 PC가 집어 실행 ──
-// 직렬 처리(jobBusy). 서버가 죽어 running에 고착된 잡은 새 잡으로 다시 등록하면 됨.
+// 직렬 처리(jobBusy).
+// 결제 도중 멈춘 잡은 '실패'로 단정하지 않는다 — 매입처 주문이 이미 들어갔을 수 있어 사람이 확인하게 안내한다.
+const UNSURE_MSG = '매입처에 주문이 들어갔는지 직접 확인하세요(결제 도중이었을 수 있음) — 안 들어갔으면 결제진행을 다시 누르면 됩니다'
+
+// 서버 시작 시 남은 running 잡 정리(2026-11-27) — 잡을 running 으로 바꾸는 건 이 프로세스의 폴러뿐이라, 시작 시점에 running 인 잡은
+// 이전 프로세스가 죽으며 남긴 것이다(2026-11-25 #1182가 이틀간 running). 그대로 두면 같은 주문 재등록도 "이미 진행 중"(409)으로 막힌다.
+// 결제진행(full·stage)은 매입처 주문이 들어갔을 수 있어 확인 안내, 쿠팡·네이버 쓰기 잡·주문 수집·상태 싱크는 멱등이라 다시 누르면 된다.
+// (주문 상태 싱크 자식 프로세스가 재시작 뒤에도 살아 있으면 결과 기록만 못 할 뿐 — 싱크 자체는 끝까지 돌고 다음 회차와도 겹치지 않는다: runStatusSyncJob 의 running 회차 검사)
+const SERVER_STARTED_AT = new Date().toISOString()
+for (const [modes, msg] of [
+  [['full', 'stage'], `order-server 재시작으로 중단 — ${UNSURE_MSG}`],
+  [['coupang_ack', 'coupang_invoice', 'coupang_orders_sync', 'coupang_status_sync', 'naver_confirm', 'naver_dispatch'], 'order-server 재시작으로 결과 확인 못 함 — 화면을 새로고침해 반영됐는지 보고, 안 됐으면 버튼을 다시 누르세요(다시 해도 안전)'],
+]) {
+  sb.from('jimscanner_purchase_jobs')
+    .update({ status: 'error', result_msg: msg, finished_at: SERVER_STARTED_AT })
+    .eq('status', 'running').in('mode', modes).lt('started_at', SERVER_STARTED_AT).select('id, mode, order_key')
+    .then(({ data, error }) => {
+      if (error) console.error('[startup] 남은 running 잡 정리 실패:', error.message)
+      else if (data?.length) console.log(`[startup] 이전 실행에서 남은 running 잡 ${data.length}건 닫음: ${data.map((j) => `#${j.id} ${j.mode} ${j.order_key}`).join(', ')}`)
+    }, (e) => console.error('[startup] 남은 running 잡 정리 실패:', e?.message ?? e))
+}
+
 let jobBusy = false
 setInterval(async () => {
   if (jobBusy) return
   jobBusy = true
+  let job = null // catch 에서 닫으려고 바깥에 둔다
   try {
     const { data: jobs } = await sb.from('jimscanner_purchase_jobs').select('id, order_key, mode').eq('status', 'queued').in('mode', ['full', 'stage']).order('id', { ascending: true }).limit(1)
-    const job = jobs?.[0]
+    job = jobs?.[0] ?? null
     if (!job) return
     await sb.from('jimscanner_purchase_jobs').update({ status: 'running', started_at: new Date().toISOString() }).eq('id', job.id)
     console.log(`[job ${job.id}] 원격 결제진행 시작 — 주문 ${job.order_key} (${job.mode})`)
@@ -1359,7 +1381,20 @@ setInterval(async () => {
       status: out.ok ? 'done' : 'error', result_msg: out.msg, order_no: out.orderNo ?? null, finished_at: new Date().toISOString(),
     }).eq('id', job.id)
     console.log(`[job ${job.id}] ${out.ok ? '완료' : '실패'}: ${out.msg}`)
-  } catch (e) { console.error('[job-poller]', e instanceof Error ? e.message : e) } finally { jobBusy = false }
+  } catch (e) {
+    const m = e instanceof Error ? e.message : String(e)
+    console.error('[job-poller]', m)
+    // 잡을 집은 뒤 예외(브라우저 newPage 실패 등)면 잡이 running 에 영구 고착됐다(2026-11-25 #1182) → error 로 닫는다.
+    // running 일 때만 — 이미 done/error 로 기록된 뒤의 예외(로그 등)는 덮어쓰지 않는다.
+    if (job) {
+      const { error: ce } = await sb.from('jimscanner_purchase_jobs')
+        .update({ status: 'error', result_msg: `실행 중 오류로 중단(${m.split('\n')[0].slice(0, 160)}) — ${UNSURE_MSG}`, finished_at: new Date().toISOString() })
+        .eq('id', job.id).eq('status', 'running')
+        .then((r) => r, (x) => ({ error: x }))
+      if (ce) console.error(`[job ${job.id}] 잡 닫기 실패: ${ce.message ?? ce}`)
+      else console.log(`[job ${job.id}] 실행 중 오류로 중단 — error 로 닫음`)
+    }
+  } finally { jobBusy = false }
 }, 4000)
 
 // ── 마켓 쓰기 잡 폴러(coupang_ack / coupang_invoice / coupang_orders_sync / naver_confirm / naver_dispatch) ──
